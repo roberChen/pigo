@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -305,5 +306,49 @@ func TestModelCtrlOTogglesExpanded(t *testing.T) {
 	mm = next.(Model)
 	if mm.lastToolCard.expanded {
 		t.Errorf("second Ctrl+O should collapse the card")
+	}
+}
+
+// TestToolCardRendersUnparsedArguments verifies a call whose arguments did not
+// decode to a JSON object still shows what the model sent, labeled as unparsed,
+// instead of rendering a card with no arguments at all. That is what the user
+// sees when the model emits malformed tool-call JSON and the executor rejects it.
+func TestToolCardRendersUnparsedArguments(t *testing.T) {
+	theme := DefaultTheme()
+	card := newToolCard("c1", "todo", []byte(`{"todos": []{}}`))
+	if card.input != nil {
+		t.Fatalf("input = %#v, want nil for arguments that do not parse", card.input)
+	}
+	if card.rawArgs == "" {
+		t.Fatal("rawArgs should keep the malformed payload")
+	}
+	out := card.render(theme, 60)
+	for _, want := range []string{"todo", "Input arguments (unparsed)", `{"todos": []{}}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestRawToolArgs verifies which payloads are kept for display: a parsed object
+// needs no raw fallback, the empty-object forms are not noise, and a long
+// malformed payload is clipped.
+func TestRawToolArgs(t *testing.T) {
+	parsed := map[string]any{"path": "a.go"}
+	if got := rawToolArgs(map[string]any{"path": "a.go"}, parsed); got != "" {
+		t.Errorf("parsed arguments should not keep raw text, got %q", got)
+	}
+	for _, empty := range []any{[]byte(`{}`), `null`, json.RawMessage("  "), nil} {
+		if got := rawToolArgs(empty, nil); got != "" {
+			t.Errorf("rawToolArgs(%v) = %q, want empty", empty, got)
+		}
+	}
+	if got := rawToolArgs(`{"path":`, nil); got != `{"path":` {
+		t.Errorf("rawToolArgs = %q, want the payload verbatim", got)
+	}
+	long := strings.Repeat("x", cardRawArgsLimit+50)
+	got := rawToolArgs(long, nil)
+	if runes := []rune(got); len(runes) != cardRawArgsLimit+1 || runes[len(runes)-1] != '…' {
+		t.Errorf("long payload not clipped with an ellipsis: len=%d", len(runes))
 	}
 }

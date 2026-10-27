@@ -112,7 +112,11 @@ func (r *ToolRegistry) Validate(name string, args json.RawMessage) []FieldError 
 	dec := json.NewDecoder(bytes.NewReader(nonEmptyJSON(args)))
 	dec.UseNumber()
 	if err := dec.Decode(&inst); err != nil {
-		return []FieldError{{Field: "", Message: fmt.Sprintf("arguments are not valid JSON: %v", err)}}
+		// Say what to do, not just what failed: models routinely emit truncated or
+		// duplicated keys, and a bare parse error tends to produce another broken
+		// call instead of a retry.
+		return []FieldError{{Field: "", Message: fmt.Sprintf(
+			"arguments are not valid JSON (%v); re-issue the call with a single valid JSON object", err)}}
 	}
 
 	if err := sch.Validate(inst); err != nil {

@@ -475,23 +475,66 @@ func (s *runSession) persist() error {
 // seedTranscript replays a resumed session's prior messages into the transcript
 // so the user sees the conversation so far before re-prompting (the TUI analogue
 // of repl.replayTranscript). User and assistant text become their respective
-// blocks; assistant tool calls render as system lines (tool cards land in #389).
-// Tool-result messages are omitted here — their content is echoed live during a
-// run, and replaying raw results would clutter the resumed view.
-func seedTranscript(t *transcript, history []agentcore.Message) {
+// blocks, and every persisted tool call becomes the same rich card a live run
+// shows: its decoded arguments, status, response tree and (when the result
+// carried one) colored diff, rebuilt from the matching ToolResultMessage by
+// tool-call id. A call whose result never reached the disk keeps its running
+// look; a result whose call was compacted away still gets a card, so the work
+// stays visible.
+//
+// The blocks are appended directly and the transcript re-flows once at the end:
+// replaying through addUser/addToolCard would re-render the whole (growing) log
+// per message, which is quadratic on a long session. It returns the last card so
+// the caller can point Ctrl+O at it.
+func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
+	cards := make(map[string]*toolCard)
+	var last *toolCard
+	appendCard := func(card *toolCard) *toolCard {
+		cards[card.id] = card
+		t.blocks = append(t.blocks, transcriptBlock{role: roleTool, card: card})
+		last = card
+		return card
+	}
+
 	for _, m := range history {
 		switch msg := m.(type) {
 		case agentcore.UserMessage:
 			if text := agentcore.ContentToText(msg.Content); text != "" {
-				t.addUser(text)
+				t.blocks = append(t.blocks, transcriptBlock{role: roleUser, text: text})
+				t.activeAssistant = -1
 			}
 		case agentcore.AssistantMessage:
 			if text := agentcore.ContentToText(msg.Content); text != "" {
-				t.finalizeTurn(msg)
+				t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant, text: text})
 			}
+			t.activeAssistant = -1
 			for _, c := range msg.ToolCalls() {
-				t.addSystem("· " + c.Name)
+				appendCard(newToolCard(c.ID, c.Name, c.Arguments))
 			}
+		case agentcore.ToolResultMessage:
+			card, ok := cards[msg.ToolCallID]
+			if !ok {
+				card = appendCard(&toolCard{id: msg.ToolCallID, name: msg.ToolName, state: cardRunning})
+			}
+			state := cardSuccess
+			if msg.IsError {
+				state = cardWarn
+			}
+			// Mirror the live toolEndMsg path: a reported diff becomes its own
+			// section and is stripped from the response text so it is not shown
+			// twice (#560).
+			result := agentcore.ContentToText(msg.Content)
+			diff := ""
+			if d, ok := ui.DiffFromDetails(msg.Details); ok {
+				diff = d
+				result = stripDiffTail(result)
+			}
+			card.complete(state, parseToolResult(result), diff)
 		}
 	}
+	t.activeAssistant = -1
+	// A replayed turn always lands at the bottom, exactly as a live submit does.
+	t.follow = true
+	t.reflow()
+	return last
 }

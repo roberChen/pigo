@@ -445,10 +445,8 @@ func encodeAnthropicMessage(m agentcore.Message) map[string]any {
 				}
 				blocks = append(blocks, map[string]any{"type": "text", "text": b.Text})
 			case agentcore.ToolCallContent:
-				var input any
-				_ = json.Unmarshal(b.Arguments, &input)
 				blocks = append(blocks, map[string]any{
-					"type": "tool_use", "id": b.ID, "name": b.Name, "input": input,
+					"type": "tool_use", "id": b.ID, "name": b.Name, "input": anthropicToolInput(b.Arguments),
 				})
 			}
 		}
@@ -467,6 +465,21 @@ func encodeAnthropicMessage(m agentcore.Message) map[string]any {
 	default:
 		return nil
 	}
+}
+
+// anthropicToolInput decodes a tool call's arguments for the Messages wire. The
+// API requires tool_use.input to be a JSON object, so arguments that do not
+// decode to one — the malformed JSON a model can stream, which pigo keeps
+// verbatim so the executor can report it to the model, or a non-object value —
+// degrade to an empty object instead of null or a bogus shape. Echoing them
+// as-is would make every later request in the conversation fail with a 400; the
+// model has already been told the arguments did not parse.
+func anthropicToolInput(args json.RawMessage) map[string]any {
+	var input map[string]any
+	if err := json.Unmarshal(args, &input); err != nil || input == nil {
+		return map[string]any{}
+	}
+	return input
 }
 
 // anthropicUserContent shapes a user content list for the Anthropic Messages

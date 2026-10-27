@@ -24,11 +24,13 @@ type turnEndMsg struct {
 
 // toolStartMsg is emitted before a tool runs. input holds the decoded call
 // arguments when they are a JSON object; it is nil otherwise (the raw Args are
-// an untyped any at the event layer).
+// an untyped any at the event layer), in which case rawArgs carries the argument
+// text verbatim so the card can show the malformed payload.
 type toolStartMsg struct {
-	id    string
-	name  string
-	input map[string]any
+	id      string
+	name    string
+	input   map[string]any
+	rawArgs string
 }
 
 // toolUpdateMsg carries a partial result streamed during a tool's execution.

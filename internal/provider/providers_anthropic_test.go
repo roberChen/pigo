@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/smallnest/pigo/internal/agentcore"
 )
 
 // TestAnthropicProtocolProviderRegistrySpecs asserts the registry metadata for
@@ -196,4 +198,45 @@ func keysOf(m map[string]any) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+// TestEncodeAnthropicInvalidToolArguments verifies a conversation containing a
+// tool call whose arguments did not decode (malformed JSON from the model, kept
+// verbatim so the executor can report it) still encodes to a valid request:
+// tool_use.input must be an object, never null or a raw string, or every later
+// request in the conversation would be rejected by the Messages API.
+func TestEncodeAnthropicInvalidToolArguments(t *testing.T) {
+	for _, args := range []string{`{"path":`, `not json`, `"just a string"`, `[1,2]`} {
+		msg := agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewToolCallContent("call-1", "read", json.RawMessage(args))},
+			StopReason: agentcore.StopReasonToolUse,
+		}
+		encoded := encodeAnthropicMessage(msg)
+		blocks, ok := encoded["content"].([]map[string]any)
+		if !ok || len(blocks) != 1 {
+			t.Fatalf("args=%q: content = %#v, want one tool_use block", args, encoded["content"])
+		}
+		input, ok := blocks[0]["input"].(map[string]any)
+		if !ok || input == nil {
+			t.Errorf("args=%q: input = %#v, want an object", args, blocks[0]["input"])
+		}
+		if blocks[0]["type"] != "tool_use" || blocks[0]["id"] != "call-1" || blocks[0]["name"] != "read" {
+			t.Errorf("args=%q: block = %#v, want the tool_use fields preserved", args, blocks[0])
+		}
+	}
+}
+
+// TestEncodeAnthropicValidToolArguments verifies well-formed arguments are sent
+// through unchanged as the tool_use input object.
+func TestEncodeAnthropicValidToolArguments(t *testing.T) {
+	msg := agentcore.AssistantMessage{
+		RoleField: agentcore.RoleAssistant,
+		Content:   agentcore.ContentList{agentcore.NewToolCallContent("c1", "read", json.RawMessage(`{"path":"a.go"}`))},
+	}
+	blocks := encodeAnthropicMessage(msg)["content"].([]map[string]any)
+	input := blocks[0]["input"].(map[string]any)
+	if input["path"] != "a.go" {
+		t.Errorf("input = %#v, want the arguments preserved", input)
+	}
 }

@@ -106,6 +106,45 @@ func (t ToolCallContent) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// UnmarshalJSON decodes a ToolCallContent, restoring the argument bytes that
+// MarshalJSON had to quote.
+//
+// MarshalJSON emits syntactically invalid arguments (a truncated or duplicated
+// key, as a model can stream) as a JSON string so one malformed tool call cannot
+// abort session persistence or provider re-serialization. Decoding must undo
+// that: a resumed session would otherwise hand the tool a quoted blob and every
+// later request would echo a JSON string where the provider expects an object,
+// turning a recoverable tool error into a broken conversation.
+func (t *ToolCallContent) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Type             string          `json:"type"`
+		ID               string          `json:"id"`
+		Name             string          `json:"name"`
+		Arguments        json.RawMessage `json:"arguments"`
+		ThoughtSignature string          `json:"thoughtSignature,omitempty"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	args := bytes.TrimSpace(w.Arguments)
+	// A quoted payload is the quoted-invalid-arguments form. Unquote it back to
+	// the original bytes; a genuine string argument is not a valid tool input
+	// anyway, so restoring it verbatim is strictly more faithful.
+	if len(args) > 0 && args[0] == '"' {
+		var s string
+		if err := json.Unmarshal(args, &s); err == nil {
+			args = json.RawMessage(s)
+		}
+	}
+	t.Type = w.Type
+	t.ID = w.ID
+	t.Name = w.Name
+	t.Arguments = args
+	t.ThoughtSignature = w.ThoughtSignature
+	return nil
+}
+
 // Constructors set the Type discriminant so callers never desync it.
 
 // NewTextContent returns a TextContent with the type discriminant set.

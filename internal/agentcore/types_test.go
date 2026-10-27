@@ -58,7 +58,8 @@ func TestContentUnknownTypeRejected(t *testing.T) {
 // encode. Without this, session persistence and provider re-serialization would
 // crash the whole turn on a single malformed tool call.
 func TestToolCallInvalidArgumentsMarshal(t *testing.T) {
-	bad := NewToolCallContent("c1", "todo", json.RawMessage(`{"todos": []{}"content": ""x"}`))
+	const badArgs = `{"todos": []{}"content": ""x"}`
+	bad := NewToolCallContent("c1", "todo", json.RawMessage(badArgs))
 	data, err := json.Marshal(bad)
 	if err != nil {
 		t.Fatalf("marshal invalid tool args: %v", err)
@@ -75,13 +76,31 @@ func TestToolCallInvalidArgumentsMarshal(t *testing.T) {
 	if !ok {
 		t.Fatalf("want ToolCallContent, got %T", out[0])
 	}
-	// The raw invalid text is preserved (as the decoded string).
-	var recovered string
-	if err := json.Unmarshal(tc.Arguments, &recovered); err != nil {
-		t.Fatalf("arguments not a JSON string: %v", err)
+	// Decoding restores the original invalid bytes, so a resumed session (and the
+	// next provider request) sees the model's real arguments again.
+	if got := string(tc.Arguments); got != badArgs {
+		t.Errorf("arguments = %q, want the raw invalid bytes back", got)
 	}
-	if recovered != `{"todos": []{}"content": ""x"}` {
-		t.Errorf("raw arguments lost: %q", recovered)
+	if tc.ID != "c1" || tc.Name != "todo" || tc.Type != ContentTypeToolCall {
+		t.Errorf("decoded field loss: %+v", tc)
+	}
+}
+
+// TestToolCallStringifiedArgumentsDecoded verifies a provider that sends
+// arguments as a JSON string of the object (some gateways stringify them) is
+// decoded to the object bytes, not left as a quoted blob.
+func TestToolCallStringifiedArgumentsDecoded(t *testing.T) {
+	payload := `{"type":"toolCall","id":"c9","name":"read","arguments":"{\"path\":\"a.go\"}"}`
+	var cl ContentList
+	if err := json.Unmarshal([]byte("["+payload+"]"), &cl); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tc := cl[0].(ToolCallContent)
+	if got, want := string(tc.Arguments), `{"path":"a.go"}`; got != want {
+		t.Fatalf("arguments = %q, want %q", got, want)
+	}
+	if !json.Valid(tc.Arguments) {
+		t.Errorf("restored arguments are not valid JSON: %s", tc.Arguments)
 	}
 }
 

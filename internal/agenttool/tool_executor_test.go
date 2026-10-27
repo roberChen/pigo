@@ -282,8 +282,8 @@ func TestExecutorResultBudgetDisabled(t *testing.T) {
 // countingTool returns a transient error for its first failN attempts, then
 // succeeds; if failN < 0 it always fails. It records how many times Execute ran.
 type retryStub struct {
-	failN   int   // number of leading failures before success; <0 = always fail
-	err     error // error to return on a failing attempt
+	failN    int   // number of leading failures before success; <0 = always fail
+	err      error // error to return on a failing attempt
 	attempts int32
 }
 
@@ -463,3 +463,49 @@ func TestExecutorRetrySuccessResultWithIsErrorNotRetried(t *testing.T) {
 	}
 }
 
+// TestExecuteToolCallMalformedJSON verifies a tool call whose arguments are not
+// valid JSON becomes an error tool result the model can retry from: the tool
+// never runs, the batch does not terminate, and the message explains both the
+// parse failure and what to do next. A model emitting a truncated or duplicated
+// key is routine; without this handling the turn either ran the tool on garbage
+// or aborted the whole run.
+func TestExecuteToolCallMalformedJSON(t *testing.T) {
+	ran := false
+	cfg := newExecCfg(t, execTool{
+		name:   "read",
+		schema: `{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`,
+		run: func(context.Context, string, json.RawMessage, agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+			ran = true
+			return agentcore.AgentToolResult{}, nil
+		},
+	})
+
+	calls := []agentcore.AgentToolCall{{
+		ID:        "call-1",
+		Name:      "read",
+		Arguments: json.RawMessage(`{"path":`),
+	}}
+	results, terminate := ExecuteToolCalls(context.Background(), BatchConfig{ToolExecutorConfig: cfg}, calls, nil)
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (every call must be answered)", len(results))
+	}
+	if !results[0].IsError {
+		t.Error("malformed arguments should produce an error tool result")
+	}
+	if terminate {
+		t.Error("a malformed call must not terminate the batch")
+	}
+	if ran {
+		t.Error("the tool must not run with arguments that do not parse")
+	}
+	if results[0].ToolCallID != "call-1" || results[0].ToolName != "read" {
+		t.Errorf("result identity = %q/%q, want call-1/read", results[0].ToolCallID, results[0].ToolName)
+	}
+	got := textOf(results[0])
+	for _, want := range []string{"Invalid arguments", "not valid JSON", "re-issue the call with a single valid JSON object"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error result missing %q:\n%s", want, got)
+		}
+	}
+}

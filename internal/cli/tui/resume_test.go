@@ -235,3 +235,36 @@ func TestResumeNotesRecordedProject(t *testing.T) {
 		t.Fatalf("note should name the directory tools run in:\n%s", content)
 	}
 }
+
+// TestResumeRendersToolCards verifies a restored conversation shows the tool
+// calls as the same rich cards a live run produced, in the rendered view: the
+// call's arguments in the header, its response tree, and the success mark. The
+// last replayed card is also wired for Ctrl+O.
+func TestResumeRendersToolCards(t *testing.T) {
+	store := newTestStore(t)
+	id := saveSession(t, store, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("inspect main.go")}},
+		agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewTextContent("Reading it."), agentcore.NewToolCallContent("call-1", "read", []byte(`{"path":"main.go"}`))},
+			StopReason: agentcore.StopReasonToolUse,
+		},
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call-1",
+			ToolName:   "read",
+			Content:    agentcore.ContentList{agentcore.NewTextContent("package main")},
+		},
+	})
+
+	m := resumeTestModel(t, store, id)
+	content := stripANSI(m.View().Content)
+	for _, want := range []string{"read(main.go)", "Input arguments", "package main", "✓"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("restored view is missing %q:\n%s", want, content)
+		}
+	}
+	if m.lastToolCard == nil || m.lastToolCard.name != "read" {
+		t.Fatalf("lastToolCard = %+v, want the replayed read card", m.lastToolCard)
+	}
+}

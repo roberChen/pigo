@@ -57,7 +57,8 @@ func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime
 			}
 			switch e := ev.(type) {
 			case agentcore.ToolExecutionStartEvent:
-				ch <- toolStartMsg{id: e.ToolCallID, name: e.ToolName, input: argsToMap(e.Args)}
+				input := argsToMap(e.Args)
+				ch <- toolStartMsg{id: e.ToolCallID, name: e.ToolName, input: input, rawArgs: rawToolArgs(e.Args, input)}
 			case agentcore.ToolExecutionUpdateEvent:
 				ch <- toolUpdateMsg{id: e.ToolCallID, partial: agentcore.ContentToText(e.PartialResult.Content)}
 			case agentcore.ToolExecutionEndEvent:

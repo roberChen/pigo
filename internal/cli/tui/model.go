@@ -208,9 +208,9 @@ func NewModel(opts Options) Model {
 
 // withSession binds the assembled run session to the model: it wires the real
 // run seam (startRunFn) and, for a resumed session, replays the prior history
-// into the transcript so the user sees the conversation so far before entering
-// interactive mode. Run calls it right after NewModel; the session-less
-// constructor path (tests, pure construction) leaves startRunFn nil.
+// into the transcript (tool cards included) so the user sees the conversation so
+// far before entering interactive mode. Run calls it right after NewModel; the
+// session-less constructor path (tests, pure construction) leaves startRunFn nil.
 func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	m.session = s
 	m.startRunFn = s.startRun
@@ -222,7 +222,9 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	m.live = s.live
 	m.slash = s.slash
 	m.transcript.addBanner(renderBanner(m.theme, m.opts, m.cwd))
-	seedTranscript(&m.transcript, history)
+	// Point Ctrl+O at the last replayed tool card, the way a live run leaves it on
+	// the most recently started call.
+	m.lastToolCard = seedTranscript(&m.transcript, history)
 	return m
 }
 
@@ -394,7 +396,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolStartMsg:
 		// Create a rich tool-call card, index it by id for the later end event, and
 		// append it as an ordered transcript block so it renders inline (#389).
-		card := &toolCard{id: msg.id, name: msg.name, input: msg.input, state: cardRunning}
+		card := &toolCard{id: msg.id, name: msg.name, input: msg.input, rawArgs: msg.rawArgs, state: cardRunning}
 		m.toolCards[msg.id] = card
 		m.lastToolCard = card
 		m.transcript.addToolCard(card)

@@ -35,7 +35,20 @@ interactive REPL/TUI.
   newer release is available, a `Run pigo update to upgrade` hint backed by a
   24h cached background release check. (#467)
 
+### Fixed
+- **Malformed tool-call arguments are recoverable**: when the model emits a
+  tool call whose JSON does not parse (a truncated or corrupted call), the call
+  is rejected with an explanatory error result that tells the model to re-issue
+  it, the run continues, and the TUI card shows the payload that was actually
+  sent. The stored arguments now survive session save/resume verbatim instead of
+  coming back as a quoted blob, and the Anthropic request encoding degrades them
+  to an empty object rather than `null`, which the API rejects.
+
 ### Changed
+- **Restored conversations keep their tool activity**: resuming a session
+  (startup `--resume` or `/resume`) rebuilds the same rich tool-call cards a
+  live run showed — decoded arguments, status, response tree and diff —
+  instead of a bare `· name` line.
 - **`pigo update` semantics**: a no-argument `pigo update` no longer updates
   every installed package; it now self-updates the binary. Update packages
   individually with `pigo update <name>`. (#468)

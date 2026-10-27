@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,5 +208,178 @@ func TestPersistAfterCompaction(t *testing.T) {
 	}
 	if len(msgs) != 2 {
 		t.Fatalf("persisted messages = %d, want 2 (flattened compacted context)", len(msgs))
+	}
+}
+
+// TestResumeSeedsToolCards verifies a resumed session rebuilds the same rich tool
+// cards a live run shows, instead of the bare "· name" lines it used to draw: the
+// card carries the call's decoded arguments, the matching result's response text
+// and status, and the reported diff as its own section. A call whose result never
+// reached the disk keeps its running look, and a result whose call is missing
+// from the replayed history still gets a card so the work stays visible.
+func TestResumeSeedsToolCards(t *testing.T) {
+	store := newTestStore(t)
+	diff := "--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n"
+	id := saveSession(t, store, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("inspect the repo")}},
+		agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewTextContent("Reading it."), agentcore.NewToolCallContent("call-1", "read", []byte(`{"path":"main.go"}`))},
+			StopReason: agentcore.StopReasonToolUse,
+		},
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call-1",
+			ToolName:   "read",
+			Content:    agentcore.ContentList{agentcore.NewTextContent("package main\n\nline two")},
+		},
+		agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewToolCallContent("call-2", "edit", []byte(`{"path":"main.go"}`))},
+			StopReason: agentcore.StopReasonToolUse,
+		},
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call-2",
+			ToolName:   "edit",
+			Content:    agentcore.ContentList{agentcore.NewTextContent("updated main.go\n" + diff)},
+			Details:    map[string]any{"diff": diff},
+		},
+		agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewToolCallContent("call-3", "bash", []byte(`{"command":"go test ./..."}`))},
+			StopReason: agentcore.StopReasonToolUse,
+		},
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call-4",
+			ToolName:   "bash",
+			IsError:    true,
+			Content:    agentcore.ContentList{agentcore.NewTextContent("command failed")},
+		},
+	})
+
+	_, history, err := store.LoadEntries(id)
+	if err != nil {
+		t.Fatalf("LoadEntries: %v", err)
+	}
+	msgs := make(agentcore.MessageList, len(history))
+	for i, e := range history {
+		msgs[i] = e.Message
+	}
+
+	tr := newTranscript(DefaultTheme())
+	last := seedTranscript(&tr, msgs)
+
+	cards := map[string]*toolCard{}
+	for _, b := range tr.blocks {
+		if b.role == roleSystem {
+			t.Errorf("seedTranscript should not emit plain tool lines, got system block %q", b.text)
+		}
+		if b.role == roleTool && b.card != nil {
+			cards[b.card.id] = b.card
+		}
+	}
+	if len(cards) != 4 {
+		t.Fatalf("seeded %d tool cards, want 4", len(cards))
+	}
+
+	read := cards["call-1"]
+	if read == nil || read.state != cardSuccess {
+		t.Fatalf("call-1 card = %+v, want a successful card", read)
+	}
+	if got := read.primaryArg(); got != "main.go" {
+		t.Errorf("call-1 argument = %q, want main.go", got)
+	}
+	if len(read.response) != 3 || !strings.Contains(read.response[0].text, "package main") {
+		t.Errorf("call-1 response = %+v, want the read output", read.response)
+	}
+
+	edit := cards["call-2"]
+	if edit == nil || edit.diff != diff {
+		t.Fatalf("call-2 diff = %q, want the reported diff", edit.diff)
+	}
+	if joined := responseText(edit); strings.Contains(joined, "--- a/") {
+		t.Errorf("diff should be shown only in its own section, response = %q", joined)
+	}
+
+	running := cards["call-3"]
+	if running == nil || running.state != cardRunning || len(running.response) != 0 {
+		t.Errorf("call-3 card = %+v, want a running card with no response", running)
+	}
+
+	orphan := cards["call-4"]
+	if orphan == nil || orphan.state != cardWarn {
+		t.Fatalf("orphan result card = %+v, want a warn card", orphan)
+	}
+	if last == nil || last.id != "call-4" {
+		t.Errorf("returned last card = %+v, want call-4", last)
+	}
+}
+
+// responseText joins a card's parsed response nodes back into text.
+func responseText(c *toolCard) string {
+	var b strings.Builder
+	for _, n := range c.response {
+		b.WriteString(n.text)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// TestResumeSeedsUnparsedToolArguments verifies a persisted malformed tool call
+// survives the session round-trip and is restored as a card showing what the
+// model actually sent. The session file stores such arguments as a JSON string
+// (so persistence cannot fail); decoding must give the raw bytes back, or the
+// resumed card (and the next request) would carry a quoted blob.
+func TestResumeSeedsUnparsedToolArguments(t *testing.T) {
+	store := newTestStore(t)
+	const badArgs = `{"todos": []{}}`
+	id := saveSession(t, store, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("plan the work")}},
+		agentcore.AssistantMessage{
+			RoleField:  agentcore.RoleAssistant,
+			Content:    agentcore.ContentList{agentcore.NewToolCallContent("call-1", "todo", json.RawMessage(badArgs))},
+			StopReason: agentcore.StopReasonToolUse,
+		},
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call-1",
+			ToolName:   "todo",
+			IsError:    true,
+			Content:    agentcore.ContentList{agentcore.NewTextContent(`Invalid arguments for tool "todo": arguments are not valid JSON`)},
+		},
+	})
+
+	_, history, err := store.LoadEntries(id)
+	if err != nil {
+		t.Fatalf("LoadEntries: %v", err)
+	}
+	msgs := make(agentcore.MessageList, len(history))
+	for i, e := range history {
+		msgs[i] = e.Message
+	}
+
+	tr := newTranscript(DefaultTheme())
+	seedTranscript(&tr, msgs)
+
+	var card *toolCard
+	for _, b := range tr.blocks {
+		if b.role == roleTool && b.card != nil {
+			card = b.card
+		}
+	}
+	if card == nil {
+		t.Fatal("no tool card was restored")
+	}
+	if card.rawArgs != badArgs {
+		t.Errorf("rawArgs = %q, want the original malformed arguments", card.rawArgs)
+	}
+	if card.state != cardWarn {
+		t.Errorf("state = %v, want warn (the call errored)", card.state)
+	}
+	out := card.render(DefaultTheme(), 60)
+	if !strings.Contains(out, "Input arguments (unparsed)") || !strings.Contains(out, badArgs) {
+		t.Errorf("restored card does not show the malformed payload:\n%s", out)
 	}
 }

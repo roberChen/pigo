@@ -184,3 +184,26 @@ func TestWaitForEvent(t *testing.T) {
 		t.Errorf("cmd() = %#v, want runEndMsg{err:stop}", got)
 	}
 }
+
+// TestStreamHandlerKeepsMalformedToolArgs verifies a tool start whose arguments
+// are not a JSON object carries the raw payload through to the card, so the user
+// sees what the model actually sent when the call fails validation.
+func TestStreamHandlerKeepsMalformedToolArgs(t *testing.T) {
+	ch := newEventChan()
+	h := newStreamHandler(ch, nil)
+	h.OnEvent(agentcore.ToolExecutionStartEvent{
+		ToolCallID: "call-1",
+		ToolName:   "todo",
+		Args:       json.RawMessage(`{"todos": []{}}`),
+	})
+	msg, ok := (<-ch).(toolStartMsg)
+	if !ok {
+		t.Fatalf("got %T, want toolStartMsg", msg)
+	}
+	if msg.input != nil {
+		t.Errorf("input = %#v, want nil for malformed arguments", msg.input)
+	}
+	if msg.rawArgs != `{"todos": []{}}` {
+		t.Errorf("rawArgs = %q, want the malformed payload", msg.rawArgs)
+	}
+}

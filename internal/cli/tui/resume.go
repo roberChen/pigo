@@ -281,8 +281,9 @@ func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 	// The context-usage readout belongs to the conversation being left, so hide
 	// it until the resumed session reports its own telemetry.
 	m.statusBar.SetTelemetry(telemetryEventView{})
-	seedTranscript(&m.transcript, history)
-	m.transcript.follow = true
+	// Replay the conversation, tool cards included, and leave Ctrl+O pointing at
+	// the last replayed call as a live run would.
+	m.lastToolCard = seedTranscript(&m.transcript, history)
 	m.relayout()
 	if saveErr != nil {
 		m.transcript.addSystem("warning: could not save the previous session: " + saveErr.Error())

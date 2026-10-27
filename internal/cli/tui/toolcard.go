@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -52,12 +53,59 @@ type toolCard struct {
 	state    cardState
 	expanded bool
 
+	// rawArgs holds the argument payload verbatim when it did not decode to a
+	// JSON object — a model can emit malformed tool-call JSON (a truncated or
+	// duplicated key). The call then fails schema validation with an error result
+	// the model can retry from, and the card shows what was actually sent instead
+	// of an empty arguments section.
+	rawArgs string
+
 	// rev counts the mutations that change the card's rendering (result
 	// arrival, expand toggle). The transcript caches each block's rendered text
 	// and re-renders only when the card's rev differs from the one the cache was
 	// built from, so a streamed delta or keystroke elsewhere does not re-draw
 	// every finished card.
 	rev int
+}
+
+// cardRawArgsLimit caps how much unparsed argument text a card shows, so a
+// pathological blob cannot flood the transcript.
+const cardRawArgsLimit = 400
+
+// newToolCard builds a card for a tool call from its untyped arguments. When the
+// arguments are not a JSON object (malformed JSON as a model can stream), the raw
+// text is kept so the card can show it.
+func newToolCard(id, name string, args any) *toolCard {
+	input := argsToMap(args)
+	return &toolCard{id: id, name: name, input: input, rawArgs: rawToolArgs(args, input), state: cardRunning}
+}
+
+// rawToolArgs returns the raw argument text to display when input did not decode
+// (input == nil), clipped to cardRawArgsLimit. Payloads with no textual form, and
+// the empty object a call may legitimately carry, yield "".
+func rawToolArgs(args any, input map[string]any) string {
+	if input != nil {
+		return ""
+	}
+	var s string
+	switch v := args.(type) {
+	case json.RawMessage:
+		s = string(v)
+	case []byte:
+		s = string(v)
+	case string:
+		s = v
+	default:
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" || s == "null" {
+		return ""
+	}
+	if runes := []rune(s); len(runes) > cardRawArgsLimit {
+		s = string(runes[:cardRawArgsLimit]) + "…"
+	}
+	return s
 }
 
 // complete attaches the finished call's outcome (status, parsed response tree
@@ -147,6 +195,12 @@ func (c toolCard) render(theme Theme, width int) string {
 			kv := "  " + k + ": " + fmt.Sprintf("%v", c.input[k])
 			lines = append(lines, theme.ToolBody.Render(WrapToWidth(kv, inner)))
 		}
+	} else if c.rawArgs != "" {
+		// The arguments did not decode to an object: show the text the model
+		// actually produced, labeled, so a malformed call is visible rather than
+		// looking like a call with no arguments.
+		lines = append(lines, theme.ToolBody.Render("Input arguments (unparsed)"))
+		lines = append(lines, theme.ToolBody.Render(WrapToWidth("  "+c.rawArgs, inner)))
 	}
 
 	if len(c.response) > 0 {
