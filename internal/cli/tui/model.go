@@ -251,9 +251,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Feed the terminal's real background to the Markdown renderer so glamour
 		// picks a matching light/dark palette WITHOUT issuing its own terminal
 		// query (which would leak its reply into the input — see SetMarkdownDark).
-		// Re-flow so any already-finalized assistant block re-renders in the right
-		// palette.
+		// Drop the transcript's cached renders and re-flow so every already
+		// finalized assistant block re-renders in the right palette.
 		SetMarkdownDark(msg.IsDark())
+		m.transcript.invalidateRenders()
 		m.transcript.reflow()
 		return m, nil
 
@@ -423,20 +424,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Flip the card's state and attach the parsed response tree. The card is
 		// held by pointer in the transcript, so a reflow re-renders it in place.
 		if card, ok := m.toolCards[msg.id]; ok {
+			state := cardWarn
 			if msg.ok {
-				card.state = cardSuccess
-			} else {
-				card.state = cardWarn
+				state = cardSuccess
 			}
 			// A tool that reported a diff (edit) gets a colored Diff section; the
 			// diff is also embedded in the result text, so strip it there to keep
 			// the card from showing the change twice (#560).
 			result := msg.result
-			if diff, ok := ui.DiffFromDetails(msg.details); ok {
-				card.diff = diff
+			diff := ""
+			if d, ok := ui.DiffFromDetails(msg.details); ok {
+				diff = d
 				result = stripDiffTail(result)
 			}
-			card.response = parseToolResult(result)
+			card.complete(state, parseToolResult(result), diff)
 			m.transcript.reflow()
 		}
 		// Retire the sub-agent's status-panel row (a no-op for non-task tools whose id
@@ -652,7 +653,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Toggle the most-recent tool card between its capped preview and the full
 		// response tree, then re-flow so the change shows inline (#389).
 		if m.lastToolCard != nil {
-			m.lastToolCard.expanded = !m.lastToolCard.expanded
+			m.lastToolCard.toggleExpanded()
 			m.transcript.reflow()
 		}
 		return m, nil

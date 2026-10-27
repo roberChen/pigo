@@ -51,6 +51,30 @@ type toolCard struct {
 	diff     string
 	state    cardState
 	expanded bool
+
+	// rev counts the mutations that change the card's rendering (result
+	// arrival, expand toggle). The transcript caches each block's rendered text
+	// and re-renders only when the card's rev differs from the one the cache was
+	// built from, so a streamed delta or keystroke elsewhere does not re-draw
+	// every finished card.
+	rev int
+}
+
+// complete attaches the finished call's outcome (status, parsed response tree
+// and any diff) and bumps the render revision so the transcript re-renders the
+// card on its next reflow.
+func (c *toolCard) complete(state cardState, response []respNode, diff string) {
+	c.state = state
+	c.response = response
+	c.diff = diff
+	c.rev++
+}
+
+// toggleExpanded flips the response between the capped preview and the full
+// tree, bumping the render revision so the transcript re-renders the card.
+func (c *toolCard) toggleExpanded() {
+	c.expanded = !c.expanded
+	c.rev++
 }
 
 // collapsedResponseLines is how many response lines a card shows before it is

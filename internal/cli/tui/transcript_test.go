@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -320,5 +321,145 @@ func TestModelScrollbarDrag(t *testing.T) {
 	m = apply(t, m, tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
 	if m.draggingScrollbar {
 		t.Error("press off the scrollbar column should not start dragging")
+	}
+}
+
+// TestTranscriptSetSizeSkipsUnchangedReflow pins the keystroke fast path: the
+// model re-runs relayout on every key press, and an unchanged size must not
+// re-flow the transcript (which would re-render the whole conversation, Markdown
+// included, on each typed rune). A height change still re-flows, and the blocks
+// it lays out come from their cached renders rather than being re-rendered.
+func TestTranscriptSetSizeSkipsUnchangedReflow(t *testing.T) {
+	tr := newTranscript(DefaultTheme())
+	tr.setSize(30, 6)
+	tr.addUser("original")
+
+	// Stand-in for "a newer render exists": the cache is what a reflow would use.
+	tr.blocks[0].rendered = "SENTINEL"
+
+	tr.setSize(30, 6) // same width and height: no re-flow
+	if content := tr.vp.GetContent(); strings.Contains(content, "SENTINEL") {
+		t.Fatalf("an unchanged size re-flowed the transcript; content = %q", content)
+	}
+
+	tr.setSize(30, 7) // height changed: re-flow runs and reuses the cached render
+	if content := tr.vp.GetContent(); !strings.Contains(content, "SENTINEL") {
+		t.Fatalf("a height change should re-flow from the cached renders; content = %q", content)
+	}
+}
+
+// TestTranscriptReusesCachedBlockRenders verifies the per-block render cache: a
+// reflow at the same width reuses each block's cached text (so finalized
+// assistant turns are not re-run through glamour), and a width change
+// re-renders them because the wrapping and Markdown layout change.
+func TestTranscriptReusesCachedBlockRenders(t *testing.T) {
+	tr := newTranscript(DefaultTheme())
+	tr.setSize(30, 10)
+	tr.addUser("first")
+	tr.addSystem("second")
+
+	tr.blocks[0].rendered = "CACHED-FIRST"
+	tr.reflow()
+	if content := tr.vp.GetContent(); !strings.Contains(content, "CACHED-FIRST") {
+		t.Fatalf("reflow re-rendered an unchanged block instead of reusing its cache; content = %q", content)
+	}
+
+	tr.setSize(40, 10)
+	content := tr.vp.GetContent()
+	if strings.Contains(content, "CACHED-FIRST") {
+		t.Fatal("a width change must invalidate the cached render")
+	}
+	if !strings.Contains(stripANSI(content), "first") {
+		t.Fatalf("block content missing after re-render at the new width; content = %q", content)
+	}
+}
+
+// TestTranscriptScrollbarColumnSticky verifies the scrollbar column is reserved
+// once and stays reserved across reflows (re-deciding it each time would render
+// every block at both widths on each streamed delta), and is released again when
+// the content shrinks back to fitting.
+func TestTranscriptScrollbarColumnSticky(t *testing.T) {
+	tr := newTranscript(DefaultTheme())
+	tr.setSize(20, 4)
+	for i := 0; i < 10; i++ {
+		tr.addUser("line")
+	}
+	if !tr.narrowed {
+		t.Fatal("an overflowing transcript should reserve a column for the scrollbar")
+	}
+	if tr.width != 19 {
+		t.Fatalf("content width = %d, want 19 (20 minus the scrollbar column)", tr.width)
+	}
+
+	tr.reflow()
+	tr.reflow()
+	if tr.width != 19 {
+		t.Fatalf("content width flipped to %d across reflows, want it to stay 19", tr.width)
+	}
+
+	tr.blocks = tr.blocks[:1]
+	tr.reflow()
+	if tr.narrowed || tr.width != 20 {
+		t.Fatalf("narrowed=%v width=%d after the content fits again, want false/20", tr.narrowed, tr.width)
+	}
+}
+
+// TestToolCardCacheInvalidatedOnCompletion verifies a tool card's cached render
+// is dropped when the call completes: the card is appended while running and its
+// result arrives later, so without the revision bump the transcript would keep
+// showing the empty running card.
+func TestToolCardCacheInvalidatedOnCompletion(t *testing.T) {
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 60, Height: 20})
+	m = apply(t, m, toolStartMsg{id: "c1", name: "bash", input: map[string]any{"command": "ls"}})
+	m = apply(t, m, toolEndMsg{id: "c1", ok: true, result: "file-one.txt"})
+
+	if content := stripANSI(m.View().Content); !strings.Contains(content, "file-one.txt") {
+		t.Fatalf("completed card result missing from the view; got:\n%s", content)
+	}
+}
+
+// TestToolCardExpandInvalidatesRender verifies Ctrl+O's expand toggle bumps the
+// card revision so the transcript re-renders the card with its full response
+// instead of reusing the capped preview.
+func TestToolCardExpandInvalidatesRender(t *testing.T) {
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 60, Height: 30})
+	m = apply(t, m, toolStartMsg{id: "c1", name: "bash", input: map[string]any{"command": "seq 1 10"}})
+	var lines []string
+	for i := 1; i <= 10; i++ {
+		lines = append(lines, fmt.Sprintf("row-%02d", i))
+	}
+	m = apply(t, m, toolEndMsg{id: "c1", ok: true, result: strings.Join(lines, "\n")})
+
+	if content := stripANSI(m.View().Content); !strings.Contains(content, "(Ctrl+O for more)") {
+		t.Fatalf("collapsed card should advertise the expand hint; got:\n%s", content)
+	}
+	if content := stripANSI(m.View().Content); strings.Contains(content, "row-10") {
+		t.Fatal("collapsed card should cap its response lines")
+	}
+
+	m = apply(t, m, tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if content := stripANSI(m.View().Content); !strings.Contains(content, "row-10") {
+		t.Fatalf("expanded card should show every response line; got:\n%s", content)
+	}
+}
+
+// TestFitLine verifies the scrollbar gutter fit: a row already exactly the
+// content width is returned untouched (the per-frame fast path), short rows are
+// padded, and over-wide rows are truncated, always to the exact column width.
+func TestFitLine(t *testing.T) {
+	const width = 10
+	if got := fitLine("abcdefghij", width); got != "abcdefghij" {
+		t.Errorf("exact-width line was rewritten: %q", got)
+	}
+	if got := fitLine("abc", width); got != "abc"+"\x1b[0m"+strings.Repeat(" ", 7) {
+		t.Errorf("short line = %q, want it reset and padded to %d columns", got, width)
+	}
+	if got := fitLine(strings.Repeat("x", 30), width); ui.Width(got) != width {
+		t.Errorf("over-wide line width = %d, want %d: %q", ui.Width(got), width, got)
+	}
+	for _, in := range []string{"", "abc", strings.Repeat("界", 20), "\x1b[31mred\x1b[0m"} {
+		if got := fitLine(in, width); ui.Width(got) != width {
+			t.Errorf("fitLine(%q) width = %d, want %d", in, ui.Width(got), width)
+		}
 	}
 }

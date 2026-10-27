@@ -5,7 +5,7 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 )
@@ -39,10 +39,24 @@ const (
 // prefix applied at render time. For roleTool blocks text is unused and card
 // points at the live tool card (#389); the pointer lets a later toolEndMsg /
 // Ctrl+O mutate the card in place and have it re-render on the next reflow.
+//
+// rendered caches the block's rendered text so a reflow re-renders only what
+// changed. A finalized assistant turn goes through glamour (~1ms per turn), and
+// re-running every turn on each streamed delta or keystroke is what made the
+// TUI lag once a conversation grew. renderOK is false for a block that was
+// never rendered and is cleared whenever the block's text changes;
+// renderWidth/renderRev record what the cache is valid for — the content width
+// the text was wrapped to and, for a tool card, the card revision it was
+// rendered from.
 type transcriptBlock struct {
 	role blockRole
 	text string
 	card *toolCard
+
+	rendered    string
+	renderWidth int
+	renderRev   int
+	renderOK    bool
 }
 
 // transcript is the scrolling message log. It wraps a viewport.Model and keeps
@@ -77,6 +91,14 @@ type transcript struct {
 	// auto-scroll correct across height changes (setSize resizes the viewport
 	// before reflow runs, which would make an AtBottom() sample read false).
 	follow bool
+
+	// narrowed records that the last reflow held one column back for the
+	// scrollbar because the content overflowed. Sticky across reflows so a
+	// scrolling transcript keeps laying its blocks out at the narrow width
+	// instead of re-rendering the whole log at both widths on every delta (the
+	// per-block render cache only pays off when the width is stable). reflow
+	// clears it once the content fits again.
+	narrowed bool
 }
 
 // newTranscript builds an empty transcript with the given theme. The viewport
@@ -94,6 +116,11 @@ func newTranscript(theme Theme) transcript {
 // width. A non-positive dimension is clamped to zero so the viewport never sees
 // a negative extent. width is the total space available; reflow decides whether
 // to spend one column on the scrollbar based on whether the content overflows.
+//
+// An unchanged size is a no-op: the model calls relayout on every keystroke and
+// menu change, and re-flowing there is pure waste because neither the content
+// nor the width changed (the input row/height accounting, not the transcript,
+// is what moved).
 func (t *transcript) setSize(width, height int) {
 	if width < 0 {
 		width = 0
@@ -101,9 +128,23 @@ func (t *transcript) setSize(width, height int) {
 	if height < 0 {
 		height = 0
 	}
+	if width == t.totalWidth && height == t.vp.Height() {
+		return
+	}
 	t.totalWidth = width
 	t.vp.SetHeight(height)
 	t.reflow()
+}
+
+// invalidateRenders drops every block's cached render so the next reflow
+// re-renders all of them. It is needed when something other than the block's
+// own text changes its output — today only the Markdown palette
+// (SetMarkdownDark) — since the per-block cache is keyed on width and card
+// revision alone.
+func (t *transcript) invalidateRenders() {
+	for i := range t.blocks {
+		t.blocks[i].renderOK = false
+	}
 }
 
 // addUser appends a user turn and closes any streaming assistant block, then
@@ -152,7 +193,9 @@ func (t *transcript) appendDelta(delta string) {
 		t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant})
 		t.activeAssistant = len(t.blocks) - 1
 	}
-	t.blocks[t.activeAssistant].text += delta
+	blk := &t.blocks[t.activeAssistant]
+	blk.text += delta
+	blk.renderOK = false
 	t.reflow()
 }
 
@@ -165,6 +208,9 @@ func (t *transcript) finalizeTurn(msg agentcore.AssistantMessage) {
 		if text != "" {
 			t.blocks[t.activeAssistant].text = text
 		}
+		// The streaming block was rendered as plain text; drop that render so the
+		// finalized block is laid out as Markdown on this reflow.
+		t.blocks[t.activeAssistant].renderOK = false
 	} else if text != "" {
 		t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant, text: text})
 	}
@@ -249,25 +295,43 @@ func (t transcript) view() string {
 	bar := strings.Split(t.scrollbar(), "\n")
 	body := strings.Split(t.vp.View(), "\n")
 
-	// Fit every body line to exactly t.width columns (ANSI-aware pad/truncate),
-	// terminating any open style so the bar cell renders on a clean slate.
-	fit := lipgloss.NewStyle().Width(t.width).MaxWidth(t.width)
-
 	var b strings.Builder
-	for i := 0; i < len(bar); i++ {
+	for i := range bar {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		line := ""
-		if i < len(body) {
-			line = body[i]
-		}
-		if t.width > 0 {
-			b.WriteString(fit.Render(line))
+		if i < len(body) && t.width > 0 {
+			b.WriteString(fitLine(body[i], t.width))
 		}
 		b.WriteString(bar[i])
 	}
 	return b.String()
+}
+
+// fitLine clamps one viewport row to exactly width display columns so the
+// scrollbar cell after it lands in the rightmost column: over-wide lines are
+// truncated ANSI-aware, short ones padded. The narrow path keeps a line that is
+// already the right width as-is — the viewport pads its own rows to the content
+// width, so this is the common case and avoids re-laying every row through
+// lipgloss on each frame, which cost ~10µs per row. Padding is preceded by a
+// reset so a dangling SGR from Markdown rendering cannot color it (and through
+// it the bar).
+func fitLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	w := ansi.StringWidth(line)
+	if w == width {
+		return line
+	}
+	if w > width {
+		line = ansi.Truncate(line, width, "")
+		w = ansi.StringWidth(line)
+		if w >= width {
+			return line
+		}
+	}
+	return line + "\x1b[0m" + strings.Repeat(" ", width-w)
 }
 
 // scrollbar renders the one-column vertical scrollbar the height of the
@@ -328,7 +392,7 @@ func (t transcript) scrollbar() string {
 	return b.String()
 }
 
-// reflow re-renders every block to the current width and pushes the joined
+// reflow re-renders the blocks to the current width and pushes the joined
 // content into the viewport. When the follow intent is set it snaps to the
 // bottom so new content auto-scrolls; otherwise the offset is preserved so
 // reading history is not interrupted. follow is tracked in update/scrollToRow
@@ -337,24 +401,40 @@ func (t transcript) scrollbar() string {
 //
 // Width is decided here rather than in setSize so it stays correct as a run
 // streams in new lines (which reach reflow via appendDelta/finalizeTurn, not
-// setSize): the blocks are first laid out at the full width, and only if that
-// overflows the viewport is one column handed back to the scrollbar and the
-// blocks re-laid at totalWidth-1. When the content fits, the transcript keeps
-// the full width and view() draws no bar.
+// setSize): when the content overflows the viewport one column is handed back to
+// the scrollbar and the blocks are laid out at totalWidth-1, otherwise the full
+// width is used and view() draws no bar. Narrowing is sticky (see
+// transcript.narrowed): a scrolling transcript would otherwise have to render
+// every block at both widths on each delta, defeating the per-block render
+// cache. A narrower width never reduces the line count, so a transcript that
+// still fits at totalWidth-1 fits at the full width too and the column is
+// released.
 func (t *transcript) reflow() {
-	t.width = t.totalWidth
-	t.vp.SetWidth(t.width)
-	t.vp.SetContent(t.renderAll())
-
-	// A narrower width never reduces the line count, so if the full-width layout
-	// already overflows it still overflows at totalWidth-1: reserve the scrollbar
-	// column and re-lay the blocks so the body never sits under the bar.
-	if t.totalWidth > 0 && t.vp.TotalLineCount() > t.vp.Height() {
-		t.width = t.totalWidth - 1
-		t.vp.SetWidth(t.width)
-		t.vp.SetContent(t.renderAll())
+	if t.narrowed && t.totalWidth > 0 {
+		t.layout(t.totalWidth - 1)
+		if t.vp.TotalLineCount() > t.vp.Height() {
+			return
+		}
+		// The content fits again at the narrow width, so it also fits at the full
+		// width: release the scrollbar column and re-lay.
+		t.narrowed = false
+		t.layout(t.totalWidth)
+		return
 	}
 
+	t.layout(t.totalWidth)
+	if t.totalWidth > 0 && t.vp.TotalLineCount() > t.vp.Height() {
+		t.narrowed = true
+		t.layout(t.totalWidth - 1)
+	}
+}
+
+// layout renders the blocks at width, hands the result to the viewport, and
+// re-arms the follow intent. Callers own the narrowing decision.
+func (t *transcript) layout(width int) {
+	t.width = width
+	t.vp.SetWidth(width)
+	t.vp.SetContent(t.renderAll())
 	if t.follow {
 		t.vp.GotoBottom()
 	}
@@ -365,40 +445,64 @@ func (t *transcript) reflow() {
 // a new user turn so requests read as visually distinct.
 func (t *transcript) renderAll() string {
 	var b strings.Builder
-	for i, blk := range t.blocks {
+	for i := range t.blocks {
 		if i > 0 {
 			b.WriteByte('\n')
-			if blk.role == roleUser {
+			if t.blocks[i].role == roleUser {
 				b.WriteByte('\n')
 			}
 		}
-		b.WriteString(t.renderBlock(blk, i == t.activeAssistant))
+		b.WriteString(t.blockView(i))
 	}
 	return b.String()
 }
 
-// renderBlock wraps a block's text to the content width and applies the role's
-// theme style. Wrapping happens on the raw text (measured in display columns via
-// WrapToWidth) before styling so ANSI escapes never confuse the width math and
-// no double-width rune is split. A finalized assistant block is rendered as
-// Markdown (fix #3, mirroring the REPL's turn-end render); the still-streaming
-// block (streaming==true) stays plain text because Markdown can only be laid out
-// once the whole block is known.
-func (t transcript) renderBlock(blk transcriptBlock, streaming bool) string {
+// blockView returns block i's rendered text, reusing its cached render when
+// neither its content nor the content width changed. The still-streaming block
+// is never cached: it changes on every delta and renders as plain text, so a
+// cache there would only add bookkeeping.
+func (t *transcript) blockView(i int) string {
+	blk := &t.blocks[i]
+	streaming := i == t.activeAssistant
+	rev := 0
+	if blk.card != nil {
+		rev = blk.card.rev
+	}
+	if blk.renderOK && !streaming && blk.renderWidth == t.width && blk.renderRev == rev {
+		return blk.rendered
+	}
+	out := renderBlock(t.theme, *blk, t.width, streaming)
+	if !streaming {
+		blk.rendered = out
+		blk.renderWidth = t.width
+		blk.renderRev = rev
+		blk.renderOK = true
+	}
+	return out
+}
+
+// renderBlock wraps a block's text to width and applies the role's theme style.
+// Wrapping happens on the raw text (measured in display columns via WrapToWidth)
+// before styling so ANSI escapes never confuse the width math and no double-width
+// rune is split. A finalized assistant block is rendered as Markdown (fix #3,
+// mirroring the REPL's turn-end render); the still-streaming block
+// (streaming==true) stays plain text because Markdown can only be laid out once
+// the whole block is known.
+func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) string {
 	if blk.role == roleTool && blk.card != nil {
-		return blk.card.render(t.theme, t.width)
+		return blk.card.render(theme, width)
 	}
 	switch blk.role {
 	case roleBanner:
 		return blk.text
 	case roleUser:
-		return t.theme.User.Render(WrapToWidth(blk.text, t.width))
+		return theme.User.Render(WrapToWidth(blk.text, width))
 	case roleSystem:
-		return t.theme.System.Render(WrapToWidth(blk.text, t.width))
+		return theme.System.Render(WrapToWidth(blk.text, width))
 	default:
 		if streaming {
-			return t.theme.Assistant.Render(WrapToWidth(blk.text, t.width))
+			return theme.Assistant.Render(WrapToWidth(blk.text, width))
 		}
-		return renderMarkdown(blk.text, t.width)
+		return renderMarkdown(blk.text, width)
 	}
 }

@@ -150,7 +150,7 @@ func wrapLine(out *strings.Builder, line string, width int) {
 	cur := 0 // display width accumulated on the current output line
 	first := true
 	for _, r := range line {
-		rw := ui.Width(string(r))
+		rw := runeWidth(r)
 		if !first && cur+rw > width {
 			out.WriteByte('\n')
 			cur = 0
@@ -159,6 +159,17 @@ func wrapLine(out *strings.Builder, line string, width int) {
 		cur += rw
 		first = false
 	}
+}
+
+// runeWidth reports the display width of r in terminal cells. A printable ASCII
+// rune is one column in every width table, so it skips the grapheme-cluster
+// measurement ui.Width performs — streamed prose is overwhelmingly ASCII, and
+// measuring every rune that way dominated wrapping as an answer grew.
+func runeWidth(r rune) int {
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
+	return ui.Width(string(r))
 }
 
 // TruncateToWidth returns s clipped to at most width display columns, appending
@@ -185,7 +196,7 @@ func TruncateToWidth(s string, width int) string {
 	var b strings.Builder
 	used := 0
 	for _, r := range s {
-		rw := ui.Width(string(r))
+		rw := runeWidth(r)
 		if used+rw > budget {
 			break
 		}
@@ -202,7 +213,7 @@ func fitRunes(s string, width int) string {
 	var b strings.Builder
 	used := 0
 	for _, r := range s {
-		rw := ui.Width(string(r))
+		rw := runeWidth(r)
 		if used+rw > width {
 			break
 		}
