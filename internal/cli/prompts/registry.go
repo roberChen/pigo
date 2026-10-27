@@ -362,11 +362,12 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 			return b.String()
 		},
 	})
-	// /exit, /quit, /compact, /fork, /clone, /tree, /export, /import, /copy,
-	// /session and /status are intercepted by the REPL loop before slash resolution
-	// (they must return from the loop, run an agent stream, or read/swap the active
-	// session/leaf — none of which an Action closure can do). They are registered
-	// here only so /help lists them; their Action is never actually reached.
+	// /exit, /quit, /compact, /fork, /clone, /tree, /rewind, /export, /import,
+	// /resume, /copy, /session and /status are intercepted by the REPL loop before
+	// slash resolution (they must return from the loop, run an agent stream,
+	// read/swap the active session/leaf, or list and load another stored session —
+	// none of which an Action closure can do). They are registered here only so
+	// /help lists them; their Action is never actually reached.
 	for _, c := range []struct{ name, desc string }{
 		{"exit", "exit the REPL"},
 		{"quit", "exit the REPL"},
@@ -377,6 +378,7 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 		{"rewind", "roll files and the conversation back to before an earlier turn: /rewind [n]"},
 		{"export", "export the session to a file: /export [path.jsonl|path.html]"},
 		{"import", "import a JSONL export as a new session: /import <path.jsonl>"},
+		{"resume", "list stored sessions and load one: /resume [n|id]"},
 		{"copy", "copy the most recent assistant reply to the clipboard"},
 		{"session", "show session stats: messages, tokens, model, compactions"},
 		{"status", "show session status: runtime config, context, telemetry, credentials, environment"},

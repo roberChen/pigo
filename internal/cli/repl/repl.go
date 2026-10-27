@@ -441,6 +441,13 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			runImport(out, &deps, line)
 			continue
 		}
+		if line == "/resume" || strings.HasPrefix(line, "/resume ") {
+			// /resume lists the stored sessions and loads a chosen one, swapping
+			// deps.header / deps.agentCtx in place — state a slash Action closure
+			// cannot reach. The guard keeps "/resumed" style names from matching.
+			runResume(out, &deps, line)
+			continue
+		}
 		if line == "/copy" {
 			// /copy writes the most recent assistant text to the clipboard. It is
 			// intercepted here (not a slash Action) because it must read the live
@@ -973,6 +980,80 @@ func runImport(out io.Writer, deps *replDeps, line string) {
 		deps.telemetry.Reset()
 	}
 	fmt.Fprintf(out, "imported %d entries from %s → session %s\n", len(entries), path, newHeader.ID)
+}
+
+// resumeListLimit caps how many recent sessions /resume offers to load, so a
+// long session history stays a short, scannable list.
+const resumeListLimit = 20
+
+// runResume handles the /resume command (FR-16): "/resume" lists the stored
+// sessions, newest first and numbered, with enough context to recognize each
+// one; "/resume <n>" loads the n-th of those and "/resume <id>" accepts a
+// session id (or unique prefix, e.g. one printed by `pigo --list-sessions`).
+// Loading swaps the live session in place — header, shared context, branch
+// cursor and telemetry — and replays its transcript, exactly as resuming the
+// same session at startup would.
+func runResume(out io.Writer, deps *replDeps, line string) {
+	arg := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
+	sums, err := deps.store.Summaries(resumeListLimit)
+	if err != nil {
+		fmt.Fprintf(out, "pigo: cannot list sessions: %v\n", err)
+		return
+	}
+	if arg == "" {
+		if len(sums) == 0 {
+			fmt.Fprintln(out, "no stored sessions to resume")
+			return
+		}
+		fmt.Fprintln(out, "stored sessions (run /resume <n> to load one):")
+		now := time.Now()
+		for i, sum := range sums {
+			fmt.Fprintf(out, "  %d. %s\n", i+1, cli.DescribeSession(sum, now))
+		}
+		return
+	}
+
+	id, ok := cli.ResolveSessionArg(arg, sums)
+	if !ok {
+		fmt.Fprintf(out, "no session %q — run /resume to list sessions (1..%d)\n", arg, len(sums))
+		return
+	}
+	// Flush any unsaved tail of the outgoing session first, so switching never
+	// drops a turn (same guard /fork and /clone use).
+	cli.PersistTurn(out, deps)
+	header, entries, err := deps.store.LoadEntries(id)
+	if err != nil {
+		fmt.Fprintf(out, "pigo: cannot load session %s: %v\n", id, err)
+		return
+	}
+	// Swap the live session to the loaded one: rebuild the flat message list,
+	// point the REPL at the loaded header, and mark the on-disk entries as
+	// persisted so the next turn appends a branch from the session's tip.
+	msgs := make(agentcore.MessageList, len(entries))
+	for i, e := range entries {
+		msgs[i] = e.Message
+	}
+	deps.header = header
+	deps.agentCtx.Messages = msgs
+	deps.persisted = len(entries)
+	deps.curLeaf = ""
+	if len(entries) > 0 {
+		deps.curLeaf = entries[len(entries)-1].ID
+	}
+	// A side thread branched from the previous conversation no longer applies,
+	// and cumulative telemetry must not bleed across conversations.
+	deps.lastBtw = nil
+	deps.lastBtwBase = 0
+	if deps.telemetry != nil {
+		deps.telemetry.Reset()
+	}
+	fmt.Fprintf(out, "resumed session %s (%d messages)\n", header.ID, len(msgs))
+	if header.Cwd != "" && deps.cwd != "" && header.Cwd != deps.cwd {
+		// The session was recorded in another project: say so, since tools keep
+		// operating on the launch directory (pigo does not cd).
+		fmt.Fprintf(out, "note: this session was recorded in %s; tools still run in %s\n", header.Cwd, deps.cwd)
+	}
+	replayTranscript(out, msgs)
 }
 
 // runCopy handles the /copy command (US-009, #125): it copies the most recent

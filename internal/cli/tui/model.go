@@ -113,6 +113,9 @@ type Model struct {
 	// It filters slash by the typed prefix; the model intercepts arrow/Tab/Enter
 	// keys to drive it before delegating to the textarea.
 	menu slashMenu
+	// picker is the /resume overlay listing stored sessions (FR-16). While it is
+	// open it owns the arrow / Enter / Esc keys, like the slash menu.
+	picker sessionPicker
 
 	// toolCards indexes the rich tool-call cards (#389, US-006) by tool-call id so
 	// a toolEndMsg can locate the card started earlier and flip its state / attach
@@ -196,6 +199,7 @@ func NewModel(opts Options) Model {
 		slash:      newSlashRegistry(opts, live),
 		live:       live,
 		menu:       newSlashMenu(theme),
+		picker:     newSessionPicker(theme),
 		spinner:    newSpinner(theme),
 		pastes:     make(map[int]string),
 		images:     make(map[int]string),
@@ -336,6 +340,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case sessionListMsg:
+		// The stored-session list for /resume finished loading off the tea loop:
+		// open the picker overlay (or report why nothing can be resumed).
+		return m.applySessionList(msg)
 
 	case spinnerTickMsg:
 		// Advance the working animation and schedule the next frame, but only while
@@ -553,6 +562,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // newline) to the input editor while idle. Keys are matched via KeyPressMsg
 // .String() so the mapping is terminal-independent.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The /resume picker is modal: while it is open the arrows move the
+	// selection, Enter loads the highlighted session, and Esc / Ctrl+C dismiss it
+	// (without quitting the program, unlike Ctrl+C with no overlay). Every other
+	// key is swallowed so the composer cannot be edited behind the overlay.
+	if !m.running && m.picker.active {
+		switch msg.String() {
+		case "up":
+			m.picker.moveUp()
+			return m, nil
+		case "down":
+			m.picker.moveDown()
+			return m, nil
+		case "enter":
+			return m.submitSessionPick()
+		case "esc", "ctrl+c":
+			m.picker.close()
+			m.relayout()
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// While idle with the autocomplete popup open, the arrow / Tab / Esc keys
 	// drive the menu instead of the transcript or textarea (FR-15). Enter is left
 	// to the main switch below, which routes through submit → runSlash so the
@@ -808,6 +839,13 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		m.shutdownRemote()
 		m.quitting = true
 		return m, tea.Quit
+	}
+	// /resume is intercepted before registry resolution (like /rebuild): it lists
+	// the stored sessions and loads one, swapping the whole session and transcript
+	// — work a slash Action closure (string→string) cannot do. The guard keeps a
+	// name like "/resumed" from matching.
+	if line == "/resume" || strings.HasPrefix(line, "/resume ") {
+		return m.runResume(line)
 	}
 	// /memory is intercepted before registry resolution (like /rebuild): it
 	// prints the persistent-memory + infinite-context report, reading the live
@@ -1250,6 +1288,10 @@ func (m Model) renderContent() string {
 	// The autocomplete popup, when open, renders just above the input line as an
 	// overlay (it contributes no rows while idle, so the empty-shell layout is
 	// unchanged).
+	if picker := m.picker.view(width); picker != "" {
+		b.WriteString(picker)
+		b.WriteByte('\n')
+	}
 	if menu := m.menu.view(width); menu != "" {
 		b.WriteString(menu)
 		b.WriteByte('\n')
@@ -1329,7 +1371,7 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows()
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows()
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the

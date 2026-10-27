@@ -579,6 +579,87 @@ func (s *Store) List() ([]SessionHeader, error) {
 	return headers, nil
 }
 
+// SessionSummary is one row of a session-restore listing: the stored header
+// plus a one-line preview of the conversation's first prompt, so a user can
+// recognize a session before resuming it.
+type SessionSummary struct {
+	Header  SessionHeader
+	Preview string
+}
+
+// Summaries describes the stored sessions, most recently updated first, each
+// with its first-prompt preview. A limit <= 0 lists every session; otherwise
+// only the newest limit are described. Unreadable sessions are skipped, exactly
+// like List.
+func (s *Store) Summaries(limit int) ([]SessionSummary, error) {
+	headers, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(headers) > limit {
+		headers = headers[:limit]
+	}
+	out := make([]SessionSummary, 0, len(headers))
+	for _, h := range headers {
+		out = append(out, SessionSummary{Header: h, Preview: s.Preview(h.ID)})
+	}
+	return out, nil
+}
+
+// Preview returns the first non-empty user prompt of a session collapsed onto
+// one line, or "" when the session holds no user message. The scan stops at
+// that message, so describing a session costs a few lines of I/O instead of a
+// full transcript read even when the conversation is large.
+func (s *Store) Preview(id string) string {
+	f, err := os.Open(s.path(id))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, sessionScanBufInit), sessionScanBufMax)
+	if !sc.Scan() {
+		return ""
+	}
+	var header SessionHeader
+	if err := json.Unmarshal(sc.Bytes(), &header); err != nil {
+		return ""
+	}
+	// v3+ lines are wrapped entries; v1/v2 lines are bare messages (see
+	// readSession). Decode whichever this file uses so old sessions preview too.
+	wrapped := header.Version >= 3
+	for sc.Scan() {
+		raw := sc.Bytes()
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			continue
+		}
+		var msg agentcore.Message
+		if wrapped {
+			var e Entry
+			if err := json.Unmarshal(raw, &e); err != nil {
+				continue
+			}
+			msg = e.Message
+		} else {
+			var one agentcore.MessageList
+			if err := json.Unmarshal([]byte("["+string(raw)+"]"), &one); err != nil || len(one) != 1 {
+				continue
+			}
+			msg = one[0]
+		}
+		if u, ok := msg.(agentcore.UserMessage); ok {
+			if text := oneLine(agentcore.ContentToText(u.Content)); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+// oneLine collapses runs of whitespace (including newlines) into single spaces
+// and trims the result, so a multi-line prompt fits on one listing row.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
 // loadHeader reads only the header line of a session file (cheap for listing).
 func (s *Store) loadHeader(id string) (SessionHeader, error) {
 	f, err := os.Open(s.path(id))

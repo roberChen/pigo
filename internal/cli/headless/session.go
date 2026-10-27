@@ -42,22 +42,29 @@ func SessionStore() (*session.Store, error) {
 	return session.NewStore(filepath.Join(dir, "sessions"))
 }
 
-// PrintSessions prints the stored sessions, most-recent first, to out.
+// PrintSessions prints the stored sessions, most-recent first, to out: one
+// tab-separated line per session with its id, updated time, model, and a
+// preview of its first prompt, so a user can tell which session to resume.
 func PrintSessions(out io.Writer) error {
 	store, err := SessionStore()
 	if err != nil {
 		return err
 	}
-	headers, err := store.List()
+	sums, err := store.Summaries(0)
 	if err != nil {
 		return err
 	}
-	if len(headers) == 0 {
+	if len(sums) == 0 {
 		fmt.Fprintln(out, "no sessions")
 		return nil
 	}
-	for _, h := range headers {
-		fmt.Fprintf(out, "%s\t%s\t%s\n", h.ID, h.UpdatedAt.Local().Format("2006-01-02 15:04"), h.Model)
+	for _, sum := range sums {
+		h := sum.Header
+		line := fmt.Sprintf("%s\t%s\t%s", h.ID, h.UpdatedAt.Local().Format("2006-01-02 15:04"), h.Model)
+		if sum.Preview != "" {
+			line += "\t" + sum.Preview
+		}
+		fmt.Fprintln(out, line)
 	}
 	return nil
 }

@@ -841,3 +841,71 @@ func TestLoadedSessionsWithoutInheritanceReadZero(t *testing.T) {
 		}
 	}
 }
+
+// TestSummariesListsRecentSessions verifies the resumable-session listing that
+// backs /resume: newest first, capped by limit, with a one-line preview of the
+// first user prompt (a multi-line prompt is collapsed), and an empty preview for
+// a session that has no user message yet.
+func TestSummariesListsRecentSessions(t *testing.T) {
+	s := newStore(t)
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+
+	older := SessionHeader{ID: NewID(base), CreatedAt: base, UpdatedAt: base, Model: "old-model", Cwd: "/work/alpha"}
+	olderMsgs := agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("first\nquestion\n  here")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("answer")}},
+	}
+	if err := s.Save(older, olderMsgs); err != nil {
+		t.Fatalf("Save older: %v", err)
+	}
+
+	newer := SessionHeader{ID: NewID(base.Add(time.Hour)), CreatedAt: base.Add(time.Hour), UpdatedAt: base.Add(time.Hour), Model: "new-model"}
+	if err := s.Save(newer, agentcore.MessageList{
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("hi")}},
+	}); err != nil {
+		t.Fatalf("Save newer: %v", err)
+	}
+
+	sums, err := s.Summaries(0)
+	if err != nil {
+		t.Fatalf("Summaries: %v", err)
+	}
+	if len(sums) != 2 {
+		t.Fatalf("Summaries returned %d rows, want 2", len(sums))
+	}
+	if sums[0].Header.ID != newer.ID || sums[1].Header.ID != older.ID {
+		t.Fatalf("Summaries not newest-first: got %s then %s", sums[0].Header.ID, sums[1].Header.ID)
+	}
+	if sums[0].Preview != "" {
+		t.Errorf("assistant-only session preview = %q, want empty", sums[0].Preview)
+	}
+	if got, want := sums[1].Preview, "first question here"; got != want {
+		t.Errorf("preview = %q, want %q (single line, trimmed)", got, want)
+	}
+
+	limited, err := s.Summaries(1)
+	if err != nil {
+		t.Fatalf("Summaries(1): %v", err)
+	}
+	if len(limited) != 1 || limited[0].Header.ID != newer.ID {
+		t.Fatalf("Summaries(1) = %+v, want only the newest session", limited)
+	}
+}
+
+// TestPreviewReadsLegacySchema verifies Preview works for a v1/v2 session whose
+// entry lines are bare messages rather than v3 wrapped entries, so old sessions
+// still appear with a recognizable preview in /resume.
+func TestPreviewReadsLegacySchema(t *testing.T) {
+	s := newStore(t)
+	id := "20260101-000000-000000"
+	const legacy = `{"version":2,"id":"20260101-000000-000000","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}
+{"role":"user","content":[{"type":"text","text":"legacy question"}]}
+{"role":"assistant","content":[{"type":"text","text":"legacy answer"}]}
+`
+	if err := writeFile(filepath.Join(s.Dir(), FileName(id)), legacy); err != nil {
+		t.Fatalf("write legacy session: %v", err)
+	}
+	if got, want := s.Preview(id), "legacy question"; got != want {
+		t.Fatalf("Preview(legacy) = %q, want %q", got, want)
+	}
+}

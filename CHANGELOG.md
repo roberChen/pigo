@@ -12,6 +12,12 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **In-session session restore**: `/resume` lists the stored sessions with
+  their age, project, model and first-prompt preview; the TUI opens a picker
+  (arrows to move, Enter to load, Esc to cancel) and the line REPL accepts
+  `/resume <n>` or `/resume <id>`. Loading swaps the live conversation in
+  place — no restart — and replays its history. `pigo --list-sessions` now
+  shows the same first-prompt preview.
 - **Tool-level admission control**: `--allowed-tools` / `--disallowed-tools`
   (repeatable, comma-separated, case-insensitive) narrow the tool set handed to
   the model, filling the gap between the full set and `--no-tools`. Deny wins
