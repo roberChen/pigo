@@ -12,6 +12,16 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **`question` tool (human-in-the-loop)**: the model can ask the operator a
+  question through a tool call and continue with the answer. The TUI shows the
+  question just above the composer (digit picks a suggested option, typing plus
+  Enter answers, Esc cancels the run); the line REPL prints it and reads a line
+  from the shared input, serialized with the tool-confirmation prompt. Runs
+  without interactive input (headless `-p`, sub-agents, autonomous goals) get an
+  actionable error result telling the model to proceed with a stated assumption
+  instead of blocking. Questions always run sequentially so prompts never
+  interleave, `--allowed-tools` / `--disallowed-tools` apply as for any tool, and
+  the tool is withheld from sub-agents.
 - **In-session session restore**: `/resume` lists the stored sessions with
   their age, project, model and first-prompt preview; the TUI opens a picker
   (arrows to move, Enter to load, Esc to cancel) and the line REPL accepts

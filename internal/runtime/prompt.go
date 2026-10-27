@@ -69,7 +69,8 @@ type PromptConfig struct {
 const DefaultBaseInstruction = "You are pigo, a helpful coding agent. " +
 	"Use the available tools to inspect files and accomplish the user's request precisely and concisely.\n\n" +
 	todoGuide + "\n\n" +
-	taskGuide
+	taskGuide + "\n\n" +
+	questionGuide
 
 // todoGuide instructs the model on how to drive the todo tool. It is appended to
 // the default base instruction so multi-step work is planned and its progress is
@@ -91,6 +92,16 @@ const taskGuide = "When work splits into independent subtasks, delegate them wit
 	"returns its final report. To fan out, emit MULTIPLE task calls in a single message — they run in " +
 	"parallel. Give each a complete, self-contained prompt, since a sub-agent shares none of this " +
 	"conversation's context. Do the work directly for a single, sequential, or trivial task."
+
+// questionGuide instructs the model on the question tool: the one way to ask the
+// operator something mid-run. It is deliberately narrow — an agent that stops to
+// ask trivia is worse than one that states a reasonable assumption — while making
+// clear that the answer arrives as a tool result, so the run continues.
+const questionGuide = "When you genuinely need a decision only the user can make " +
+	"(an ambiguous requirement, a destructive or irreversible choice, information you cannot " +
+	"find), ask them with the question tool and continue once the answer arrives. Offer a few " +
+	"concise options when the answer is a choice. Do not ask about permissions (the tool layer " +
+	"handles trust) or things you can settle yourself; state an assumption instead."
 
 // BuildSystemPrompt assembles the full system prompt from cfg: base instruction,
 // environment block, then AGENTS.md files ordered general-to-specific from Root

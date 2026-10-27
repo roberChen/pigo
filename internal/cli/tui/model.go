@@ -117,6 +117,11 @@ type Model struct {
 	// open it owns the arrow / Enter / Esc keys, like the slash menu.
 	picker sessionPicker
 
+	// ask is the pending question from the question tool (agentcore asker seam):
+	// the run is blocked on the operator's answer, the prompt is shown above the
+	// composer, and the composer becomes the answer field.
+	ask *askPrompt
+
 	// toolCards indexes the rich tool-call cards (#389, US-006) by tool-call id so
 	// a toolEndMsg can locate the card started earlier and flip its state / attach
 	// the parsed response. Each card is also appended to the transcript as an
@@ -348,6 +353,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// open the picker overlay (or report why nothing can be resumed).
 		return m.applySessionList(msg)
 
+	case questionAskedMsg:
+		// The question tool is blocked on the run goroutine until the operator
+		// answers: show the prompt, make the composer the answer field, and keep
+		// draining the run so the spinner and cancel path stay live.
+		m.ask = &askPrompt{question: msg.question, options: msg.options, reply: msg.reply}
+		// Mirror the question to a paired browser so a remote observer sees why the
+		// run paused (the answer is still typed on the terminal).
+		m.remoteEcho("\n? " + msg.question + "\n")
+		m.input.Clear()
+		m.menu.close()
+		m.spinner.pin("Waiting for your answer")
+		m.relayout()
+		return m, tea.Batch(m.input.Focus(), m.pumpNext())
+
 	case spinnerTickMsg:
 		// Advance the working animation and schedule the next frame, but only while
 		// a run is in flight; once idle the tick is not re-issued so the spinner
@@ -504,6 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runEndMsg:
 		m.running = false
 		m.runCh = nil
+		m.ask = nil
 		m.spinner.stop()
 		// The run is over: any still-open sub-agent rows are stale (their tasks ended
 		// with the run), so clear the panel to reclaim its height.
@@ -584,6 +604,30 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
+	}
+
+	// A pending question from the question tool owns the keyboard: a digit picks
+	// the suggested answer at that position, Enter submits what was typed, and
+	// Esc / Ctrl+C cancels the run (the tool then reports the abort to the model).
+	// Everything else edits the answer buffer.
+	if m.ask != nil {
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			return m.cancelAsk()
+		case "enter":
+			// Require an actual answer: an accidental empty Enter must not look like
+			// "the user said nothing" (Esc is the way to abandon the question).
+			if strings.TrimSpace(m.input.Value()) == "" {
+				return m, nil
+			}
+			return m.submitAnswer(m.input.Value())
+		}
+		if answer, ok := m.ask.matchOption(msg.String()); ok {
+			return m.submitAnswer(answer)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
 
 	// While idle with the autocomplete popup open, the arrow / Tab / Esc keys
@@ -1287,6 +1331,12 @@ func (m Model) renderContent() string {
 			b.WriteByte('\n')
 		}
 	}
+	// The question tool's prompt sits directly above the composer, which is the
+	// answer field while it is up (its rows are reserved by relayout).
+	if ask := m.ask.view(m.theme, width); ask != "" {
+		b.WriteString(ask)
+		b.WriteByte('\n')
+	}
 	// The autocomplete popup, when open, renders just above the input line as an
 	// overlay (it contributes no rows while idle, so the empty-shell layout is
 	// unchanged).
@@ -1373,7 +1423,7 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows()
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.ask.rows(m.theme, m.width)
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the

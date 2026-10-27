@@ -135,6 +135,9 @@ func waitForEvent(ch chan tea.Msg) tea.Cmd {
 // (after runEndMsg).
 func startRun(ctx context.Context, agentCtx *agentcore.AgentContext, cfg runtime.RunConfig, onEvent func(agentcore.AgentEvent)) (chan tea.Msg, tea.Cmd) {
 	ch := newEventChan()
-	go pump(ctx, ch, agentCtx, cfg, onEvent)
+	// Install the run's asker: the question tool delivers its question on this
+	// same channel and blocks until the UI answers, so the model can pause
+	// mid-run without a second I/O path (see ask.go).
+	go pump(agentcore.WithAskUser(ctx, askViaChannel(ch)), ch, agentCtx, cfg, onEvent)
 	return ch, waitForEvent(ch)
 }

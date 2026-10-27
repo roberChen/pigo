@@ -202,13 +202,15 @@ func nameSet(names []string) map[string]struct{} {
 }
 
 // ChildToolSet builds the tool set for a task sub-agent: the builtins with
-// "task" removed (the nesting guard capping delegation depth at one), narrowed by
-// the parent's policy.
+// "task" removed (the nesting guard capping delegation depth at one), and with
+// "question" removed too (a child must not prompt the operator mid-delegation;
+// the parent owns the conversation and its turn is what the user is answering),
+// narrowed by the parent's policy.
 //
 // Inheriting the policy is load-bearing, not a nicety. A child that ignored it
 // would be a one-line escape from the boundary: under --disallowed-tools bash the
 // model could dispatch a sub-agent and run bash there instead. Any future spawn
 // path must route through here for the same reason.
 func ChildToolSet(cwd string, policy ToolPolicy) []agentcore.AgentTool {
-	return ApplyToolPolicy(BuiltinToolsExcept(cwd, false, "task"), policy)
+	return ApplyToolPolicy(BuiltinToolsExcept(cwd, false, "task", "question"), policy)
 }

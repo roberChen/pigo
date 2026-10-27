@@ -629,7 +629,10 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 	if deps.schedule != nil {
 		cfg.GetFollowUpMessages = deps.schedule.FollowUpMessages
 	}
-	stream := runtime.StartRun(ctx, deps.agentCtx, cfg)
+	// Install the human-in-the-loop seam for this turn: the question tool reads
+	// the operator's answer from the shared input (serialized with the tool-call
+	// confirmation prompt), so a run can pause for a decision and continue.
+	stream := runtime.StartRun(withAsker(ctx, out, deps), deps.agentCtx, cfg)
 
 	// The assistant reply is Markdown, which can only be laid out once the whole
 	// block is known, so streamed text is buffered here and rendered at turn end

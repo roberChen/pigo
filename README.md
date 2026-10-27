@@ -44,7 +44,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 
 - **两种模式**：无头 `-p` 一次性执行（适合脚本 / CI），或直接进入交互式 REPL。
 - **多 Provider**：OpenRouter（默认）、本地 Ollama、NVIDIA NIM、Anthropic、任意 OpenAI 兼容端点。
-- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash`）/ `todo` / `webfetch`。
+- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash`）/ `todo` / `question`（toolcall 提问）/ `webfetch`。
 - **会话续跑**：`--list-sessions` / `--resume` / `--continue`，无头与 REPL 均可续跑。
 - **stream-json 输出**：逐行 JSON 事件，首个事件携带 `session_id`，便于调用方关联。
 - **系统提示词分层组装**：base 指令 + 环境块 + `AGENTS.md`（general→specific）+ `--append-system-prompt`。
@@ -287,6 +287,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `bash_output` | 读取后台 bash 任务的增量输出 |
 | `kill_bash` | 终止后台 bash 任务 |
 | `todo` | 记录/更新结构化任务清单，每次提交整份列表（pending/in_progress/completed） |
+| `question` | 通过 toolcall 向用户提问并等待回答（可带若干候选选项，用户也可自由作答）。TUI 在输入框上方弹出提问（数字键选选项、直接输入后回车作答、Esc 取消本轮），REPL 在终端打印问题并读取一行；无交互输入的场景（`-p` 无头运行、子 Agent）会返回可执行的错误结果，提示模型按合理假设继续 |
 | `webfetch` | 抓取 URL 并转为精简 Markdown 正文，HTTP 自动升级 HTTPS |
 | `websearch` | 联网搜索并返回标题/URL/摘要，按凭证自动选后端（`TAVILY_API_KEY`→Tavily，`BRAVE_API_KEY`→Brave，否则回落无 key 的 DuckDuckGo），支持 `allowed_domains`/`blocked_domains` 过滤 |
 | `memory_search` | 检索持久化记忆（`memory.enabled = false` 或 `--no-tools` 时不注册） |
