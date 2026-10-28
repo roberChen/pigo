@@ -174,3 +174,48 @@ func TestLoadFileConfig_DreamTableAbsent(t *testing.T) {
 		t.Errorf("absent dream table = %+v, want zero-value", cfg.Dream)
 	}
 }
+
+// TestLoadFileConfigProviderTables verifies the [[providers]] array of tables
+// decodes into ProviderConfig entries, so a third-party provider can be declared
+// in config.toml.
+func TestLoadFileConfigProviderTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+model = "primary-model"
+
+[[providers]]
+name = "mycorp"
+protocol = "anthropic"
+base_url = "https://llm.mycorp.test"
+env_var = "MYCORP_API_KEY"
+credential = "mycorp-work"
+auth = "x-api-key"
+models = ["mycorp-1", "mycorp-2"]
+
+[[providers]]
+name = "local-gw"
+protocol = "openai"
+base_url = "http://127.0.0.1:8080/v1"
+api_key = "inline"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFileConfig(path)
+	if err != nil {
+		t.Fatalf("LoadFileConfig: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers = %d, want 2: %+v", len(cfg.Providers), cfg.Providers)
+	}
+	first := cfg.Providers[0]
+	if first.Name != "mycorp" || first.Protocol != "anthropic" ||
+		first.BaseURL != "https://llm.mycorp.test" || first.EnvVar != "MYCORP_API_KEY" ||
+		first.Credential != "mycorp-work" || first.Auth != "x-api-key" ||
+		len(first.Models) != 2 || first.Models[1] != "mycorp-2" {
+		t.Errorf("first provider = %+v", first)
+	}
+	if got := cfg.Providers[1]; got.Name != "local-gw" || got.APIKey != "inline" {
+		t.Errorf("second provider = %+v", got)
+	}
+}

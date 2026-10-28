@@ -284,7 +284,7 @@ func newREPLLineEditor(in io.Reader, buffered *bufio.Reader, out io.Writer, slas
 		e.remember(h)
 	}
 	seen := map[string]bool{}
-	for _, m := range provider.PresetCatalog {
+	for _, m := range provider.PresetCatalogSnapshot() {
 		if !seen[m.ID] {
 			e.models = append(e.models, m.ID)
 			seen[m.ID] = true

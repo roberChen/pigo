@@ -239,6 +239,11 @@ func (c *CredentialStore) GetAPIKey(ctx context.Context, provider string) string
 	if env := envAPIKey(provider); env != "" {
 		return env
 	}
+	// A custom provider definition may carry its key inline. It ranks below the
+	// environment so a key can be rotated without editing config.
+	if k := customProviderKey(provider); k != "" {
+		return k
+	}
 	return cfgKey
 }
 

@@ -15,6 +15,10 @@
 //	option <key> <value>     set a config option (config.toml keys; last wins)
 //	option reset <key>       clear a list option
 //	hook add <event> [--matcher RE] [--timeout N] --command CMD
+//	provider add <name> [--type openai|anthropic] [--base-url URL]
+//	             [--env-var VAR] [--auth bearer|x-api-key] [--api-key KEY]
+//	             [--model ID ...]      define a third-party provider
+//	provider remove <name>              drop a definition from a lower layer
 //	<Event>() { ...; }       a shell function named after a hook event becomes a
 //	                         hook; it receives the same stdin JSON/env as a
 //	                         command hook and its exit code decides the outcome
@@ -64,6 +68,11 @@ type Pigorc struct {
 	Lists map[string][]string
 	// Hooks are the hooks the scripts defined, keyed by canonical event name.
 	Hooks hooks.HookSet
+	// Providers holds the third-party provider definitions the scripts added,
+	// in the order they were declared (a repeated name replaces the earlier
+	// definition). RemovedProviders names definitions to drop from a lower layer.
+	Providers        []ProviderConfig
+	RemovedProviders []string
 	// Env holds the exported variables whose value differs from the launching
 	// environment; Unset holds the names the script removed.
 	Env   map[string]string
@@ -270,6 +279,14 @@ func (p *Pigorc) parseRecords(records string) {
 				continue
 			}
 			p.addHook(fields[1], fields[2], fields[3], fields[4])
+		case "provider":
+			p.parseProviderRecord(fields)
+		case "providermodel":
+			if len(fields) != 3 {
+				p.warnf("provider model: malformed record %q", line)
+				continue
+			}
+			p.addProviderModel(fields[1], fields[2])
 		case "hookfn":
 			if len(fields) != 4 {
 				p.warnf("hook function: malformed record %q", line)
@@ -283,6 +300,87 @@ func (p *Pigorc) parseRecords(records string) {
 			p.warnf("unknown record %q", fields[0])
 		}
 	}
+}
+
+// parseProviderRecord folds one `provider add|remove` record into p.
+func (p *Pigorc) parseProviderRecord(fields []string) {
+	if len(fields) < 3 {
+		p.warnf("provider: malformed record %v", fields)
+		return
+	}
+	switch fields[1] {
+	case "add":
+		if len(fields) != 8 {
+			p.warnf("provider add: malformed record %v", fields)
+			return
+		}
+		def := ProviderConfig{
+			Name:     strings.TrimSpace(fields[2]),
+			Protocol: strings.TrimSpace(fields[3]),
+			BaseURL:  strings.TrimSpace(fields[4]),
+			EnvVar:   strings.TrimSpace(fields[5]),
+			Auth:     strings.TrimSpace(fields[6]),
+			APIKey:   strings.TrimSpace(fields[7]),
+		}
+		if def.Name == "" {
+			p.warnf("provider add: the provider name must not be empty")
+			return
+		}
+		// A repeated definition replaces the earlier one but keeps any models it
+		// already accumulated, so `provider add x ...` can be refined per flag.
+		if old := p.providerIndex(def.Name); old >= 0 {
+			def.Models = p.Providers[old].Models
+			p.Providers[old] = def
+			return
+		}
+		p.Providers = append(p.Providers, def)
+	case "remove":
+		name := strings.TrimSpace(fields[2])
+		if name == "" {
+			p.warnf("provider remove: the provider name must not be empty")
+			return
+		}
+		for i, def := range p.Providers {
+			if def.Name == name {
+				p.Providers = append(p.Providers[:i], p.Providers[i+1:]...)
+				break
+			}
+		}
+		p.RemovedProviders = append(p.RemovedProviders, name)
+	default:
+		p.warnf("provider: unknown action %q", fields[1])
+	}
+}
+
+// addProviderModel appends one model id to a provider definition, creating the
+// definition when the model was declared before it.
+func (p *Pigorc) addProviderModel(name, id string) {
+	name = strings.TrimSpace(name)
+	id = strings.TrimSpace(id)
+	if name == "" || id == "" {
+		return
+	}
+	i := p.providerIndex(name)
+	if i < 0 {
+		p.Providers = append(p.Providers, ProviderConfig{Name: name})
+		i = len(p.Providers) - 1
+	}
+	for _, existing := range p.Providers[i].Models {
+		if existing == id {
+			return
+		}
+	}
+	p.Providers[i].Models = append(p.Providers[i].Models, id)
+}
+
+// providerIndex returns the position of a provider definition by name, or -1.
+func (p *Pigorc) providerIndex(name string) int {
+	for i, def := range p.Providers {
+		if def.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // addHook registers one command hook on an event, validating the event name.
@@ -415,7 +513,36 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 		}
 	}
 
+	// Third-party provider definitions: script definitions win over the file's,
+	// and `provider remove` drops a lower-layer definition.
+	for _, name := range p.RemovedProviders {
+		cfg.Providers = removeProviderConfig(cfg.Providers, name)
+	}
+	for _, def := range p.Providers {
+		replaced := false
+		for i, existing := range cfg.Providers {
+			if existing.Name == def.Name {
+				cfg.Providers[i] = def
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.Providers = append(cfg.Providers, def)
+		}
+	}
 	return p.Warnings[firstNew:]
+}
+
+// removeProviderConfig drops the definition named name from defs.
+func removeProviderConfig(defs []ProviderConfig, name string) []ProviderConfig {
+	out := defs[:0]
+	for _, def := range defs {
+		if def.Name != name {
+			out = append(out, def)
+		}
+	}
+	return out
 }
 
 // applyOption applies one scalar option to cfg.

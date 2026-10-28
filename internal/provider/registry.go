@@ -17,7 +17,12 @@
 // resolved from the environment at request time (see auth.go) and never logged.
 package provider
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+)
 
 // ProviderSpec is the metadata describing one built-in provider. It is the
 // single source of truth consumed by auth resolution, the --provider flag,
@@ -351,7 +356,7 @@ var providerRegistry = []ProviderSpec{
 }
 
 // providerRegistryByName indexes providerRegistry by provider name for O(1)
-// lookup. Built once at package init.
+// lookup. Built at package init and extended by RegisterCustomProvider.
 var providerRegistryByName = func() map[string]ProviderSpec {
 	m := make(map[string]ProviderSpec, len(providerRegistry))
 	for _, spec := range providerRegistry {
@@ -360,12 +365,128 @@ var providerRegistryByName = func() map[string]ProviderSpec {
 	return m
 }()
 
+// registryMu guards the mutable registry state: the provider specs, the preset
+// catalog/providers list (custom providers add models), and the literal keys a
+// custom provider definition may carry. Registration happens at startup; the
+// lock keeps it safe against concurrent resolution (and against parallel tests).
+var registryMu sync.RWMutex
+
+// customProviderKeys holds API keys supplied inline by a custom provider
+// definition (config.toml or pigorc). The environment still wins over these, so
+// a key can be rotated without editing config.
+var customProviderKeys = map[string]string{}
+
 // LookupProviderSpec returns the ProviderSpec for a provider name and whether it
-// is a known built-in provider. The returned spec is a copy; mutating its slice
-// or map fields is discouraged as they are shared with the registry.
+// is a known provider (built-in or registered custom). The returned spec is a
+// copy; mutating its slice or map fields is discouraged as they are shared with
+// the registry.
 func LookupProviderSpec(name string) (ProviderSpec, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	spec, ok := providerRegistryByName[name]
 	return spec, ok
+}
+
+// RegisterCustomProvider adds a user-defined provider to the registry so it
+// resolves exactly like a built-in one: `--provider <name>` builds its driver
+// from spec (protocol, base URL, auth scheme), `--model <id>` resolves to it when
+// the model id is listed in models, and a bare `--model <name>` selects that
+// provider's first model. models may be empty, in which case only the explicit
+// --provider/--model pair reaches it.
+//
+// apiKey, when non-empty, is an inline key kept out of the environment (so it is
+// never inherited by tools/hooks); the environment still wins, and a named
+// credential reference is preferable.
+func RegisterCustomProvider(spec ProviderSpec, models []PresetModel, apiKey string) error {
+	name := strings.ToLower(strings.TrimSpace(spec.Name))
+	if name == "" {
+		return errors.New("name is required")
+	}
+	if !validProviderName(name) {
+		return fmt.Errorf("invalid name %q (use lowercase letters, digits, '.', '_' or '-')", spec.Name)
+	}
+	spec.Name = name
+	if spec.Protocol == "" {
+		spec.Protocol = ProtocolOpenAI
+	}
+	switch spec.Protocol {
+	case ProtocolOpenAI, ProtocolOpenAIResponses, ProtocolAnthropic:
+	default:
+		return fmt.Errorf("unsupported protocol %q (want openai, openai/resp_api or anthropic)", spec.Protocol)
+	}
+	spec.DefaultBaseURL = strings.TrimSpace(spec.DefaultBaseURL)
+	if spec.DefaultBaseURL == "" && spec.Protocol != ProtocolAnthropic {
+		return errors.New("base_url is required")
+	}
+	if len(spec.EnvVars) == 0 {
+		spec.EnvVars = []string{strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_API_KEY"}
+	}
+	if spec.AuthScheme == "" {
+		if spec.Protocol == ProtocolAnthropic {
+			spec.AuthScheme = AuthXAPIKey
+		} else {
+			spec.AuthScheme = AuthBearer
+		}
+	}
+
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if _, exists := providerRegistryByName[name]; exists {
+		return fmt.Errorf("provider %q is already defined (point a built-in at another endpoint with %s_BASE_URL instead)",
+			name, strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
+	}
+	providerRegistry = append(providerRegistry, spec)
+	providerRegistryByName[name] = spec
+	PresetProviders = append(PresetProviders, PresetProvider{Name: name, EnvVar: spec.EnvVars[0]})
+	for _, m := range models {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			continue
+		}
+		if _, dup := lookupPresetLocked(id); dup {
+			continue
+		}
+		m.Provider = name
+		if m.DisplayName == "" {
+			m.DisplayName = id
+		}
+		PresetCatalog = append(PresetCatalog, m)
+	}
+	if apiKey != "" {
+		customProviderKeys[name] = apiKey
+	}
+	return nil
+}
+
+// validProviderName accepts the characters a provider name may use: a name ends
+// up in flag values, env-var derivation and /model arguments.
+func validProviderName(name string) bool {
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// lookupPresetLocked is LookupPreset without the lock (callers hold registryMu).
+func lookupPresetLocked(id string) (PresetModel, bool) {
+	for _, p := range PresetCatalog {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return PresetModel{}, false
+}
+
+// customProviderKey returns the inline key a custom provider definition carries,
+// or "" when none was configured.
+func customProviderKey(name string) string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return customProviderKeys[name]
 }
 
 // APIKeyEnvHint returns a human-readable hint naming the environment variable(s)
@@ -383,13 +504,18 @@ func APIKeyEnvHint(name string) string {
 // ProviderSpecs returns all built-in provider specs in registry (display) order.
 // Callers must not mutate the returned specs' slice/map fields.
 func ProviderSpecs() []ProviderSpec {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	out := make([]ProviderSpec, len(providerRegistry))
 	copy(out, providerRegistry)
 	return out
 }
 
-// ProviderNames returns all built-in provider names in registry order.
+// ProviderNames returns all provider names (built-in and custom) in registry
+// order.
 func ProviderNames() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	out := make([]string, len(providerRegistry))
 	for i, spec := range providerRegistry {
 		out[i] = spec.Name

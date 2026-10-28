@@ -232,7 +232,10 @@ func ResolveNamedProvider(name, model, baseURL, protocol string, env func(string
 		// the spec name so errors reference the selected provider.
 		return NewAnthropicProtocolProvider(spec.Name, url, spec.AuthScheme, models), spec.Name, nil
 	case ProtocolOpenAI:
-		return NewOpenAICompatibleProvider(url, models), spec.Name, nil
+		// Name the driver after the selected provider so a missing-key error and
+		// image-support rejection reference its own env var (custom providers
+		// included), not a generic OPENAI_API_KEY.
+		return newNamedOpenAICompatProvider(spec.Name, url, models), spec.Name, nil
 	case ProtocolOpenAIResponses:
 		return NewOpenAIResponsesProvider(spec.Name, url, models), spec.Name, nil
 	default:

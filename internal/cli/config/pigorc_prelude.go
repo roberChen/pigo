@@ -78,6 +78,51 @@ hook() {
   __pigo_emit hook "$event" "$matcher" "$timeout" "$command"
 }
 
+# provider add <name> [--type P] [--base-url URL] [--env-var VAR] [--auth S]
+#               [--api-key KEY] [--model ID ...]
+# provider remove <name>
+provider() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    add)
+      local name="${1:-}"
+      if [ -z "$name" ]; then
+        echo "pigorc: provider add needs a name" >&2
+        return 0
+      fi
+      shift || true
+      local type="" base_url="" env_var="" auth="" api_key=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --type|--protocol)
+            type="${2:-}"; shift 2 || break ;;
+          --base-url)
+            base_url="${2:-}"; shift 2 || break ;;
+          --env-var)
+            env_var="${2:-}"; shift 2 || break ;;
+          --auth)
+            auth="${2:-}"; shift 2 || break ;;
+          --api-key)
+            api_key="${2:-}"; shift 2 || break ;;
+          --model)
+            __pigo_emit providermodel "$name" "${2:-}"; shift 2 || break ;;
+          *)
+            echo "pigorc: provider add: unknown argument $1" >&2
+            shift ;;
+        esac
+      done
+      __pigo_emit provider add "$name" "$type" "$base_url" "$env_var" "$auth" "$api_key"
+      ;;
+    remove|rm)
+      __pigo_emit provider remove "${1:-}"
+      ;;
+    *)
+      echo "pigorc: usage: provider add <name> [--type openai|anthropic] [--base-url URL] [--env-var VAR] [--auth bearer|x-api-key] [--api-key KEY] [--model ID]..." >&2
+      ;;
+  esac
+}
+
 # __pigo_env dumps the exported environment as NUL-separated name/value pairs so
 # pigo can diff it and apply whatever the script exported.
 __pigo_env() {

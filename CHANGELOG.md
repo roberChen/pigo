@@ -12,6 +12,18 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **Custom third-party providers from config**: `[[providers]]` tables in
+  `config.toml` (and `provider add <name> ...` in a pigorc) register a gateway
+  that is not in the built-in registry, after which it behaves like one:
+  `--provider <name>` builds its driver from the declared protocol/base URL/auth
+  scheme, listed `models` resolve by id, a bare `--model <name>` selects the
+  first of them, and `/model` plus the preset picker list it. The API key comes
+  from `env_var` (default `<NAME>_API_KEY`), a named credential reference, or an
+  inline `api_key` that stays out of the process environment (the environment
+  still wins, so keys rotate without editing config). `<NAME>_BASE_URL` overrides
+  the endpoint as for built-ins; a name that collides with a built-in, a missing
+  base URL or an unknown protocol warns and is skipped instead of aborting the
+  launch.
 - **`pigorc`: a Bash-script config layer**: `$PIGO_HOME/pigorc` (always) and
   `./.pigorc` (only in a trusted directory) are sourced by one `bash` process at
   startup, so includes, conditionals, variables and `$(command)` secrets work.

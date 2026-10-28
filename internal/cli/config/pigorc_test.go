@@ -418,3 +418,66 @@ func TestLoadPigorcProjectOverridesGlobal(t *testing.T) {
 		t.Errorf("untrusted model = %q, want the global value only", got)
 	}
 }
+
+// TestPigorcProviderDefinitions verifies the `provider add` / `provider remove`
+// DSL: flags become a ProviderConfig, repeated --model accumulates, and applying
+// the script to a FileConfig replaces same-name definitions and drops removed ones.
+func TestPigorcProviderDefinitions(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, `
+provider add mycorp --type openai --base-url "https://llm.mycorp.test/v1" \
+  --env-var MYCORP_KEY --auth bearer --model mycorp-large --model mycorp-small
+provider add othercorp --type anthropic --model claude-custom
+provider remove legacy
+`)
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.Providers) != 2 {
+		t.Fatalf("providers = %+v, want 2", p.Providers)
+	}
+	my := p.Providers[0]
+	if my.Name != "mycorp" || my.Protocol != "openai" || my.BaseURL != "https://llm.mycorp.test/v1" ||
+		my.EnvVar != "MYCORP_KEY" || my.Auth != "bearer" {
+		t.Errorf("mycorp = %+v", my)
+	}
+	if len(my.Models) != 2 || my.Models[0] != "mycorp-large" || my.Models[1] != "mycorp-small" {
+		t.Errorf("mycorp models = %v", my.Models)
+	}
+	if got := p.Providers[1]; got.Name != "othercorp" || got.Protocol != "anthropic" || len(got.Models) != 1 {
+		t.Errorf("othercorp = %+v", got)
+	}
+	if len(p.RemovedProviders) != 1 || p.RemovedProviders[0] != "legacy" {
+		t.Errorf("removed = %v, want [legacy]", p.RemovedProviders)
+	}
+
+	// Applying to a file config: the script's definition wins by name, and the
+	// removed one is dropped.
+	cfg := FileConfig{Providers: []ProviderConfig{
+		{Name: "legacy", BaseURL: "https://old.test"},
+		{Name: "mycorp", BaseURL: "https://file.test", Protocol: "openai"},
+		{Name: "keepme", BaseURL: "https://keep.test"},
+	}}
+	if warnings := p.ApplyToFileConfig(&cfg); len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if len(cfg.Providers) != 3 {
+		t.Fatalf("providers after overlay = %+v, want legacy dropped and 3 kept", cfg.Providers)
+	}
+	byName := map[string]ProviderConfig{}
+	for _, def := range cfg.Providers {
+		byName[def.Name] = def
+	}
+	if _, ok := byName["legacy"]; ok {
+		t.Error("provider remove did not drop the lower-layer definition")
+	}
+	if got := byName["mycorp"]; got.BaseURL != "https://llm.mycorp.test/v1" || len(got.Models) != 2 {
+		t.Errorf("script definition did not win: %+v", got)
+	}
+	if _, ok := byName["keepme"]; !ok {
+		t.Error("unrelated file definitions must survive")
+	}
+}

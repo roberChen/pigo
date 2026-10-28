@@ -679,6 +679,18 @@ func NewOpenAICompatibleProvider(baseURL string, models []Model) Provider {
 	}, baseURL, models)
 }
 
+// newNamedOpenAICompatProvider builds the OpenAI-compatible driver under a
+// specific provider name. A user-defined (or otherwise named) provider uses it so
+// its error messages, including the "missing API key" hint, name its own
+// credential variable instead of a generic OPENAI_API_KEY.
+func newNamedOpenAICompatProvider(name, baseURL string, models []Model) Provider {
+	return newOpenAICompat(openAICompatPreset{
+		name:         name,
+		defaultURL:   "", // caller must supply the endpoint
+		requiresAuth: true,
+	}, baseURL, models)
+}
+
 // newAnthropicCompat builds an Anthropic-Messages driver, falling back to
 // defaultURL when baseURL is empty. It is the shared body of the two
 // Anthropic-wire constructors, which differ only in name, default endpoint, and

@@ -256,6 +256,39 @@ deepseek-main: sk-xxx
 
 Key 解析顺序：OAuth token → `--api-key` → 环境变量 → 配置文件。其他 Provider（google/deepseek/xai/groq/mistral 等）遵循 `<PROVIDER>_API_KEY` 约定。
 
+**自定义第三方 Provider**：内置目录之外的第三方网关可以定义成"和内置一样"的 Provider，之后 `--provider <name>`、`--model <id>` 推断、`/model` 切换、预设列表都能用。两种写法等价：
+
+```toml
+# ~/.config/pigo/config.toml
+[[providers]]
+name     = "mycorp"                        # 名字：小写字母/数字/.-_
+protocol = "openai"                        # openai | anthropic
+base_url = "https://llm.mycorp.com/v1"
+env_var  = "MYCORP_API_KEY"                # 可选，默认 <NAME>_API_KEY
+credential = "mycorp-work"                 # 可选，具名凭据（推荐）
+# api_key = "sk-..."                       # 可选，明文（不推荐，会留在配置文件里）
+auth     = "bearer"                        # 可选，默认 openai=bearer / anthropic=x-api-key
+models   = ["mycorp-large", "mycorp-small"] # 第一个是默认模型
+```
+
+```bash
+# ~/.pigo/pigorc
+provider add mycorp --type openai --base-url "https://llm.mycorp.com/v1" \
+  --env-var MYCORP_API_KEY --model mycorp-large --model mycorp-small
+# provider remove mycorp     # 取消（例如临时屏蔽 config.toml 里的定义）
+```
+
+声明后可以这样用：
+
+```bash
+export MYCORP_API_KEY=sk-...          # 或写进 ~/.pigo/.credentials.yaml
+pigo --provider mycorp --model mycorp-large -p "..."   # 显式指定
+pigo --model mycorp-large -p "..."                     # 由 model id 推断到该 Provider
+pigo --model mycorp -p "..."                           # 裸名字 → 第一个 models
+```
+
+规则与内置一致：`<PROVIDER>_BASE_URL` 可覆盖 base_url；Key 解析顺序为 `--api-key` → 环境变量（含 `env_var`）→ 定义内的 `api_key`/`credential`；名字不能与内置 Provider 重名（要把内置指向别的端点请用 `ZAI_BASE_URL` 这类变量）。定义非法（缺 base_url、未知协议、重名）在启动时告警并被忽略，不影响其他配置。
+
 **使用例子：**
 
 ```bash
@@ -460,10 +493,14 @@ option reset allowed-tools         # 清空列表（例如 source 了公共片�
 option memory.enabled false        # 嵌套表用小圆点
 option checkpoint.push-caps.memory 900
 
-# 2) hook：命令式 hook（和 config.json 的 hooks 等价）
+# 2) provider：定义第三方 Provider（等价于 config.toml 的 [[providers]]）
+provider add mycorp --type openai --base-url "https://llm.mycorp.com/v1" \
+  --env-var MYCORP_API_KEY --model mycorp-large
+
+# 3) hook：命令式 hook（和 config.json 的 hooks 等价）
 hook add PreToolUse --matcher '^bash$' --timeout 5 --command './.pigo/hooks/no-rm.sh'
 
-# 3) hook：函数式 hook —— 函数名就是事件名（大小写/下划线/短横线都认）
+# 4) hook：函数式 hook —— 函数名就是事件名（大小写/下划线/短横线都认）
 PreToolUse() {
   # stdin 是单行 JSON，退出码决定结果：0 放行，2 阻断（stderr 为原因）
   grep -q 'rm -rf /' <<<"$(cat)" && { echo 'dangerous command' >&2; exit 2; }
@@ -471,7 +508,7 @@ PreToolUse() {
 }
 post_tool_use() { gofmt -w . >/dev/null 2>&1 || true; }   # 9 个事件都可用
 
-# 4) export：环境变量（Provider 密钥、PIGO_* 全部可用）
+# 5) export：环境变量（Provider 密钥、PIGO_* 全部可用）
 export ANTHROPIC_API_KEY="$(pass show anthropic)"
 export PIGO_MAX_SUBAGENTS=4
 ```

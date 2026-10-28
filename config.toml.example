@@ -70,6 +70,23 @@ no_skills = false
 # Internal: run as a process-isolated sub-agent JSON-RPC server over stdio (US-019).
 # subagent_rpc = false
 
+# --- Third-party providers (array of tables) ---
+# Define a gateway that is not in pigo's built-in registry, then use it like a
+# built-in one: --provider <name>, --model <id> inference, /model switching and
+# the preset picker all work. Everything except name (and base_url, unless the
+# provider speaks the public Anthropic API) is optional. The key is resolved from
+# env_var (default <NAME>_API_KEY), a named credential, or the environment —
+# prefer those over an inline api_key.
+#
+# [[providers]]
+# name       = "mycorp"
+# protocol   = "openai"                    # openai | anthropic
+# base_url   = "https://llm.mycorp.com/v1"
+# env_var    = "MYCORP_API_KEY"
+# credential = "mycorp-work"               # name in ~/.pigo/.credentials.yaml
+# auth       = "bearer"                    # bearer | x-api-key
+# models     = ["mycorp-large", "mycorp-small"]  # first one is the default
+
 # --- Persistent memory + infinite context (nested tables) ---
 
 # [memory] controls the persistent memory system. All keys are optional and

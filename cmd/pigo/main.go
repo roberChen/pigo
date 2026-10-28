@@ -285,6 +285,12 @@ func main() {
 	}
 	applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
 
+	// Register the third-party providers defined in config.toml / pigorc before
+	// anything resolves a provider: this is what makes `--provider <name>`,
+	// model-id inference and the /model picker treat them like built-ins. A bad
+	// definition warns instead of aborting, so one typo cannot brick the CLI.
+	registerConfiguredProviders(cfg.Providers)
+
 	// A bare provider name ("zai", "deepseek") means that provider's default
 	// model (issue #564): canonicalize once here so every downstream consumer —
 	// SetupEnv, the REPL/TUI live seeds, sub-agent children — carries a real
@@ -394,6 +400,42 @@ func applyFileConfig(opts *cliOptions, cfg config.FileConfig, changed func(strin
 	// the table is absent) so the interactive startup trigger has a resolved
 	// Config. NewConfig treats a nil enabled as true, so dream is on by default.
 	opts.dreamCfg = dream.NewConfig(cfg.Dream.Enabled, cfg.Dream.IntervalDays, cfg.Dream.RecentSessions)
+}
+
+// registerConfiguredProviders registers the third-party provider definitions from
+// config.toml and pigorc. A named credential reference is resolved here (the
+// literal secret stays in $PIGO_HOME/.credentials.yaml); the environment still
+// wins over an inline key, so a key can be rotated without editing config.
+func registerConfiguredProviders(defs []config.ProviderConfig) {
+	for _, def := range defs {
+		key := strings.TrimSpace(def.APIKey)
+		if key == "" && def.Credential != "" {
+			resolved, err := provider.ResolveCredentialReference(provider.CredentialFilePath(), def.Credential)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "pigo: provider %q: credential %q: %v\n", def.Name, def.Credential, err)
+			} else {
+				key = resolved
+			}
+		}
+		spec := provider.ProviderSpec{
+			Name:           def.Name,
+			Protocol:       strings.TrimSpace(def.Protocol),
+			DefaultBaseURL: strings.TrimSpace(def.BaseURL),
+			AuthScheme:     strings.TrimSpace(def.Auth),
+		}
+		if envVar := strings.TrimSpace(def.EnvVar); envVar != "" {
+			spec.EnvVars = []string{envVar}
+		}
+		models := make([]provider.PresetModel, 0, len(def.Models))
+		for _, id := range def.Models {
+			if id = strings.TrimSpace(id); id != "" {
+				models = append(models, provider.PresetModel{ID: id})
+			}
+		}
+		if err := provider.RegisterCustomProvider(spec, models, key); err != nil {
+			fmt.Fprintf(os.Stderr, "pigo: provider %q: %v\n", def.Name, err)
+		}
+	}
 }
 
 // dispatch runs the resolved command and returns a process exit code, writing

@@ -416,7 +416,7 @@ func presetListing(filter string) string {
 	var b strings.Builder
 	b.WriteString("preset providers & models (switch with /model <id>):")
 	shown := 0
-	for _, pv := range provider.PresetProviders {
+	for _, pv := range provider.PresetProvidersSnapshot() {
 		if filter != "" && !strings.EqualFold(filter, pv.Name) {
 			continue
 		}

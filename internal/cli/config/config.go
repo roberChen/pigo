@@ -54,6 +54,11 @@ type FileConfig struct {
 	// Prompts is the config.toml `prompts` array: paths (files or dirs) to load
 	// prompt templates from at the settings tier (mirrors pi's settings prompts).
 	Prompts []string `toml:"prompts"`
+	// Providers defines third-party (custom) providers: endpoints that are not in
+	// pigo's built-in registry. Each entry is registered at startup, so it behaves
+	// like a built-in one: `--provider <name>`, model-id resolution, the preset
+	// picker and /model all see it. Written as [[providers]] tables.
+	Providers []ProviderConfig `toml:"providers"`
 	// Memory, Checkpoint, and Compaction are nested TOML tables for the
 	// persistent-memory / infinite-context feature. They are pure config
 	// plumbing here; defaults/parsing live in memory.go (Resolve* helpers) and
@@ -67,6 +72,43 @@ type FileConfig struct {
 	// internal/dream (Config). See tasks/spec-dream-memory-consolidation.md
 	// §3.3.
 	Dream DreamConfig `toml:"dream"`
+}
+
+// ProviderConfig defines one third-party provider. Only name is mandatory: the
+// protocol defaults to "openai", the key is read from env_var (default
+// <NAME>_API_KEY) or the named-credential file, and the auth scheme defaults from
+// the protocol (bearer for openai, x-api-key for anthropic).
+//
+//	[[providers]]
+//	name     = "mycorp"
+//	protocol = "openai"                     # openai | anthropic
+//	base_url = "https://llm.mycorp.com/v1"
+//	env_var  = "MYCORP_API_KEY"             # optional
+//	credential = "mycorp-work"              # optional: named credential reference
+//	auth     = "bearer"                     # optional
+//	models   = ["mycorp-large", "mycorp-small"]
+type ProviderConfig struct {
+	Name string `toml:"name"`
+	// Protocol is the wire protocol: openai | anthropic.
+	Protocol string `toml:"protocol"`
+	// BaseURL is the endpoint. Required unless the provider speaks the public
+	// Anthropic API (which has a default).
+	BaseURL string `toml:"base_url"`
+	// EnvVar names the environment variable holding the key; default
+	// <NAME>_API_KEY. The generic convention already works, so this is only
+	// needed for a non-standard variable name.
+	EnvVar string `toml:"env_var"`
+	// APIKey is a literal key. Prefer env_var or credential instead: the literal
+	// lives in a config file and is readable by anything that can read it.
+	APIKey string `toml:"api_key"`
+	// Credential is a named-credential reference resolved from
+	// $PIGO_HOME/.credentials.yaml at request time.
+	Credential string `toml:"credential"`
+	// Auth is the credential attachment scheme: bearer | x-api-key.
+	Auth string `toml:"auth"`
+	// Models lists the model ids this provider serves. The first one is the
+	// default, so `--model <name>` (bare provider name) selects it.
+	Models []string `toml:"models"`
 }
 
 // DreamConfig is the [dream] TOML table for /dream memory consolidation.

@@ -33,13 +33,18 @@ func (p PresetModel) Label() string {
 	return p.ID
 }
 
-// PresetProviders lists the providers the preset catalog draws from, with the
-// environment variable each expects its API key in (referenced by name only,
-// never a value). Order is the display order in the picker.
-var PresetProviders = []struct {
+// PresetProvider names a preset provider and the environment variable that
+// normally carries its API key (the name only, never a value).
+type PresetProvider struct {
 	Name   string
 	EnvVar string
-}{
+}
+
+// PresetProviders lists the providers the preset catalog draws from, with the
+// environment variable each expects its API key in (referenced by name only,
+// never a value). Order is the display order in the picker. Custom providers
+// registered with RegisterCustomProvider are appended here.
+var PresetProviders = []PresetProvider{
 	{Name: "openrouter", EnvVar: "OPENROUTER_API_KEY"},
 	{Name: "anthropic", EnvVar: "ANTHROPIC_API_KEY"},
 	{Name: "openai", EnvVar: "OPENAI_API_KEY"},
@@ -221,6 +226,8 @@ var PresetCatalog = []PresetModel{
 // LookupPreset returns the preset entry for a model id, if the id is in the
 // catalog. Used to resolve a selected id to its owning provider.
 func LookupPreset(id string) (PresetModel, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	for _, p := range PresetCatalog {
 		if p.ID == id {
 			return p, true
@@ -232,11 +239,33 @@ func LookupPreset(id string) (PresetModel, bool) {
 // PresetsByProvider returns the presets served by a given provider name, in
 // catalog order.
 func PresetsByProvider(providerName string) []PresetModel {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 	var out []PresetModel
 	for _, p := range PresetCatalog {
 		if p.Provider == providerName {
 			out = append(out, p)
 		}
 	}
+	return out
+}
+
+// PresetCatalogSnapshot returns a copy of the preset catalog, safe to use after
+// a custom provider has registered its models.
+func PresetCatalogSnapshot() []PresetModel {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]PresetModel, len(PresetCatalog))
+	copy(out, PresetCatalog)
+	return out
+}
+
+// PresetProvidersSnapshot returns a copy of the preset provider list, safe to use
+// after a custom provider has registered.
+func PresetProvidersSnapshot() []PresetProvider {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]PresetProvider, len(PresetProviders))
+	copy(out, PresetProviders)
 	return out
 }
