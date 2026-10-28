@@ -250,14 +250,40 @@ func main() {
 		}
 	}
 
+	// Evaluate pigorc, the Bash config script ($PIGO_HOME/pigorc plus ./.pigorc in
+	// a trusted directory). It runs before the TOML overlay so its options outrank
+	// every config file (an explicit CLI flag still wins), and the variables it
+	// exports are applied to this process so provider keys, base URLs and PIGO_*
+	// knobs behave exactly as if they had been exported in the shell.
+	cwd, _ := os.Getwd()
+	pigorc := config.LoadPigorc(cwd, opts.approve || run.Trusted(cwd), version)
+	config.SetCurrentPigorc(pigorc)
+	if pigorc.Output != "" {
+		fmt.Fprintln(os.Stderr, pigorc.Output)
+	}
+	for _, w := range pigorc.Warnings {
+		fmt.Fprintf(os.Stderr, "pigo: %s\n", w)
+	}
+	for k, v := range pigorc.Env {
+		_ = os.Setenv(k, v)
+	}
+	for _, k := range pigorc.Unset {
+		_ = os.Unsetenv(k)
+	}
+
 	// Overlay ~/.config/pigo/config.toml: file values replace built-in defaults,
 	// but any flag the user set on the command line still wins (CLI > file >
-	// default). A malformed file warns but does not abort — defaults apply.
-	if cfg, err := config.LoadFileConfig(config.FileConfigPath()); err != nil {
+	// default). A malformed file warns but does not abort — defaults apply. The
+	// pigorc options are folded into the decoded file first, so a script option
+	// beats the file's value while a CLI flag still beats both.
+	cfg, err := config.LoadFileConfig(config.FileConfigPath())
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "pigo: %v\n", err)
-	} else {
-		applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
 	}
+	for _, w := range pigorc.ApplyToFileConfig(&cfg) {
+		fmt.Fprintf(os.Stderr, "pigo: %s\n", w)
+	}
+	applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
 
 	// A bare provider name ("zai", "deepseek") means that provider's default
 	// model (issue #564): canonicalize once here so every downstream consumer —

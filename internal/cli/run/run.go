@@ -16,6 +16,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/builtinskills"
+	"github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/plugin"
@@ -574,6 +575,21 @@ func ResolveHookSet(cwd string, trusted bool) (hooks.HookSet, error) {
 	cfg, err := runtime.ResolveConfig(layers...)
 	if err != nil {
 		return nil, err
+	}
+	// The pigorc Bash config is the highest file tier and is evaluated once at
+	// startup (cmd/pigo). Its hooks are appended last so they run after the JSON
+	// layers, matching the precedence of its options; the loader already dropped
+	// project-file hooks when the directory was not trusted.
+	if pg := config.CurrentPigorc(); pg != nil {
+		for event, matchers := range pg.HookSet() {
+			if len(matchers) == 0 {
+				continue
+			}
+			if cfg.Hooks == nil {
+				cfg.Hooks = make(hooks.HookSet)
+			}
+			cfg.Hooks[event] = append(cfg.Hooks[event], matchers...)
+		}
 	}
 	return cfg.Hooks, nil
 }

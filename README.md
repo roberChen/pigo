@@ -28,6 +28,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [作为 SDK 嵌入](#作为-sdk-嵌入)
 - [系统提示词组装](#系统提示词组装)
 - [项目信任](#项目信任)
+- [pigorc：用 shell 脚本配置](#pigorc用-shell-脚本配置)
 - [技能 Skills](#技能-skills)
 - [提示词模板](#提示词模板)
 - [插件](#插件)
@@ -423,6 +424,149 @@ fmt.Println(reply)
 - `--approve` **只免掉确认，不放大权限**：`--allowed-tools` / `--disallowed-tools` 划定的边界是硬边界（见[工具级准入](#工具级准入)），边界外的工具不在工具集中，`-a` 也无法调用。
 
 ---
+
+## pigorc：用 shell 脚本配置
+
+除了 `config.toml` 与 `config.json`，pigo 还支持 **pigorc**——一个真正的 Bash 脚本，用最小的 DSL 构建配置（对标 crushrc）。因为它是 Bash，`source` 复用、条件判断、变量、`$(command)` 取密钥都是免费的。
+
+### 查找与优先级
+
+| 位置 | 何时加载 |
+|------|---------|
+| `$PIGO_HOME/pigorc`（默认 `~/.pigo/pigorc`） | 总是加载 |
+| `./.pigorc` | 仅当当前目录受信任（`--approve` 或信任存储已记录） |
+
+两个文件在**同一个 bash 进程**里按顺序 source，所以项目文件可以覆盖全局文件、调用 `source` 引入公共片段、读取环境变量。
+
+优先级（标量配置项，从低到高）：
+
+```
+内置默认 < config.toml < pigorc option < 命令行 flag
+```
+
+`thinking-level` 还会和 `config.json` 的分层链叠加：内置默认 < `config.json`(全局) < `config.json`(项目) < `PIGO_THINKING_LEVEL` < `config.toml` < `pigorc option` < 命令行 flag。
+
+pigorc 里 `export` 的变量会写回进程环境，因此等价于在 shell 里 `export`：Provider Key、`<PROVIDER>_BASE_URL`、`PIGO_*` 都会按环境变量层级参与解析（显式的 `option base-url` / `option api-key` 仍然优先）。hook 与 `config.json` 的分层规则一致：**按事件追加合并**，pigorc 的 hook 最后执行。
+
+### DSL
+
+```bash
+# 1) option：任意 config.toml 配置项（标量键后写覆盖，列表键追加）
+option model "zai/glm-4.6"
+option thinking-level high
+option allowed-tools read          # 列表键：重复调用即追加
+option allowed-tools grep
+option reset allowed-tools         # 清空列表（例如 source 了公共片段之后）
+option memory.enabled false        # 嵌套表用小圆点
+option checkpoint.push-caps.memory 900
+
+# 2) hook：命令式 hook（和 config.json 的 hooks 等价）
+hook add PreToolUse --matcher '^bash$' --timeout 5 --command './.pigo/hooks/no-rm.sh'
+
+# 3) hook：函数式 hook —— 函数名就是事件名（大小写/下划线/短横线都认）
+PreToolUse() {
+  # stdin 是单行 JSON，退出码决定结果：0 放行，2 阻断（stderr 为原因）
+  grep -q 'rm -rf /' <<<"$(cat)" && { echo 'dangerous command' >&2; exit 2; }
+  return 0
+}
+post_tool_use() { gofmt -w . >/dev/null 2>&1 || true; }   # 9 个事件都可用
+
+# 4) export：环境变量（Provider 密钥、PIGO_* 全部可用）
+export ANTHROPIC_API_KEY="$(pass show anthropic)"
+export PIGO_MAX_SUBAGENTS=4
+```
+
+脚本以 `set -eu` 执行：**任何一步失败都会中止加载**（已生效的 option 保留），并打印警告，但不会阻止 pigo 启动。没有 `bash`、超时（15s）、未知 option 键都只产生警告。
+
+### 逐个配置项的 pigorc 写法
+
+**模型与连接**
+
+| 配置项 | config.toml | pigorc |
+|--------|-------------|--------|
+| 模型 | `model` | `option model "zai/glm-4.6"` |
+| Provider | `provider` | `option provider zai` |
+| 端点 | `base_url` | `option base-url "https://api.z.ai/api"` |
+| 协议 | `protocol` | `option protocol anthropic` |
+| API Key | `api_key` | `option api-key "$KEY"`（或用 `export ZAI_API_KEY=...`） |
+| 具名凭据 | `credential` | `option credential work` |
+| 推理强度 | `thinking_level` | `option thinking-level high` |
+| 输出格式 | `output_format` | `option output-format stream-json` |
+| 系统提示词 | `system_prompt` | `option system-prompt "be terse"` |
+| 禁用工具 | `no_tools` | `option no-tools true` |
+| 禁用技能 | `no_skills` | `option no-skills true` |
+| 信任目录 | `approve` | `option approve true` |
+| 工具白名单 | `allowed_tools` | `option allowed-tools read`（可重复） |
+| 工具黑名单 | `disallowed_tools` | `option disallowed-tools bash`（可重复） |
+| 模板来源 | `prompts` | `option prompts ~/.pigo/prompts`（可重复） |
+
+**持久记忆 / 无限上下文 / 压缩 / dream**
+
+| 配置项 | config.toml | pigorc |
+|--------|-------------|--------|
+| 记忆开关 | `[memory] enabled` | `option memory.enabled false` |
+| 检索前重建索引 | `[memory] reconcile_on_search` | `option memory.reconcile-on-search false` |
+| 相关度下限 | `[memory] search_score_floor` | `option memory.search-score-floor 0.25` |
+| Claude Code 记忆 | `[memory] cc_index` | `option memory.cc-index true` |
+| 压缩触发水位 | `[checkpoint] thresholds` | `option checkpoint.thresholds 40%`（可重复） |
+| 预留 token | `[checkpoint] reserved` | `option checkpoint.reserved 8192` 或 `option checkpoint.reserved 10%` |
+| 注入片段预算 | `[checkpoint.push_caps]` | `option checkpoint.push-caps.memory 800`、`option checkpoint.push-caps.recall 1200` |
+| 压缩阈值 | `[compaction] max_context` | `option compaction.max-context 300K`（或 `50%`） |
+| dream 开关 | `[dream] enabled` | `option dream.enabled false` |
+| dream 间隔 | `[dream] interval_days` | `option dream.interval-days 7` |
+| dream 会话数 | `[dream] recent_sessions` | `option dream.recent-sessions 20` |
+
+**Hook（9 个事件）**
+
+`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`SubagentStop`、`SessionStart`、`SessionEnd`、`PreCompact`、`Notification` 各有两种写法：
+
+```bash
+hook add PostToolUse --matcher 'write|edit' --timeout 30 --command './.pigo/hooks/gofmt.sh'
+UserPromptSubmit() { echo '{"additionalContext":"branch: '"$(git branch --show-current)"'"}'; }
+```
+
+**只能通过环境变量配置的项**（pigorc 里 `export`）
+
+| 变量 | 用途 |
+|------|------|
+| `<PROVIDER>_API_KEY` | 各 Provider 密钥（如 `ANTHROPIC_API_KEY`；pigo 也接受通用形式） |
+| `<PROVIDER>_BASE_URL` | 覆盖某 Provider 的端点（如 `DEEPSEEK_BASE_URL`） |
+| `PIGO_HOME` | 覆盖 `~/.pigo`（会话/插件/信任/凭据）；**不影响本次 pigorc 自身的查找** |
+| `PIGO_SKILLS_DIR` | 技能目录（默认 `~/.agents/skills`） |
+| `PIGO_MAX_SUBAGENTS` | 子 Agent 并发上限 |
+| `PIGO_STREAM_IDLE_TIMEOUT` | 流式空闲超时 |
+| `PIGO_DEBUG` | 调试输出 |
+| `PIGO_EVENT_LOG` | 事件日志路径 |
+| `XDG_CONFIG_HOME` | 改变 `config.toml` 的查找根 |
+
+**仅命令行、pigorc 不适用**：`-p/--print`、`--cwd`、`--no-tui`、`--version`、`--list-sessions`、`--resume`/`--continue`、`--subagent-rpc`、`--dream*`、`--github-review*`、`--append-system-prompt`、`--prompt-template`、`--no-prompt-templates`——它们描述的是"这一次怎么跑"，不是持久配置。其余 flag 都有上面的配置等价物。
+
+### 示例
+
+```bash
+#!/usr/bin/env bash
+# ~/.pigo/pigorc
+source "$HOME/.pigo/secrets.sh"          # export ANTHROPIC_API_KEY=...
+
+option provider anthropic
+option model claude-opus-4-8
+option thinking-level high
+option allowed-tools bash                 # 只放开这几个工具
+option allowed-tools read
+option allowed-tools edit
+option prompts "$HOME/.pigo/prompts"
+option checkpoint.thresholds 50%
+option checkpoint.thresholds 80%
+
+PostToolUse() {
+  [[ "$PIGO_VERSION" == devel ]] && return 0
+  gofmt -l . >/dev/null 2>&1 || true
+}
+```
+
+### 安全须知
+
+pigorc 是**可信代码**：它由 `bash` 完整执行，拥有你本人的权限，在 UI 出现之前运行。项目级 `.pigorc` 与项目级 hook 一样**只在目录受信任时加载**（fail-closed），但全局文件始终执行——不要把它指向不受你控制的路径。
 
 ## 提示词模板
 

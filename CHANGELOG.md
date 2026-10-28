@@ -12,6 +12,21 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **`pigorc`: a Bash-script config layer**: `$PIGO_HOME/pigorc` (always) and
+  `./.pigorc` (only in a trusted directory) are sourced by one `bash` process at
+  startup, so includes, conditionals, variables and `$(command)` secrets work.
+  Options (`option <key> <value>`) cover the whole `config.toml` surface — model,
+  provider, endpoint, protocol, key or credential reference, thinking level,
+  output format, system prompt, the tool boundary, prompt sources, and the
+  memory/checkpoint/compaction/dream tables — and outrank the TOML file while an
+  explicit CLI flag still wins. Hooks can be command hooks (`hook add <event>
+  --matcher RE --timeout N --command CMD`) or **shell functions named after the
+  event** (`PreToolUse() { ...; }`), which are wrapped as command hooks so they get
+  the same stdin JSON, exit-code and timeout semantics; both merge into the
+  existing trust-gated hook set. Exported variables are applied to the process, so
+  provider keys, `<PROVIDER>_BASE_URL` and `PIGO_*` can be set from the script.
+  Evaluation is best-effort: no bash, a failing script, an unknown option or a
+  timeout prints a warning and never blocks the launch.
 - **`question` tool (human-in-the-loop)**: the model can ask the operator a
   question through a tool call and continue with the answer. The TUI shows the
   question just above the composer (digit picks a suggested option, typing plus

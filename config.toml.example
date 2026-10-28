@@ -1,4 +1,10 @@
 # Pigo global configuration (example template)
+#
+# For anything this static file cannot express (secrets from `pass`/`op`, per-host
+# conditionals, includes, shell-function hooks), use the Bash config script
+# instead: $PIGO_HOME/pigorc (default ~/.pigo/pigorc) and ./.pigorc. Its options
+# override this file, and an explicit CLI flag still overrides both. See the
+# "pigorc" section of README.md for the full key-by-key mapping.
 # Copy this file to ~/.config/pigo/config.toml and fill in your own values.
 # https://github.com/smallnest/pigo
 

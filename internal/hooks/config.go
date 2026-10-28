@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 )
 
 // DefaultTimeoutSeconds is the per-hook execution timeout when HookConfig.Timeout
@@ -80,4 +81,53 @@ func warnf(w io.Writer, format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(w, format, args...)
+}
+
+// AllEvents lists the lifecycle events a hook can subscribe to, in the order the
+// user documentation presents them. A hook config keyed by any other name is a
+// configuration mistake; CanonicalEvent is the tolerant lookup used by
+// generators such as the pigorc Bash DSL.
+var AllEvents = []string{
+	"PreToolUse",
+	"PostToolUse",
+	"UserPromptSubmit",
+	"Stop",
+	"SubagentStop",
+	"SessionStart",
+	"SessionEnd",
+	"PreCompact",
+	"Notification",
+}
+
+// CanonicalEvent resolves an event name written in any of the accepted forms to
+// its canonical spelling. Matching ignores case and separators, so
+// "PreToolUse", "pretooluse" and "pre_tool_use" all resolve to "PreToolUse". It
+// returns false for a name that is not a hook event.
+func CanonicalEvent(name string) (string, bool) {
+	norm := normalizeEventName(name)
+	if norm == "" {
+		return "", false
+	}
+	for _, ev := range AllEvents {
+		if normalizeEventName(ev) == norm {
+			return ev, true
+		}
+	}
+	return "", false
+}
+
+// normalizeEventName lowercases s and drops underscores and hyphens, the
+// normalization CanonicalEvent matches on.
+func normalizeEventName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '_', '-':
+			continue
+		case ' ', '\t':
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
