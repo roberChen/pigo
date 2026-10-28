@@ -12,6 +12,17 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **Built-in `pigorc` skill with a generated config reference**: pigo now ships a
+  `pigorc` skill (installed to the skills directory on first run, invocable as
+  `/pigorc`) whose hand-written `SKILL.md` covers the workflow and recipes, alongside
+  a `reference.md` that is **regenerated from the running binary on every launch**.
+  The reference is rendered from the code that implements the configuration — the
+  `option` registry, provider and agent definition fields, the hook event list, the
+  environment variables the code reads, and every registered CLI flag — so it cannot
+  go stale. Coverage tests fail when a config.toml field, definition field, hook
+  event, `PIGO_*` variable or CLI flag has no documented entry, and the generator only
+  rewrites pigo's own skill directory (a user's hand-written skill of the same name
+  is left untouched).
 - **Background sub-agents**: a `task` / custom-agent call with `background: true`
   starts the child on its own goroutine and returns a job id immediately, so the
   parent can keep working. The report is delivered as a follow-up user turn when

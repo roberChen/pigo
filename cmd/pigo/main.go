@@ -166,6 +166,52 @@ type cliOptions struct {
 	disallowedTools []string
 }
 
+// registerFlags binds every CLI flag on fs. It is a function (rather than inline in
+// main) so tests can enumerate the flag surface — the generated configuration
+// reference and its coverage test both need the full list.
+func registerFlags(fs *flag.FlagSet, opts *cliOptions) {
+	fs.StringVarP(&opts.prompt, "print", "p", "", "prompt to run in headless print mode")
+	fs.StringVarP(&opts.model, "model", "m", "openrouter/free", "model id to run against (a well-known model name like claude-opus-4-8 or deepseek-chat auto-selects its provider when --provider/--protocol/--base-url are unset)")
+	fs.StringVarP(&opts.baseURL, "base-url", "u", "", "override provider base URL (e.g. local Ollama)")
+	fs.StringVarP(&opts.apiKey, "api-key", "k", "", "API key for the resolved provider (overrides env/config; else <PROVIDER>_API_KEY)")
+	fs.StringVarP(&opts.protocol, "protocol", "P", "", "force wire protocol for a custom endpoint: openai | anthropic (default: inferred from model id)")
+	fs.StringVar(&opts.provider, "provider", "", "select a built-in provider by name (e.g. deepseek, minimax); uses its default base URL, protocol, and API-key env var (see --help provider list)")
+	fs.BoolVar(&opts.githubReview, "github-review", false, "run the isolated GitHub ready-for-review webhook (issue #567): PR draft→ready creates a read-only review session and runs it")
+	fs.StringVar(&opts.githubWebhookSecretEnv, "github-webhook-secret-env", "PIGO_GITHUB_WEBHOOK_SECRET", "name of the env var holding the high-entropy GitHub webhook secret (credential reference; never the secret itself)")
+	fs.StringVar(&opts.githubWebhookAddr, "github-webhook-addr", "127.0.0.1:3081", "listen address for the GitHub review webhook (put a TLS reverse proxy/tunnel in front; the endpoint is plain HTTP)")
+	fs.StringVar(&opts.githubWebhookRepo, "github-webhook-repo", "", "restrict review to this repository (owner/name); empty accepts any repo")
+	fs.StringVarP(&opts.outputFmt, "output-format", "o", "text", "output format: text | stream-json")
+	fs.BoolVarP(&opts.noTools, "no-tools", "n", false, "disable the built-in file/shell tools")
+	fs.StringArrayVar(&opts.allowedTools, "allowed-tools", nil, "restrict the model to these tools (repeatable, comma-separated, case-insensitive); empty means no restriction and --disallowed-tools wins on conflict")
+	fs.StringArrayVar(&opts.disallowedTools, "disallowed-tools", nil, "remove these tools from the model's set (repeatable, comma-separated, case-insensitive); takes precedence over --allowed-tools")
+	fs.BoolVarP(&opts.listSessions, "list-sessions", "l", false, "list stored interactive sessions and exit")
+	fs.StringVarP(&opts.resumeID, "resume", "r", "", "resume the interactive session with this id")
+	fs.BoolVarP(&opts.continueLast, "continue", "c", false, "resume the most recent interactive session")
+	fs.BoolVarP(&opts.approve, "approve", "a", false, "trust the working directory for this run: skip the first-launch trust prompt and run side-effect tools without per-call confirmation")
+	fs.BoolVar(&opts.noSkills, "no-skills", false, "disable skill discovery (do not load skills under ~/.agents/skills as /skill-name commands)")
+	fs.BoolVar(&opts.noPromptTemplates, "no-prompt-templates", false, "disable prompt-template discovery (do not load ~/.pigo/{commands,prompts}, .pigo/prompts, config prompts, or --prompt-template); built-in slash commands are unaffected")
+	fs.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt to use instead of the default coding-assistant prompt (mirrors pi --system-prompt)")
+	fs.StringArrayVar(&opts.appendSystemPrompt, "append-system-prompt", nil, "append text or file contents to the system prompt; repeatable (mirrors pi --append-system-prompt)")
+	fs.StringArrayVar(&opts.promptTemplates, "prompt-template", nil, "load a prompt template from a file or directory (non-recursive); repeatable (mirrors pi --prompt-template)")
+	fs.StringVar(&opts.thinkingLevel, "thinking-level", "", "reasoning effort: off|minimal|low|medium|high|xhigh|max (overrides PIGO_THINKING_LEVEL and config; default medium)")
+	fs.BoolVar(&opts.subagentRPC, "subagent-rpc", false, "internal: run as a process-isolated sub-agent JSON-RPC server over stdio (US-019)")
+	fs.BoolVar(&opts.dream, "dream", false, "internal: run a memory-consolidation pass over the global/project memory scope, emit a Report JSON on stdout, and exit (SPEC §4.1)")
+	fs.BoolVar(&opts.dreamDryRun, "dream-dry-run", false, "internal: with --dream, analyze and report without writing files or updating dream state (SPEC §5.5)")
+	fs.BoolVar(&opts.noTUI, "no-tui", false, "use the line-based REPL instead of the full-screen TUI")
+	fs.StringVarP(&opts.cwd, "cwd", "C", "", "run as if pigo was started in this directory (matches the Claude Agent SDK's cwd; like git -C): tool file access, trust, hooks, and project config all resolve against it")
+	fs.BoolVarP(&opts.showVersion, "version", "v", false, "print version information and exit")
+	// Extend the default pflag usage with a "Supported providers" block so
+	// `--help` documents the values accepted by --provider (name → env var →
+	// default base URL → protocol). The list is derived from the provider
+	// registry, so it never drifts from the code.
+	fs.Usage = func() {
+		out := fs.Output()
+		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		fs.PrintDefaults()
+		cli.PrintProviderHelp(out)
+	}
+}
+
 func main() {
 	// Session subcommands (pigo session export|list, issue #570) dispatch early
 	// like the package-management ones: they are standalone actions that never
@@ -195,47 +241,13 @@ func main() {
 	}
 
 	var opts cliOptions
-	flag.StringVarP(&opts.prompt, "print", "p", "", "prompt to run in headless print mode")
-	flag.StringVarP(&opts.model, "model", "m", "openrouter/free", "model id to run against (a well-known model name like claude-opus-4-8 or deepseek-chat auto-selects its provider when --provider/--protocol/--base-url are unset)")
-	flag.StringVarP(&opts.baseURL, "base-url", "u", "", "override provider base URL (e.g. local Ollama)")
-	flag.StringVarP(&opts.apiKey, "api-key", "k", "", "API key for the resolved provider (overrides env/config; else <PROVIDER>_API_KEY)")
-	flag.StringVarP(&opts.protocol, "protocol", "P", "", "force wire protocol for a custom endpoint: openai | anthropic (default: inferred from model id)")
-	flag.StringVar(&opts.provider, "provider", "", "select a built-in provider by name (e.g. deepseek, minimax); uses its default base URL, protocol, and API-key env var (see --help provider list)")
-	flag.BoolVar(&opts.githubReview, "github-review", false, "run the isolated GitHub ready-for-review webhook (issue #567): PR draft→ready creates a read-only review session and runs it")
-	flag.StringVar(&opts.githubWebhookSecretEnv, "github-webhook-secret-env", "PIGO_GITHUB_WEBHOOK_SECRET", "name of the env var holding the high-entropy GitHub webhook secret (credential reference; never the secret itself)")
-	flag.StringVar(&opts.githubWebhookAddr, "github-webhook-addr", "127.0.0.1:3081", "listen address for the GitHub review webhook (put a TLS reverse proxy/tunnel in front; the endpoint is plain HTTP)")
-	flag.StringVar(&opts.githubWebhookRepo, "github-webhook-repo", "", "restrict review to this repository (owner/name); empty accepts any repo")
-	flag.StringVarP(&opts.outputFmt, "output-format", "o", "text", "output format: text | stream-json")
-	flag.BoolVarP(&opts.noTools, "no-tools", "n", false, "disable the built-in file/shell tools")
-	flag.StringArrayVar(&opts.allowedTools, "allowed-tools", nil, "restrict the model to these tools (repeatable, comma-separated, case-insensitive); empty means no restriction and --disallowed-tools wins on conflict")
-	flag.StringArrayVar(&opts.disallowedTools, "disallowed-tools", nil, "remove these tools from the model's set (repeatable, comma-separated, case-insensitive); takes precedence over --allowed-tools")
-	flag.BoolVarP(&opts.listSessions, "list-sessions", "l", false, "list stored interactive sessions and exit")
-	flag.StringVarP(&opts.resumeID, "resume", "r", "", "resume the interactive session with this id")
-	flag.BoolVarP(&opts.continueLast, "continue", "c", false, "resume the most recent interactive session")
-	flag.BoolVarP(&opts.approve, "approve", "a", false, "trust the working directory for this run: skip the first-launch trust prompt and run side-effect tools without per-call confirmation")
-	flag.BoolVar(&opts.noSkills, "no-skills", false, "disable skill discovery (do not load skills under ~/.agents/skills as /skill-name commands)")
-	flag.BoolVar(&opts.noPromptTemplates, "no-prompt-templates", false, "disable prompt-template discovery (do not load ~/.pigo/{commands,prompts}, .pigo/prompts, config prompts, or --prompt-template); built-in slash commands are unaffected")
-	flag.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt to use instead of the default coding-assistant prompt (mirrors pi --system-prompt)")
-	flag.StringArrayVar(&opts.appendSystemPrompt, "append-system-prompt", nil, "append text or file contents to the system prompt; repeatable (mirrors pi --append-system-prompt)")
-	flag.StringArrayVar(&opts.promptTemplates, "prompt-template", nil, "load a prompt template from a file or directory (non-recursive); repeatable (mirrors pi --prompt-template)")
-	flag.StringVar(&opts.thinkingLevel, "thinking-level", "", "reasoning effort: off|minimal|low|medium|high|xhigh|max (overrides PIGO_THINKING_LEVEL and config; default medium)")
-	flag.BoolVar(&opts.subagentRPC, "subagent-rpc", false, "internal: run as a process-isolated sub-agent JSON-RPC server over stdio (US-019)")
-	flag.BoolVar(&opts.dream, "dream", false, "internal: run a memory-consolidation pass over the global/project memory scope, emit a Report JSON on stdout, and exit (SPEC §4.1)")
-	flag.BoolVar(&opts.dreamDryRun, "dream-dry-run", false, "internal: with --dream, analyze and report without writing files or updating dream state (SPEC §5.5)")
-	flag.BoolVar(&opts.noTUI, "no-tui", false, "use the line-based REPL instead of the full-screen TUI")
-	flag.StringVarP(&opts.cwd, "cwd", "C", "", "run as if pigo was started in this directory (matches the Claude Agent SDK's cwd; like git -C): tool file access, trust, hooks, and project config all resolve against it")
-	flag.BoolVarP(&opts.showVersion, "version", "v", false, "print version information and exit")
-	// Extend the default pflag usage with a "Supported providers" block so
-	// `--help` documents the values accepted by --provider (name → env var →
-	// default base URL → protocol). The list is derived from the provider
-	// registry, so it never drifts from the code.
-	flag.Usage = func() {
-		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
-		flag.PrintDefaults()
-		cli.PrintProviderHelp(out)
-	}
+	registerFlags(flag.CommandLine, &opts)
 	flag.Parse()
+	// Publish the flag surface and build version for the generated configuration
+	// reference (see run.LoadSkills), so the built-in pigorc skill documents exactly
+	// the flags this binary accepts.
+	config.SetFlagDocs(flagDocs(flag.CommandLine))
+	config.SetBuildVersion(version)
 
 	// --cwd switches the process working directory before anything cwd-derived is
 	// resolved (tool roots, trust, hooks, project config, git info). Doing it here
@@ -740,4 +752,19 @@ func updateIsSelfUpdate(rest []string) bool {
 		}
 	}
 	return true
+}
+
+// flagDocs collects every registered flag as a reference row, in pflag's lexical
+// Order (VisitAll sorts), so the generated reference is byte-stable across launches.
+func flagDocs(fs *flag.FlagSet) []config.FlagDoc {
+	var out []config.FlagDoc
+	fs.VisitAll(func(f *flag.Flag) {
+		out = append(out, config.FlagDoc{
+			Name:      f.Name,
+			Shorthand: f.Shorthand,
+			Default:   f.DefValue,
+			Usage:     f.Usage,
+		})
+	})
+	return out
 }

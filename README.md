@@ -605,6 +605,17 @@ PostToolUse() {
 }
 ```
 
+### 内置 pigorc skill（自动更新的配置参考）
+
+pigo 内置一个 `pigorc` 技能（首次启动自动装到 `~/.agents/skills/pigorc/`，也可用 `/pigorc` 调用或让模型自行查阅）：
+
+- `SKILL.md`：手写的配置指南与常用配方（模型/第三方 provider/自定义 agent/hook/记忆/信任/排错）；
+- `reference.md`：**机器生成的完整参考**，每次启动由当前二进制重写（原子写入），内容直接来自代码注册表——`option` 全量键表、`[[providers]]`/`agent` 字段、9 个 hook 事件、环境变量、以及本二进制注册的**全部 CLI flag**。
+
+因此只要新增了可配置项（新的 config.toml 字段、provider/agent 字段、hook 事件、`PIGO_*` 变量或 flag），参考文档下一个版本自动包含它；同时有覆盖测试强制要求：`config.toml` 的每个字段、`ProviderConfig`/`AgentConfig` 的每个字段、`hooks.AllEvents` 的每个事件、代码中读取的每个 `PIGO_*` 变量、以及每个 CLI flag 都必须在 `reference.md` 中出现，否则测试失败。
+
+> 生成只作用于 pigo 自己的技能目录（`SKILL.md` 带标记）；你自己写的同名 `pigorc` 技能不会被覆盖。
+
 ### 安全须知
 
 pigorc 是**可信代码**：它由 `bash` 完整执行，拥有你本人的权限，在 UI 出现之前运行。项目级 `.pigorc` 与项目级 hook 一样**只在目录受信任时加载**（fail-closed），但全局文件始终执行——不要把它指向不受你控制的路径。

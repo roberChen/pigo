@@ -612,7 +612,7 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		p.applyOption(cfg, key, p.Options[key])
+		p.applyPigorcOption(cfg, key, p.Options[key])
 	}
 
 	listKeys := make([]string, 0, len(p.Lists))
@@ -621,19 +621,7 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 	}
 	sort.Strings(listKeys)
 	for _, key := range listKeys {
-		values := p.Lists[key]
-		switch key {
-		case "allowed-tools":
-			cfg.AllowedTools = values
-		case "disallowed-tools":
-			cfg.DisallowedTools = values
-		case "prompts":
-			cfg.Prompts = values
-		case "checkpoint.thresholds":
-			cfg.Checkpoint.Thresholds = values
-		default:
-			p.warnf("unknown list option %q", key)
-		}
+		p.applyPigorcList(cfg, key, p.Lists[key])
 	}
 
 	// Third-party provider definitions: script definitions win over the file's,
@@ -668,109 +656,6 @@ func removeProviderConfig(defs []ProviderConfig, name string) []ProviderConfig {
 	return out
 }
 
-// applyOption applies one scalar option to cfg.
-func (p *Pigorc) applyOption(cfg *FileConfig, key, value string) {
-	value = strings.TrimSpace(value)
-	switch key {
-	case "model":
-		cfg.Model = value
-	case "base-url":
-		cfg.BaseURL = value
-	case "api-key":
-		cfg.APIKey = value
-	case "credential":
-		cfg.Credential = value
-	case "protocol":
-		cfg.Protocol = value
-	case "provider":
-		cfg.Provider = value
-	case "thinking-level":
-		cfg.ThinkingLevel = value
-	case "output-format":
-		cfg.OutputFormat = value
-	case "system-prompt":
-		cfg.SystemPrompt = value
-	case "no-tools":
-		p.applyBool(key, value, &cfg.NoTools)
-	case "no-skills":
-		p.applyBool(key, value, &cfg.NoSkills)
-	case "approve":
-		p.applyBool(key, value, &cfg.Approve)
-	case "memory.enabled":
-		p.applyBoolPtr(key, value, &cfg.Memory.Enabled)
-	case "memory.reconcile-on-search":
-		p.applyBoolPtr(key, value, &cfg.Memory.ReconcileOnSearch)
-	case "memory.cc-index":
-		p.applyBool(key, value, &cfg.Memory.CCIndex)
-	case "memory.search-score-floor":
-		if f, err := strconv.ParseFloat(value, 64); err == nil {
-			cfg.Memory.SearchScoreFloor = &f
-		} else {
-			p.warnf("option %s: %q is not a number", key, value)
-		}
-	case "checkpoint.reserved":
-		if n, err := strconv.Atoi(value); err == nil {
-			cfg.Checkpoint.Reserved = IntOrString{IsInt: true, Int: n}
-		} else {
-			cfg.Checkpoint.Reserved = IntOrString{Str: value}
-		}
-	case "checkpoint.push-caps":
-		p.warnf("option %s needs a section name, e.g. checkpoint.push-caps.memory", key)
-	case "compaction.max-context":
-		cfg.Compaction.MaxContext = value
-	case "dream.enabled":
-		p.applyBoolPtr(key, value, &cfg.Dream.Enabled)
-	case "dream.interval-days":
-		if n, err := strconv.Atoi(value); err == nil {
-			cfg.Dream.IntervalDays = n
-		} else {
-			p.warnf("option %s: %q is not an integer", key, value)
-		}
-	case "dream.recent-sessions":
-		if n, err := strconv.Atoi(value); err == nil {
-			cfg.Dream.RecentSessions = n
-		} else {
-			p.warnf("option %s: %q is not an integer", key, value)
-		}
-	default:
-		// checkpoint.push-caps is a nested table keyed by section.
-		if section, ok := strings.CutPrefix(key, "checkpoint.push-caps."); ok && section != "" {
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				p.warnf("option %s: %q is not an integer", key, value)
-				return
-			}
-			if cfg.Checkpoint.PushCaps == nil {
-				cfg.Checkpoint.PushCaps = make(map[string]int)
-			}
-			cfg.Checkpoint.PushCaps[section] = n
-			return
-		}
-		p.warnf("unknown option %q", key)
-	}
-}
-
-// applyBool parses a shell-style boolean; an unparseable value is a warning.
-func (p *Pigorc) applyBool(key, value string, dst *bool) {
-	b, ok := parseShellBool(value)
-	if !ok {
-		p.warnf("option %s: %q is not a boolean (want true/false/yes/no/1/0/on/off)", key, value)
-		return
-	}
-	*dst = b
-}
-
-// applyBoolPtr is applyBool for a *bool that distinguishes "unset" from false.
-func (p *Pigorc) applyBoolPtr(key, value string, dst **bool) {
-	b, ok := parseShellBool(value)
-	if !ok {
-		p.warnf("option %s: %q is not a boolean (want true/false/yes/no/1/0/on/off)", key, value)
-		return
-	}
-	v := b
-	*dst = &v
-}
-
 // parseShellBool accepts the boolean spellings a shell user expects.
 func parseShellBool(v string) (bool, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
@@ -791,13 +676,11 @@ func canonicalOptionKey(key string) string {
 	return k
 }
 
-// isListOption reports whether key accumulates values instead of overwriting.
+// isListOption reports whether key accumulates values instead of overwriting. It
+// is derived from the option registry so a new list key needs no second edit.
 func isListOption(key string) bool {
-	switch key {
-	case "allowed-tools", "disallowed-tools", "prompts", "checkpoint.thresholds":
-		return true
-	}
-	return false
+	spec, ok := lookupOption(key)
+	return ok && spec.Kind == optList
 }
 
 // fileExists reports whether path is an existing regular file.

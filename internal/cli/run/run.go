@@ -504,7 +504,29 @@ func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 	if dir == "" {
 		return nil, nil
 	}
+	// Refresh the built-in pigorc skill's generated configuration reference. It is
+	// rendered from this binary's own config registries (options, provider/agent
+	// definitions, hook events, environment variables, CLI flags), so the installed
+	// skill always describes the running build. Only pigo's own skill directory is
+	// touched: a user's hand-written skill of the same name is left alone.
+	refreshConfigReference(dir)
 	return runtime.LoadSkillsDir(dir)
+}
+
+// refreshConfigReference rewrites <skills>/pigorc/reference.md when that directory
+// is pigo's own built-in skill. Failures are reported and never block startup.
+func refreshConfigReference(skillsDir string) {
+	skillDir := filepath.Join(skillsDir, "pigorc")
+	if !config.SkillOwnsReference(skillDir) {
+		return
+	}
+	path := config.SkillsReferencePath(skillsDir)
+	if err := config.WriteReference(path, config.ReferenceOptions{
+		Version: config.CurrentVersion(),
+		Flags:   config.CurrentFlagDocs(),
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "pigo: config reference: %v\n", err)
+	}
 }
 
 // PluginsDir returns the directory external plugins are discovered from:

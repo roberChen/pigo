@@ -58,9 +58,14 @@ var goalWorkflowSkills = []string{
 	"architecture-diagram", "weather",
 }
 
+// pigoConfigSkills is the configuration collection: the `pigorc` skill documents
+// how to configure pigo and carries a machine-generated reference that the binary
+// refreshes on every launch (see internal/cli/config/reference.go).
+var pigoConfigSkills = []string{"pigorc"}
+
 // Manifest is the single source of truth for the built-in skill collections
-// installed on first run. It seeds one collection today; adding a Set is all
-// that is needed to bundle another collection.
+// installed on first run. Adding a Set is all that is needed to bundle another
+// collection.
 func Manifest() []Set {
 	return []Set{
 		{
@@ -68,6 +73,15 @@ func Manifest() []Set {
 			Version: "2026-07-24",
 			Root:    "skills",
 			Skills:  goalWorkflowSkills,
+			FS:      skillsFS,
+		},
+		{
+			// A new collection name so existing installs pick it up on the next
+			// launch (an already-recorded collection version is skipped).
+			Name:    "pigo-config",
+			Version: "2026-10-28",
+			Root:    "skills",
+			Skills:  pigoConfigSkills,
 			FS:      skillsFS,
 		},
 	}
