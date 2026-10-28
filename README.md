@@ -29,6 +29,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [系统提示词组装](#系统提示词组装)
 - [项目信任](#项目信任)
 - [pigorc：用 shell 脚本配置](#pigorc用-shell-脚本配置)
+- [自定义 sub-agent（Agent 定义）](#自定义-sub-agentagent-定义)
 - [技能 Skills](#技能-skills)
 - [提示词模板](#提示词模板)
 - [插件](#插件)
@@ -497,10 +498,13 @@ option checkpoint.push-caps.memory 900
 provider add mycorp --type openai --base-url "https://llm.mycorp.com/v1" \
   --env-var MYCORP_API_KEY --model mycorp-large
 
-# 3) hook：命令式 hook（和 config.json 的 hooks 等价）
+# 3) agent：定义自定义 sub-agent（等价于 config.toml 的 [[agents]]）
+agent add researcher --description "只读调研" --tools read,grep --prompt-file ./researcher.md
+
+# 4) hook：命令式 hook（和 config.json 的 hooks 等价）
 hook add PreToolUse --matcher '^bash$' --timeout 5 --command './.pigo/hooks/no-rm.sh'
 
-# 4) hook：函数式 hook —— 函数名就是事件名（大小写/下划线/短横线都认）
+# 5) hook：函数式 hook —— 函数名就是事件名（大小写/下划线/短横线都认）
 PreToolUse() {
   # stdin 是单行 JSON，退出码决定结果：0 放行，2 阻断（stderr 为原因）
   grep -q 'rm -rf /' <<<"$(cat)" && { echo 'dangerous command' >&2; exit 2; }
@@ -508,7 +512,7 @@ PreToolUse() {
 }
 post_tool_use() { gofmt -w . >/dev/null 2>&1 || true; }   # 9 个事件都可用
 
-# 5) export：环境变量（Provider 密钥、PIGO_* 全部可用）
+# 6) export：环境变量（Provider 密钥、PIGO_* 全部可用）
 export ANTHROPIC_API_KEY="$(pass show anthropic)"
 export PIGO_MAX_SUBAGENTS=4
 ```
@@ -604,6 +608,75 @@ PostToolUse() {
 ### 安全须知
 
 pigorc 是**可信代码**：它由 `bash` 完整执行，拥有你本人的权限，在 UI 出现之前运行。项目级 `.pigorc` 与项目级 hook 一样**只在目录受信任时加载**（fail-closed），但全局文件始终执行——不要把它指向不受你控制的路径。
+
+## 自定义 sub-agent（Agent 定义）
+
+主 agent 可以把子任务派发给 `task`（通用子 agent），也可以派发给**你自己定义的 agent**。一个 agent 定义就是一份完整的 agent 配置：名字即工具名，`system_prompt` 是它的系统提示词，`tools` 限定可用工具，还可以指定模型、推理强度、隔离方式和超时。
+
+自定义 agent **只在 pigorc 里定义**（shell 配置是它的唯一来源，`config.toml` 没有 agent 表）：
+
+```bash
+# ~/.pigo/pigorc（项目级 ./.pigorc 可覆盖/追加，需信任目录）
+agent add researcher \
+  --description "只读代码库调研：返回带 file:line 引用的结论" \
+  --prompt-file ~/.pigo/prompts/researcher.md \
+  --tools read,grep,find,ls \
+  --model claude-haiku-4 \
+  --thinking off \
+  --timeout 300
+# --system-prompt "..." 可直接内联提示词；--isolation process 走子进程；
+# --inherit-hooks 额外运行全局/项目层 hook
+
+agent hook researcher PreToolUse --matcher '^bash$' --command './.pigo/hooks/no-bash.sh'
+agent remove researcher      # 取消（例如在项目文件里屏蔽全局定义）
+```
+
+定义完成后，主 agent 会像调用 `task` 一样按名字调用它（`researcher` 出现在工具列表里，`description` 决定它何时被选中）；传 `background: true` 可后台执行（见下）。
+
+### Hooks：默认独立，可继承
+
+- 默认**只运行该 agent 用 `agent hook` 声明的 hook**，与主 agent 的 hook 相互独立。
+- `--inherit-hooks` 时，额外运行全局/项目层解析出的 hook（`$PIGO_HOME/config.json`、被信任项目的 `./.pigo/config.json`、以及 pigorc 的 hook），本 agent 自己的 hook 先执行。
+- 子 agent 的结束事件走 `SubagentStop`（不是 `Stop`），工具执行前后仍是 `PreToolUse` / `PostToolUse`。
+
+### 后台 sub-agent（`background: true`）
+
+默认派发是**同步**的：父 turn 等子 agent 跑完再继续。需要并行做别的事时，让子 agent 在后台跑：
+
+```jsonc
+// 模型侧调用（task 或自定义 agent 都一样）
+{"prompt": "把整个仓库的 API 用法整理成文档", "background": true}
+// → 立即返回：Started background sub-agent "task" as job-1.
+```
+
+- **立即返回**：工具调用马上拿到 job 句柄（`job-1`…），父 agent 继续做自己的事；同一消息里的多个后台 job 会并发启动（仍受 `PIGO_MAX_SUBAGENTS` 排队约束）。
+- **完成回灌**：job 结束后，报告作为一条 **follow-up 用户消息**注入（含 job id、agent、耗时、报告正文与子会话 id）。只要还有后台 job 在跑，run 就不会自然结束——但到下一个 turn 边界时最多等“下一个完成”，不会阻塞多轮对话；被 Esc/Ctrl+C 中断时等待立即结束（job 随 run 一起取消）。
+- **显式收取**：新工具 `task_output`
+  - `{"job_id":"job-1"}` → 已完成返回报告，仍在跑返回状态（activity/耗时）；
+  - `{"job_id":"job-1","wait":true}` → 等到完成再返回（父 agent 想“等这个结果”时用）；
+  - 省略 `job_id` → 列出所有 job（id、agent、状态、耗时、任务摘要）。
+- **生命周期**：job 绑定**父 run 的 context**，不是 tool call 的。run 结束（或被中断）时仍存活的后台 job 会被取消，不会留下孤儿 goroutine；正常结束时报告一定已投递（或可在 run 内用 `task_output` 取回）。
+- **持久化与续跑**：后台子 agent 与同步子 agent 一致——独立会话文件（`parentSession`/`subAgent`），报告里带 `[sub-agent session: <id>]`，之后用 `session_id` 续跑。
+- **不支持的组合**：process 隔离模式下后台执行会被拒绝（子进程协议只回传最终文本，且没有可续跑的会话）；`/btw` 这类一次性旁路会话不接后台报告。
+
+> 后台报告会触发新一轮模型调用（和定时提醒一样），所以适合“长任务 + 我能先做别的”的场景，而不是用来逃逸父 turn 的上下文。
+
+### 会话：与主 agent 一致的持久化，但不能单独恢复
+
+- 每次子 agent 运行都会像主 agent 一样写入 `$PIGO_HOME/sessions`：独立会话文件，`parentSession` 指向派发它的对话，`subAgent` 记录 agent 名，支持 `/session`、`pigo session export` 等全部会话能力。
+- 子 agent 会话**不出现在 `/resume`、`--list-sessions`、`--continue` 里**，也不能用 `--resume <id>` 直接恢复（会显式报错）：它是父对话的一部分，由父 agent 继续。
+- 派发结果里会附带 `[sub-agent session: <id>]`；主 agent（或你）再次调用同一个工具并传入 `session_id` 即可**继续同一个子 agent 会话**，历史完整保留。
+
+### 子 agent 不提问，改用「父问 + 续跑」
+
+子 agent 没有 `question` 工具（进程隔离模式同样排除），因此不会打断你所在的交互。当它确实需要你决策时，会在报告里明确写出；主 agent 用 `question` 问你，拿到答案后带上 `session_id` 继续同一个子 agent 会话——这是官方推荐的兜底流程。
+
+### 其他
+
+- 子 agent 的工具集 = 内置工具 − `task` − `question`，再用 `--tools` 白名单收窄；父的 `--allowed-tools` / `--disallowed-tools` 边界会被继承（黑名单优先）。
+- 子 agent 也会按上下文窗口自动压缩（与主 agent 一致），并设置自己的推理强度、超时与 hook。
+- 定义冲突（与内置工具/其它 agent 重名、未知 isolation、未知 thinking、未知工具名）会在启动运行时告警并跳过该定义，不影响其它配置。
+- process 隔离模式下子进程只返回最终文本：会话持久化与续跑仅支持 goroutine 模式（默认）。
 
 ## 提示词模板
 

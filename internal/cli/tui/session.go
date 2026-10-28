@@ -50,7 +50,11 @@ type runSession struct {
 	reg       *agenttool.ToolRegistry
 	reminders *runtime.ReminderRegistry
 	schedule  *agenttool.Schedule
-	creds     *provider.CredentialStore
+	// jobs is the background sub-agent registry shared by the sub-agent tools. It is
+	// wired onto the follow-up seam so a finished background child's report reaches
+	// the model as a user turn. nil when no sub-agent tools are present.
+	jobs  *runtime.SubAgentJobs
+	creds *provider.CredentialStore
 
 	// cwd is the directory pigo was launched in, captured once at session
 	// assembly. It is the trust key and the /status environment display.
@@ -155,6 +159,9 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		if err != nil {
 			return nil, nil, err
 		}
+		if h.IsSubAgent() {
+			return nil, nil, fmt.Errorf("session %s: %w", opts.ResumeID, session.ErrNotResumableSubAgent)
+		}
 		msgs := make(agentcore.MessageList, len(entries))
 		for i, e := range entries {
 			msgs[i] = e.Message
@@ -218,6 +225,7 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		reg:        run.ToolRegistry(opts.Tools),
 		reminders:  run.TodoReminders(opts.Tools),
 		schedule:   agenttool.ScheduleFromTools(opts.Tools),
+		jobs:       runtime.SubAgentJobsFromTools(opts.Tools),
 		creds:      creds,
 		cwd:        cwd,
 		trust:      mgr,
@@ -321,9 +329,8 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 	}
 	// Due session-local reminders ride the follow-up seam (issue #565); a nil
 	// scheduler (no schedule_* tools) leaves the seam unwired.
-	if s.schedule != nil {
-		cfg.GetFollowUpMessages = s.schedule.FollowUpMessages
-	}
+	// Background sub-agent reports and due reminders ride the follow-up seam.
+	cfg.GetFollowUpMessages = run.FollowUps(s.jobs, s.schedule)
 	// When remote control is active, route side-effect tool-call confirmations to
 	// the paired browser (no-op when no client is connected or the cwd is trusted,
 	// so the non-remote path is unchanged). The trust manager is read from the

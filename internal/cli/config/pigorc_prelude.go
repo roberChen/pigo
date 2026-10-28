@@ -123,6 +123,77 @@ provider() {
   esac
 }
 
+# agent add <name> [--description T] [--system-prompt T | --prompt-file F]
+#                 [--tools a,b] [--model M] [--thinking L] [--isolation I]
+#                 [--timeout N] [--inherit-hooks]
+# agent hook <name> <event> [--matcher RE] [--timeout N] --command CMD
+# agent remove <name>
+agent() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    add)
+      local name="${1:-}"
+      if [ -z "$name" ]; then
+        echo "pigorc: agent add needs a name" >&2
+        return 0
+      fi
+      shift || true
+      local description="" system_prompt="" tools="" model="" thinking="" isolation="" timeout="" inherit="false"
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --description) description="${2:-}"; shift 2 || break ;;
+          --system-prompt) system_prompt="${2:-}"; shift 2 || break ;;
+          --prompt-file)
+            if [ -n "${2:-}" ] && [ -f "$2" ]; then
+              system_prompt="$(cat "$2")"
+            else
+              echo "pigorc: agent add $name: cannot read prompt file ${2:-}" >&2
+            fi
+            shift 2 || break ;;
+          --tools) tools="${2:-}"; shift 2 || break ;;
+          --model) model="${2:-}"; shift 2 || break ;;
+          --thinking) thinking="${2:-}"; shift 2 || break ;;
+          --isolation) isolation="${2:-}"; shift 2 || break ;;
+          --timeout) timeout="${2:-}"; shift 2 || break ;;
+          --inherit-hooks) inherit="true"; shift ;;
+          *)
+            echo "pigorc: agent add: unknown argument $1" >&2
+            shift ;;
+        esac
+      done
+      __pigo_emit agent add "$name" "$description" "$tools" "$model" "$thinking" "$isolation" "$timeout" "$inherit" "$system_prompt"
+      ;;
+    hook)
+      local name="${1:-}"
+      local event="${2:-}"
+      shift 2 || true
+      local matcher="" timeout="" command=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --matcher) matcher="${2:-}"; shift 2 || break ;;
+          --timeout) timeout="${2:-}"; shift 2 || break ;;
+          --command) command="${2:-}"; shift 2 || break ;;
+          *)
+            echo "pigorc: agent hook: unknown argument $1" >&2
+            shift ;;
+        esac
+      done
+      if [ -z "$command" ]; then
+        echo "pigorc: agent hook $name $event: --command is required" >&2
+        return 0
+      fi
+      __pigo_emit agenthook "$name" "$event" "$matcher" "$timeout" "$command"
+      ;;
+    remove|rm)
+      __pigo_emit agent remove "${1:-}"
+      ;;
+    *)
+      echo "pigorc: usage: agent add <name> ... | agent hook <name> <event> --command CMD | agent remove <name>" >&2
+      ;;
+  esac
+}
+
 # __pigo_env dumps the exported environment as NUL-separated name/value pairs so
 # pigo can diff it and apply whatever the script exported.
 __pigo_env() {

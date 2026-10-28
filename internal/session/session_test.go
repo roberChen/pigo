@@ -909,3 +909,63 @@ func TestPreviewReadsLegacySchema(t *testing.T) {
 		t.Fatalf("Preview(legacy) = %q, want %q", got, want)
 	}
 }
+
+// TestListResumableExcludesSubAgentSessions verifies a sub-agent session is a full
+// session in the store (List and LoadEntries see it) but never appears as a
+// resumable conversation: it belongs to its parent, which continues it through the
+// sub-agent tool.
+func TestListResumableExcludesSubAgentSessions(t *testing.T) {
+	s := newStore(t)
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	parent := SessionHeader{ID: NewID(now), CreatedAt: now, UpdatedAt: now, Model: "m"}
+	if err := s.Save(parent, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("parent prompt")}},
+	}); err != nil {
+		t.Fatalf("Save parent: %v", err)
+	}
+	child := SessionHeader{
+		ID:            NewID(now.Add(time.Minute)),
+		CreatedAt:     now.Add(time.Minute),
+		UpdatedAt:     now.Add(time.Minute),
+		ParentSession: parent.ID,
+		SubAgent:      "researcher",
+	}
+	if err := s.Save(child, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("child prompt")}},
+	}); err != nil {
+		t.Fatalf("Save child: %v", err)
+	}
+
+	all, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("List returned %d sessions, want both (a child is a full session)", len(all))
+	}
+
+	resumable, err := s.ListResumable()
+	if err != nil {
+		t.Fatalf("ListResumable: %v", err)
+	}
+	if len(resumable) != 1 || resumable[0].ID != parent.ID {
+		t.Fatalf("ListResumable = %+v, want only the parent conversation", resumable)
+	}
+
+	sums, err := s.Summaries(0)
+	if err != nil {
+		t.Fatalf("Summaries: %v", err)
+	}
+	if len(sums) != 1 || sums[0].Header.ID != parent.ID {
+		t.Fatalf("Summaries = %+v, want only the parent conversation", sums)
+	}
+
+	// The child still loads by id (its parent needs it) and is marked as such.
+	h, _, err := s.LoadEntries(child.ID)
+	if err != nil {
+		t.Fatalf("LoadEntries(child): %v", err)
+	}
+	if !h.IsSubAgent() || h.ParentSession != parent.ID {
+		t.Errorf("child header = %+v, want a sub-agent parented to %s", h, parent.ID)
+	}
+}

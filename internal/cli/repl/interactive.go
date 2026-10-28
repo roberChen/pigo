@@ -121,6 +121,9 @@ func Run(opts Options) error {
 		if err != nil {
 			return err
 		}
+		if h.IsSubAgent() {
+			return fmt.Errorf("session %s: %w", opts.ResumeID, session.ErrNotResumableSubAgent)
+		}
 		msgs := make(agentcore.MessageList, len(entries))
 		for i, e := range entries {
 			msgs[i] = e.Message
@@ -220,28 +223,29 @@ func Run(opts Options) error {
 	maybeStartBackgroundDream(os.Stdout, dream.ResolveMemoryRoot(), cwd, opts.Dream)
 
 	return runREPL(os.Stdin, os.Stdout, replDeps{
-		store:      store,
-		header:     header,
-		agentCtx:   agentCtx,
-		live:       live,
-		reg:        reg,
-		reminders:  run.TodoReminders(opts.Tools),
-		schedule:   agenttool.ScheduleFromTools(opts.Tools),
-		slash:      slash,
-		creds:      creds,
-		trust:      mgr,
-		cwd:        cwd,
-		in:         reader,
-		confirmMu:  &sync.Mutex{},
-		curLeaf:    curLeaf,
-		persisted:  len(history),
-		memoryRoot: run.MemoryRootFromTools(opts.Tools),
-		memstore:   run.MemoryStoreFromTools(opts.Tools),
-		snap:       run.SnapshotRecorderFromTools(opts.Tools),
-		jobs:       run.BashJobStoreFromTools(opts.Tools),
-		notifier:   plugin.NewEventNotifier(opts.Plugins, os.Stderr),
-		goal:       agenttool.NewGoalState(),
-		telemetry:  cli.NewTelemetryHolder(),
+		store:        store,
+		header:       header,
+		agentCtx:     agentCtx,
+		live:         live,
+		reg:          reg,
+		reminders:    run.TodoReminders(opts.Tools),
+		schedule:     agenttool.ScheduleFromTools(opts.Tools),
+		subagentJobs: runtime.SubAgentJobsFromTools(opts.Tools),
+		slash:        slash,
+		creds:        creds,
+		trust:        mgr,
+		cwd:          cwd,
+		in:           reader,
+		confirmMu:    &sync.Mutex{},
+		curLeaf:      curLeaf,
+		persisted:    len(history),
+		memoryRoot:   run.MemoryRootFromTools(opts.Tools),
+		memstore:     run.MemoryStoreFromTools(opts.Tools),
+		snap:         run.SnapshotRecorderFromTools(opts.Tools),
+		jobs:         run.BashJobStoreFromTools(opts.Tools),
+		notifier:     plugin.NewEventNotifier(opts.Plugins, os.Stderr),
+		goal:         agenttool.NewGoalState(),
+		telemetry:    cli.NewTelemetryHolder(),
 	})
 }
 

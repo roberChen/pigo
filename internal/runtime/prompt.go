@@ -87,11 +87,16 @@ const todoGuide = "When a task has multiple steps or is non-trivial, use the tod
 // mechanism for delegation and fan-out. The key affordance advertised here is
 // that emitting MULTIPLE task calls in a single assistant message runs those
 // sub-agents in parallel, letting skills like /graph achieve real concurrency.
-const taskGuide = "When work splits into independent subtasks, delegate them with the task tool: each " +
-	"task call dispatches an independent sub-agent that completes its subtask on a fresh context and " +
-	"returns its final report. To fan out, emit MULTIPLE task calls in a single message — they run in " +
-	"parallel. Give each a complete, self-contained prompt, since a sub-agent shares none of this " +
-	"conversation's context. Do the work directly for a single, sequential, or trivial task."
+const taskGuide = "When work splits into independent subtasks, delegate them with the task tool (or a " +
+	"named agent from the user's configuration): each call dispatches an independent sub-agent that " +
+	"completes its subtask on a fresh context and returns its final report. To fan out, emit MULTIPLE " +
+	"task calls in a single message — they run in parallel. Give each a complete, self-contained prompt, " +
+	"since a sub-agent shares none of this conversation's context. A sub-agent cannot question the user: " +
+	"if it reports that a decision is blocked, ask the user with the question tool and then continue the " +
+	"same sub-agent by passing the session id its result reported, rather than starting over. Set " +
+	"background true when the delegation can run while you do something else: you get a job id at once and " +
+	"the report arrives as a follow-up message (task_output lists jobs, or waits for one). Do the work " +
+	"directly for a single, sequential, or trivial task."
 
 // questionGuide instructs the model on the question tool: the one way to ask the
 // operator something mid-run. It is deliberately narrow — an agent that stops to

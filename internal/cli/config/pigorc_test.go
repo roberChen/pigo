@@ -481,3 +481,79 @@ provider remove legacy
 		t.Error("unrelated file definitions must survive")
 	}
 }
+
+// TestPigorcAgentDefinitions verifies the `agent add` / `agent hook` /
+// `agent remove` DSL: flags become an AgentConfig, hooks attach to their agent (and
+// survive a re-declaration), an agent's hooks are independent by default, and
+// `agent remove` cancels a definition gathered from an earlier file.
+func TestPigorcAgentDefinitions(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	promptFile := filepath.Join(dir, "researcher.md")
+	writeFile(t, promptFile, "Research the repository.\nCite file:line.\n")
+
+	// Global file: defines two agents and hooks one of them.
+	global := filepath.Join(dir, "pigorc")
+	writeFile(t, global, `
+agent add researcher --description "Read-only researcher" --prompt-file "`+promptFile+`" \
+  --tools read,grep,find --model claude-haiku-4 --thinking off --timeout 120
+agent hook researcher PreToolUse --matcher '^bash$' --command './hooks/no-bash.sh'
+agent add writer --description "Edits files" --inherit-hooks
+`)
+	// Project file: refines the researcher (keeping its hooks) and removes writer.
+	project := filepath.Join(dir, ".pigorc")
+	writeFile(t, project, `
+agent add researcher --description "Refined researcher" --tools read
+agent remove writer
+`)
+
+	p, err := EvaluatePigorc(dir, []string{global, project}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.Agents) != 1 {
+		t.Fatalf("agents = %+v, want only researcher after the remove", p.Agents)
+	}
+	researcher := p.Agents[0]
+	if researcher.Name != "researcher" || researcher.Description != "Refined researcher" {
+		t.Errorf("researcher = %+v, want the project file's refinement", researcher)
+	}
+	if got := researcher.Tools; len(got) != 1 || got[0] != "read" {
+		t.Errorf("researcher tools = %v, want the refined allow list", got)
+	}
+	if len(researcher.Hooks) != 1 || researcher.Hooks[0].Event != "PreToolUse" || researcher.Hooks[0].Matcher != "^bash$" {
+		t.Errorf("researcher hooks = %+v, want the global hook kept across the re-declaration", researcher.Hooks)
+	}
+	if researcher.InheritHooks {
+		t.Error("hooks must be independent by default")
+	}
+
+	// A single-file definition carries every flag through.
+	p, err = EvaluatePigorc(dir, []string{global, project, writeNamed(t, dir, `
+agent add solitary --system-prompt "Do one thing." --isolation process --timeout 42 --inherit-hooks
+`)}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	var solitary *AgentConfig
+	for i := range p.Agents {
+		if p.Agents[i].Name == "solitary" {
+			solitary = &p.Agents[i]
+		}
+	}
+	if solitary == nil {
+		t.Fatalf("solitary agent missing: %+v", p.Agents)
+	}
+	if solitary.SystemPrompt != "Do one thing." || solitary.Isolation != "process" ||
+		solitary.TimeoutSeconds != 42 || !solitary.InheritHooks {
+		t.Errorf("solitary = %+v", *solitary)
+	}
+}
+
+// writeNamed writes content to a fresh file under dir and returns its path.
+func writeNamed(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "extra-"+time.Now().Format("150405.000000000")+".pigorc")
+	writeFile(t, path, content)
+	return path
+}

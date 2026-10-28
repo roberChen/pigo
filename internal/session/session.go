@@ -91,7 +91,23 @@ type SessionHeader struct {
 	// into an inherited checkpoint (#480). Messages before this index live in the
 	// checkpoint summary rather than the replayed transcript. Optional/additive.
 	ContextWatermark int `json:"contextWatermark,omitempty"`
+	// SubAgent names the custom agent / sub-agent tool that ran in this session.
+	// Empty for a normal (top-level) conversation. A sub-agent session is a full
+	// session — persisted exactly like any other, parented to the conversation
+	// that dispatched it — but it is not a standalone conversation: it is hidden
+	// from the resume listings and can only be continued by its parent agent.
+	// Optional and additive: older schemas omit it and load as top-level.
+	SubAgent string `json:"subAgent,omitempty"`
 }
+
+// IsSubAgent reports whether this session belongs to a sub-agent run rather than
+// a top-level conversation.
+func (h SessionHeader) IsSubAgent() bool { return h.SubAgent != "" }
+
+// ErrNotResumableSubAgent is returned by drivers when asked to resume a
+// sub-agent session directly. Such a session is part of its parent conversation;
+// the parent agent continues it through its sub-agent tool instead.
+var ErrNotResumableSubAgent = errors.New("this is a sub-agent session: continue it from the parent agent instead of resuming it directly")
 
 // Entry wraps one persisted message with the tree metadata introduced in schema
 // v3 (US-005, #121): a stable ID plus the ParentID it descends from. A linear
@@ -336,6 +352,31 @@ func NewID(now time.Time) string {
 	return fmt.Sprintf("%s-%06d", now.UTC().Format("20060102-150405"), now.UTC().Nanosecond()/1000%1_000_000)
 }
 
+// DefaultDir returns the default session store directory: $PIGO_HOME/sessions,
+// or ~/.pigo/sessions when PIGO_HOME is unset. An empty string is returned when
+// the home directory cannot be resolved and no override is set.
+func DefaultDir() string {
+	if dir := os.Getenv("PIGO_HOME"); dir != "" {
+		return filepath.Join(dir, "sessions")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pigo", "sessions")
+}
+
+// OpenDefaultStore opens (creating if needed) the default session store. It is
+// the shared seam for every driver and for the sub-agent tools, which persist
+// their child sessions in the same store as top-level conversations.
+func OpenDefaultStore() (*Store, error) {
+	dir := DefaultDir()
+	if dir == "" {
+		return nil, fmt.Errorf("session: cannot resolve the default store directory")
+	}
+	return NewStore(dir)
+}
+
 // Store persists sessions as JSONL files under a directory (typically
 // ~/.pigo/sessions). The zero value is unusable; construct with NewStore.
 type Store struct {
@@ -552,11 +593,40 @@ func readSession(r io.Reader) (SessionHeader, []Entry, error) {
 	return header, entries, nil
 }
 
-// List returns the headers of all sessions in the store, sorted by UpdatedAt
-// descending (most recently used first). Files that fail to parse are skipped
-// rather than failing the whole listing, so one corrupt session does not hide
-// the rest.
+// List returns the headers of all sessions in the store — including sub-agent
+// sessions — sorted by UpdatedAt descending (most recently used first). Files
+// that fail to parse are skipped rather than failing the whole listing, so one
+// corrupt session does not hide the rest. Callers that present conversations to
+// the user want ListResumable instead.
 func (s *Store) List() ([]SessionHeader, error) {
+	headers, err := s.allHeaders()
+	if err != nil {
+		return nil, err
+	}
+	return headers, nil
+}
+
+// ListResumable returns the top-level conversations, newest first: everything
+// List returns except sub-agent sessions. A sub-agent session is part of its
+// parent conversation, so resuming it on its own would be a dangling half of a
+// conversation; the parent agent continues it through the sub-agent tool
+// instead.
+func (s *Store) ListResumable() ([]SessionHeader, error) {
+	headers, err := s.allHeaders()
+	if err != nil {
+		return nil, err
+	}
+	out := headers[:0]
+	for _, h := range headers {
+		if !h.IsSubAgent() {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+// allHeaders reads and sorts every session header in the store.
+func (s *Store) allHeaders() ([]SessionHeader, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("session: read store dir: %w", err)
@@ -592,7 +662,7 @@ type SessionSummary struct {
 // only the newest limit are described. Unreadable sessions are skipped, exactly
 // like List.
 func (s *Store) Summaries(limit int) ([]SessionSummary, error) {
-	headers, err := s.List()
+	headers, err := s.ListResumable()
 	if err != nil {
 		return nil, err
 	}

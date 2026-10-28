@@ -12,6 +12,30 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **Background sub-agents**: a `task` / custom-agent call with `background: true`
+  starts the child on its own goroutine and returns a job id immediately, so the
+  parent can keep working. The report is delivered as a follow-up user turn when
+  the child finishes (the run does not settle while a background child is still
+  running, and waiting stops if the run is cancelled), and the new `task_output`
+  tool lists jobs, reports status, or waits for one. Jobs run on the parent run's
+  context, share the existing concurrency cap, persist their own session like any
+  other sub-agent, and are rejected in process isolation (which has no resumable
+  session). The tool registry, the follow-up seam and the goal loop are wired so
+  reports reach the model wherever the run was started.
+- **Custom sub-agents from the pigorc**: `agent add ...` / `agent hook ...` in
+  the pigorc (the single source of truth for agent definitions; there is no
+  config.toml agent table) define named agents the main agent dispatches as tools, each
+  with its own system prompt, tool allow list, model, reasoning effort, timeout
+  and isolation. A defined agent runs as a complete agent: it compacts like a
+  top-level run and persists its own session, parented to the calling
+  conversation and marked with the agent name. Those sessions are hidden from the
+  resume listings and cannot be resumed directly; the parent continues one by
+  passing the reported session id, which is also the documented fallback for a
+  decision: sub-agents never get the `question` tool, the main agent asks the user
+  and then continues the child. Agent hooks are the agent's own by default
+  (`inherit_hooks` also runs the global/project set), tool-execution hooks and
+  `SubagentStop` are wired on the child run, and a bad definition (unknown tool,
+  isolation or thinking level, name collision) warns and is skipped.
 - **Custom third-party providers from config**: `[[providers]]` tables in
   `config.toml` (and `provider add <name> ...` in a pigorc) register a gateway
   that is not in the built-in registry, after which it behaves like one:

@@ -244,6 +244,9 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 			// emitFrom feeds the parent stream and is run-scoped, so a child's
 			// SubAgentProgressEvent lands on the right run's stream.
 			toolCtx := agentcore.WithProgressEmitter(ctx, emitFrom)
+			// Carry the session id too: a sub-agent tool parents the session it creates
+			// to this conversation so a later continuation call can find it.
+			toolCtx = agentcore.WithSessionID(toolCtx, cfg.SessionID)
 			toolResults, allTerminate := agenttool.ExecuteToolCalls(toolCtx, cfg.Batch, calls, emitFrom)
 			for _, tr := range toolResults {
 				agentCtx.Messages = append(agentCtx.Messages, tr)

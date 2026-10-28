@@ -84,10 +84,21 @@ func InstallSeams(cfg *runtime.RunConfig, d *hooks.Dispatcher, deps HookDeps) {
 	if d == nil {
 		return
 	}
+	InstallToolSeams(cfg, d, deps)
+	installStopHook(cfg, d, deps, "Stop")
+}
+
+// InstallToolSeams wires only the tool-execution hook points (PreToolUse /
+// PostToolUse) onto cfg. It is the sub-agent variant: a child run ends on the
+// SubagentStop event rather than Stop (see InstallSubagentStop), so it must not
+// pick up the parent's Stop semantics through InstallSeams.
+func InstallToolSeams(cfg *runtime.RunConfig, d *hooks.Dispatcher, deps HookDeps) {
+	if d == nil {
+		return
+	}
 	tec := &cfg.Batch.ToolExecutorConfig
 	tec.BeforeToolCall = chainBeforeToolCall(tec.BeforeToolCall, preToolCallHook(d, deps))
 	tec.AfterToolCall = chainAfterToolCall(tec.AfterToolCall, postToolCallHook(d, deps))
-	installStopHook(cfg, d, deps, "Stop")
 }
 
 // preToolCallHook adapts the dispatcher's PreToolUse event to the BeforeToolCall

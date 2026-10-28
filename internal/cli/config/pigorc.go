@@ -19,6 +19,16 @@
 //	             [--env-var VAR] [--auth bearer|x-api-key] [--api-key KEY]
 //	             [--model ID ...]      define a third-party provider
 //	provider remove <name>              drop a definition from a lower layer
+//	agent add <name> [--description T] [--system-prompt T | --prompt-file F]
+//	          [--tools a,b] [--model M] [--thinking L] [--isolation I]
+//	          [--timeout N] [--inherit-hooks]   define a custom sub-agent
+//	agent hook <name> <event> [--matcher RE] [--timeout N] --command CMD
+//	agent remove <name>                 drop an agent defined by an earlier file
+//
+// Custom sub-agents are defined here only: the pigorc is their single source of
+// truth (config.toml has no agent table). The evaluated definitions are published
+// with SetCurrentAgents for the tool assembly.
+//
 //	<Event>() { ...; }       a shell function named after a hook event becomes a
 //	                         hook; it receives the same stdin JSON/env as a
 //	                         command hook and its exit code decides the outcome
@@ -73,6 +83,11 @@ type Pigorc struct {
 	// definition). RemovedProviders names definitions to drop from a lower layer.
 	Providers        []ProviderConfig
 	RemovedProviders []string
+	// Agents holds the custom sub-agent definitions the scripts added, in
+	// declaration order. A repeated name replaces the earlier definition while
+	// keeping its hooks, and `agent remove` drops a definition gathered from an
+	// earlier file (e.g. the global pigorc cancelled by the project one).
+	Agents []AgentConfig
 	// Env holds the exported variables whose value differs from the launching
 	// environment; Unset holds the names the script removed.
 	Env   map[string]string
@@ -287,6 +302,14 @@ func (p *Pigorc) parseRecords(records string) {
 				continue
 			}
 			p.addProviderModel(fields[1], fields[2])
+		case "agent":
+			p.parseAgentRecord(fields)
+		case "agenthook":
+			if len(fields) != 6 {
+				p.warnf("agent hook: malformed record %q", line)
+				continue
+			}
+			p.addAgentHook(fields[1], AgentHookConfig{Event: fields[2], Matcher: fields[3], Timeout: atoiOrZero(fields[4]), Command: fields[5]})
 		case "hookfn":
 			if len(fields) != 4 {
 				p.warnf("hook function: malformed record %q", line)
@@ -381,6 +404,106 @@ func (p *Pigorc) providerIndex(name string) int {
 		}
 	}
 	return -1
+}
+
+// parseAgentRecord folds one `agent add|remove` record into p.
+func (p *Pigorc) parseAgentRecord(fields []string) {
+	if len(fields) < 3 {
+		p.warnf("agent: malformed record %v", fields)
+		return
+	}
+	switch fields[1] {
+	case "add":
+		// agent, add, name, description, tools, model, thinking, isolation,
+		// timeout, inherit, systemPrompt
+		if len(fields) != 11 {
+			p.warnf("agent add: malformed record %v", fields)
+			return
+		}
+		def := AgentConfig{
+			Name:           strings.TrimSpace(fields[2]),
+			Description:    strings.TrimSpace(fields[3]),
+			Tools:          splitCSV(fields[4]),
+			Model:          strings.TrimSpace(fields[5]),
+			ThinkingLevel:  strings.TrimSpace(fields[6]),
+			Isolation:      strings.TrimSpace(fields[7]),
+			TimeoutSeconds: atoiOrZero(fields[8]),
+			InheritHooks:   strings.EqualFold(strings.TrimSpace(fields[9]), "true"),
+			SystemPrompt:   fields[10],
+		}
+		if def.Name == "" {
+			p.warnf("agent add: the agent name must not be empty")
+			return
+		}
+		if i := p.agentIndex(def.Name); i >= 0 {
+			def.Hooks = p.Agents[i].Hooks
+			p.Agents[i] = def
+			return
+		}
+		p.Agents = append(p.Agents, def)
+	case "remove":
+		name := strings.TrimSpace(fields[2])
+		if name == "" {
+			p.warnf("agent remove: the agent name must not be empty")
+			return
+		}
+		// Only definitions gathered by this evaluation can be removed (there is no
+		// other agent-definition source), and only already-sourced ones: a later
+		// `agent add` wins over an earlier `agent remove`.
+		if i := p.agentIndex(name); i >= 0 {
+			p.Agents = append(p.Agents[:i], p.Agents[i+1:]...)
+		}
+	default:
+		p.warnf("agent: unknown action %q", fields[1])
+	}
+}
+
+// addAgentHook attaches one hook to an agent definition, creating the definition
+// when the hook was declared before it.
+func (p *Pigorc) addAgentHook(name string, hook AgentHookConfig) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	i := p.agentIndex(name)
+	if i < 0 {
+		p.Agents = append(p.Agents, AgentConfig{Name: name})
+		i = len(p.Agents) - 1
+	}
+	p.Agents[i].Hooks = append(p.Agents[i].Hooks, hook)
+}
+
+// agentIndex returns the position of an agent definition by name, or -1.
+func (p *Pigorc) agentIndex(name string) int {
+	for i, def := range p.Agents {
+		if def.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitCSV splits a comma-separated flag value, dropping blanks.
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// atoiOrZero parses an optional integer flag value.
+func atoiOrZero(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // addHook registers one command hook on an event, validating the event name.
@@ -701,3 +824,15 @@ func (p *Pigorc) HookSet() hooks.HookSet {
 	}
 	return p.Hooks
 }
+
+// currentAgents holds the custom agent definitions resolved at startup so the tool
+// assembly (run.SetupEnv) can register them without threading the config through
+// every driver.
+var currentAgents []AgentConfig
+
+// SetCurrentAgents records the custom agent definitions for this process.
+func SetCurrentAgents(agents []AgentConfig) { currentAgents = agents }
+
+// CurrentAgents returns the custom agent definitions (nil when none were
+// configured, or in library use where no config was loaded).
+func CurrentAgents() []AgentConfig { return currentAgents }

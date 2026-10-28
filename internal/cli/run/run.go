@@ -7,6 +7,7 @@
 package run
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -60,6 +61,13 @@ type Env struct {
 	// GetFollowUpMessages seam (see NewConfig) and front-ends can reach it via
 	// agenttool.ScheduleFromTools.
 	Schedule *agenttool.Schedule
+
+	// SubAgentJobs is the run's background sub-agent registry, or nil when the
+	// sub-agent tools are not wired in (--no-tools). Its task_output tool is
+	// already in Tools; the registry is surfaced so run assembly can wire report
+	// delivery into the loop's GetFollowUpMessages seam (see NewConfig) and
+	// front-ends can reach it via runtime.SubAgentJobsFromTools.
+	SubAgentJobs *runtime.SubAgentJobs
 }
 
 // SetupEnv resolves the provider for model/baseURL, builds the tool set rooted
@@ -105,8 +113,12 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// stream/model. Each spawn gets a fresh child RunConfig whose registry is the
 	// builtins with "task" removed (the nesting guard, so a child cannot fan out
 	// again), and all task calls in a run share one semaphore capping concurrency.
+	var jobs *runtime.SubAgentJobs
 	if !noTools {
 		sem := runtime.NewSubagentSemaphore()
+		// One background-job registry per session, shared by every sub-agent tool and
+		// by the follow-up seam that delivers finished reports.
+		jobs = runtime.NewSubAgentJobs()
 		// The child resolves credentials the same way the parent does: env/OAuth via
 		// a fresh store, plus the CLI/config api key as an override. Without the
 		// override a child would get an empty key whenever auth comes from config.toml
@@ -125,7 +137,29 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 				Batch: agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: ToolRegistry(childTools)}},
 			}
 		}
-		tools = append(tools, runtime.NewTaskTool(factory, sem))
+		tools = append(tools, runtime.NewTaskTool(factory, sem, jobs))
+		// Custom sub-agents from config.toml `[[agents]]` / pigorc `agent add`: each
+		// becomes its own tool with its own prompt, tools, model, hooks and timeout.
+		// They are registered after the generic task tool so a definition can never
+		// shadow it (collisions are reported and skipped).
+		taken := make(map[string]bool, len(tools))
+		for _, t := range tools {
+			taken[strings.ToLower(t.Name())] = true
+		}
+		tools = append(tools, buildAgentTools(config.CurrentAgents(), agentBuildContext{
+			cwd:          cwd,
+			policy:       policy,
+			model:        model,
+			baseURL:      baseURL,
+			protocol:     protocol,
+			provider:     prov,
+			providerName: resolvedName,
+			apiKey:       apiKey,
+			takenNames:   taken,
+			jobs:         jobs,
+		})...)
+		// task_output is the model's handle on background jobs (list, status, wait).
+		tools = append(tools, &runtime.TaskOutputTool{Jobs: jobs})
 	}
 	// Wire the session-local reminder scheduler (issue #565) unless tools are
 	// disabled: three schedule_* tools over one in-memory store, whose due
@@ -200,6 +234,7 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		Plugins:      mgr,
 		Memory:       memStore,
 		Schedule:     sched,
+		SubAgentJobs: jobs,
 	}, nil
 }
 
@@ -612,7 +647,7 @@ func Trusted(cwd string) bool {
 // stream, the dynamic API-key resolver, and the tool registry. It is the single
 // definition of "how a run is wired", so the REPL (streamRun) and the headless
 // driver cannot drift apart.
-func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, prov provider.Provider, creds *provider.CredentialStore, reg *agenttool.ToolRegistry, reminders *runtime.ReminderRegistry, sched *agenttool.Schedule) runtime.RunConfig {
+func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, prov provider.Provider, creds *provider.CredentialStore, reg *agenttool.ToolRegistry, reminders *runtime.ReminderRegistry, sched *agenttool.Schedule, jobs *runtime.SubAgentJobs) runtime.RunConfig {
 	cfg := runtime.RunConfig{
 		LoopConfig: runtime.LoopConfig{
 			Model:         model,
@@ -626,11 +661,31 @@ func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, pro
 		},
 		Reminders: reminders,
 	}
-	// Due session-local reminders ride the follow-up seam (issue #565): when the
-	// run is about to settle, the loop consults the scheduler and queues each due
-	// reminder as a normal user turn. A nil scheduler leaves the seam unwired.
-	if sched != nil {
-		cfg.GetFollowUpMessages = sched.FollowUpMessages
-	}
+	// Background sub-agent reports and due session-local reminders ride the
+	// follow-up seam: when the run is about to settle, the loop delivers finished
+	// job reports (waiting for the next completion while work is outstanding) and
+	// queues each due reminder as a normal user turn. With neither configured the
+	// seam stays unwired.
+	cfg.GetFollowUpMessages = FollowUps(jobs, sched)
 	return cfg
+}
+
+// FollowUps composes the run's follow-up providers: finished background sub-agent
+// reports first, then due schedule reminders. It returns nil when neither is
+// configured, so the loop pays nothing (the seam stays unset).
+func FollowUps(jobs *runtime.SubAgentJobs, sched *agenttool.Schedule) func(ctx context.Context, agentCtx *agentcore.AgentContext) []agentcore.AgentMessage {
+	switch {
+	case jobs == nil && sched == nil:
+		return nil
+	case jobs == nil:
+		return sched.FollowUpMessages
+	case sched == nil:
+		return jobs.FollowUpMessages
+	}
+	return func(ctx context.Context, agentCtx *agentcore.AgentContext) []agentcore.AgentMessage {
+		if msgs := jobs.FollowUpMessages(ctx, agentCtx); len(msgs) > 0 {
+			return msgs
+		}
+		return sched.FollowUpMessages(ctx, agentCtx)
+	}
 }

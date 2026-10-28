@@ -290,6 +290,10 @@ func main() {
 	// model-id inference and the /model picker treat them like built-ins. A bad
 	// definition warns instead of aborting, so one typo cannot brick the CLI.
 	registerConfiguredProviders(cfg.Providers)
+	// Custom sub-agents come only from the pigorc scripts (the one config system
+	// for agent definitions) and are registered by the tool assembly
+	// (run.SetupEnv), which runs later per driver; publish them for this process.
+	config.SetCurrentAgents(pigorc.Agents)
 
 	// A bare provider name ("zai", "deepseek") means that provider's default
 	// model (issue #564): canonicalize once here so every downstream consumer —

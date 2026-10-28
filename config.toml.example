@@ -87,6 +87,12 @@ no_skills = false
 # auth       = "bearer"                    # bearer | x-api-key
 # models     = ["mycorp-large", "mycorp-small"]  # first one is the default
 
+# --- Custom sub-agents ---
+# Custom agents are defined in the pigorc only (their single source of truth):
+#   agent add researcher --description "..." --prompt-file ./researcher.md \
+#     --tools read,grep --model claude-haiku-4
+# See the "自定义 sub-agent" section of README.md.
+
 # --- Persistent memory + infinite context (nested tables) ---
 
 # [memory] controls the persistent memory system. All keys are optional and

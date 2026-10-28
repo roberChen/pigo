@@ -225,6 +225,14 @@ func runGoalLoop(setCancel func(context.CancelFunc), out io.Writer, host cli.Hos
 		},
 		Reminders: reminders,
 		GetFollowUpMessages: func(ctx context.Context, agentCtx *agentcore.AgentContext) []agentcore.AgentMessage {
+			// Background sub-agent reports arrive first: they are new information the
+			// goal loop should act on, and delivering them keeps the goal's own
+			// continuation decision from running on stale context.
+			if jobs := runtime.SubAgentJobsFromTools(host.Registry().List()); jobs != nil {
+				if msgs := jobs.FollowUpMessages(ctx, agentCtx); len(msgs) > 0 {
+					return msgs
+				}
+			}
 			// Account for the turns produced since the last settle. Auto-compaction
 			// can shrink agentCtx.Messages in place (summary + tail) between settles,
 			// dropping its length below lastSeen; clamp so the slice never goes out

@@ -61,8 +61,13 @@ type replDeps struct {
 	// when the schedule_* tools are not wired in (e.g. --no-tools); when set,
 	// streamRun wires it so due reminders are delivered as follow-up user turns.
 	schedule *agenttool.Schedule
-	slash    *runtime.SlashRegistry
-	creds    *provider.CredentialStore
+	// subagentJobs is the background sub-agent registry shared by the sub-agent
+	// tools (runtime.SubAgentJobsFromTools). It is wired onto the follow-up seam so
+	// a finished background child's report reaches the model as a user turn. nil
+	// when no sub-agent tools are present (e.g. --no-tools).
+	subagentJobs *runtime.SubAgentJobs
+	slash        *runtime.SlashRegistry
+	creds        *provider.CredentialStore
 
 	// notifier delivers agent lifecycle events to subscribed plugins (US-017,
 	// #133). It is nil when no plugin subscribes; DrainStream's OnEvent stays
@@ -623,12 +628,11 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 	if deps.dispatcher != nil {
 		run.InstallSeams(&cfg, deps.dispatcher, deps.hookDeps)
 	}
-	// Due session-local reminders ride the follow-up seam (issue #565): when the
-	// run is about to settle, the scheduler queues each due reminder as a normal
-	// user turn. A nil scheduler (no schedule_* tools) leaves the seam unwired.
-	if deps.schedule != nil {
-		cfg.GetFollowUpMessages = deps.schedule.FollowUpMessages
-	}
+	// Background sub-agent reports and due session-local reminders ride the
+	// follow-up seam: finished job reports arrive as user turns (a run does not
+	// settle while a background child it started is still running), followed by any
+	// due schedule reminder. With neither configured the seam stays unwired.
+	cfg.GetFollowUpMessages = run.FollowUps(deps.subagentJobs, deps.schedule)
 	// Install the human-in-the-loop seam for this turn: the question tool reads
 	// the operator's answer from the shared input (serialized with the tool-call
 	// confirmation prompt), so a run can pause for a decision and continue.
@@ -1027,6 +1031,10 @@ func runResume(out io.Writer, deps *replDeps, line string) {
 	header, entries, err := deps.store.LoadEntries(id)
 	if err != nil {
 		fmt.Fprintf(out, "pigo: cannot load session %s: %v\n", id, err)
+		return
+	}
+	if header.IsSubAgent() {
+		fmt.Fprintf(out, "pigo: session %s: %v\n", id, session.ErrNotResumableSubAgent)
 		return
 	}
 	// Swap the live session to the loaded one: rebuild the flat message list,

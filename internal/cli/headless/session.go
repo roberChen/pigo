@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
@@ -31,15 +30,7 @@ import (
 // PIGO_HOME when set), creating the directory on first use. It is shared by the
 // headless run path and the interactive REPL.
 func SessionStore() (*session.Store, error) {
-	dir := os.Getenv("PIGO_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve home dir: %w", err)
-		}
-		dir = filepath.Join(home, ".pigo")
-	}
-	return session.NewStore(filepath.Join(dir, "sessions"))
+	return session.OpenDefaultStore()
 }
 
 // PrintSessions prints the stored sessions, most-recent first, to out: one
@@ -76,7 +67,9 @@ func MostRecentSessionID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	headers, err := store.List()
+	// Only top-level conversations can be continued; a sub-agent session is
+	// resumed through its parent agent, never on its own.
+	headers, err := store.ListResumable()
 	if err != nil {
 		return "", err
 	}
@@ -120,6 +113,9 @@ func openHeadlessSession(resumeID, model, providerName, sysPrompt string) (agent
 		h, entries, err := store.LoadEntries(resumeID)
 		if err != nil {
 			return nil, headlessSession{}, err
+		}
+		if h.IsSubAgent() {
+			return nil, headlessSession{}, fmt.Errorf("session %s: %w", resumeID, session.ErrNotResumableSubAgent)
 		}
 		msgs := make(agentcore.MessageList, len(entries))
 		for i, e := range entries {

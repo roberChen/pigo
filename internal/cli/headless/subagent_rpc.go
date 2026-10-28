@@ -97,7 +97,11 @@ func handleSubAgentRequest(ctx context.Context, enc *json.Encoder, req *jsonrpc.
 		return
 	}
 	cwd, _ := os.Getwd()
-	tools := filterBuiltinTools(run.BuiltinTools(cwd, false), params.Tools)
+	// Start from the same guarded child set goroutine-mode sub-agents get: the
+	// builtins minus the delegation and question tools. A sub-agent must not fan
+	// out further, and it must not prompt the user (the parent asks and then
+	// continues the child session instead).
+	tools := filterBuiltinTools(run.ChildToolSet(cwd, run.ToolPolicy{}), params.Tools)
 	reg := run.ToolRegistry(tools)
 	creds := provider.NewCredentialStore(nil) // env-resolved
 	runCfg := runtime.RunConfig{

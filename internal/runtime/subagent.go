@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/jsonrpc"
@@ -154,6 +155,18 @@ type SubAgentSpec struct {
 	// blocks (queues) the acquire rather than erroring. nil disables limiting, so
 	// existing sub-agent specs run unbounded exactly as before.
 	Sem chan struct{}
+	// ThinkingLevel, when non-empty, overrides the reasoning effort for this
+	// agent's children (otherwise the run config's level applies).
+	ThinkingLevel agentcore.ThinkingLevel
+	// Timeout, when > 0, bounds one child run. A child that exceeds it is
+	// cancelled and the call returns an error result, so a runaway sub-agent
+	// cannot hold the parent turn forever.
+	Timeout time.Duration
+	// Jobs, when non-nil, enables background execution for this agent: a call with
+	// `background: true` starts the run as a job and returns at once, and the job's
+	// report is delivered as a follow-up user turn. Nil means background calls are
+	// rejected with an explanatory error.
+	Jobs *SubAgentJobs
 }
 
 // subAgentArgs is the JSON argument shape for a sub-agent tool call: a
@@ -163,6 +176,12 @@ type SubAgentSpec struct {
 type subAgentArgs struct {
 	Prompt      string `json:"prompt"`
 	Description string `json:"description,omitempty"`
+	// SessionID continues an earlier run of the same sub-agent (the id its result
+	// reported). It must belong to this conversation and this agent.
+	SessionID string `json:"session_id,omitempty"`
+	// Background runs the child on its own goroutine and returns a job id at once;
+	// the report arrives later as a follow-up message.
+	Background bool `json:"background,omitempty"`
 }
 
 // subAgentSchema is the JSON Schema validating a sub-agent invocation.
@@ -172,6 +191,14 @@ var subAgentSchema = json.RawMessage(`{
     "prompt": {
       "type": "string",
       "description": "The task for the sub-agent to perform, described in full since the sub-agent runs with a fresh context."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Optional: continue an earlier run of this sub-agent by passing the session id its result reported, instead of starting from a fresh context."
+    },
+    "background": {
+      "type": "boolean",
+      "description": "Optional: run the sub-agent in the background and return a job id immediately. Its report arrives as a follow-up message; use task_output to check or wait for it."
     }
   },
   "required": ["prompt"],
@@ -198,6 +225,11 @@ func NewSubAgentTool(spec SubAgentSpec) *SubAgentTool {
 }
 
 func (t *SubAgentTool) Name() string { return t.spec.Name }
+
+// Spec returns the spec the tool was built from. It is read-only metadata for
+// callers that need to reason about a registered sub-agent (tool wiring, listings,
+// and tests); mutating the returned value does not affect the tool.
+func (t *SubAgentTool) Spec() SubAgentSpec { return t.spec }
 
 func (t *SubAgentTool) Description() string { return t.spec.Description }
 
@@ -239,13 +271,27 @@ func (t *SubAgentTool) Execute(ctx context.Context, id string, args json.RawMess
 		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: empty prompt", t.spec.Name)
 	}
 
+	if a.SessionID != "" {
+		// Continuation is a goroutine-mode feature: the in-process loop owns the
+		// child transcript, so it can be loaded and appended to. A process child
+		// runs in its own process and reports only its final text.
+		if t.spec.Isolation == SubAgentIsolationProcess {
+			return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: session continuation is not supported in process isolation", t.spec.Name)
+		}
+	}
 	if t.spec.Isolation == SubAgentIsolationProcess {
+		if a.Background {
+			return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: background execution is not supported in process isolation", t.spec.Name)
+		}
 		// Process mode returns only the child's final text (the JSON-RPC protocol
 		// does not stream partial updates), so onUpdate is intentionally not
 		// forwarded here; a caller supplying a sink gets no deltas in this mode.
 		return t.executeProcess(ctx, a.Prompt)
 	}
-	return t.executeGoroutine(ctx, id, a.Prompt, a.Description, onUpdate)
+	if a.Background {
+		return t.startBackground(ctx, a.Prompt, a.Description, a.SessionID)
+	}
+	return t.executeGoroutine(ctx, id, a.Prompt, a.Description, a.SessionID, onUpdate)
 }
 
 // executeGoroutine runs the child agent loop in-process and returns its final
@@ -259,7 +305,52 @@ func (t *SubAgentTool) Execute(ctx context.Context, id string, args json.RawMess
 // SubAgentProgressEvent and surfaced up the parent stream; when no emitter is
 // present (e.g. the tool is called directly in a unit test) progress reporting is
 // silently skipped.
-func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, description string, onUpdate agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, description, continueID string, onUpdate agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+	text, sessionID, err := t.runChild(ctx, id, prompt, description, continueID, onUpdate, nil)
+	if err != nil {
+		return agentcore.AgentToolResult{}, err
+	}
+	var details any
+	if sessionID != "" {
+		details = map[string]any{"sessionId": sessionID, "agent": t.spec.Name}
+	}
+	return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(text)}, Details: details}, nil
+}
+
+// startBackground launches the child run as a background job and returns at once
+// with the job id. The report is delivered later as a follow-up user turn (see
+// SubAgentJobs.FollowUpMessages) and can be collected explicitly with task_output.
+// The job runs on the parent RUN's context: it survives this tool call and dies
+// with the run.
+func (t *SubAgentTool) startBackground(ctx context.Context, prompt, description, continueID string) (agentcore.AgentToolResult, error) {
+	if t.spec.Jobs == nil {
+		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: background execution is not configured for this run", t.spec.Name)
+	}
+	job := t.spec.Jobs.Start(t.spec.Name, description, prompt, ctx, func(jctx context.Context, jobID string) (string, string, error) {
+		onActivity := func(activity string) {
+			if j, ok := t.spec.Jobs.Get(jobID); ok {
+				j.setActivity(activity)
+			}
+		}
+		// Progress events carry the JOB id (not the finished tool call) so the
+		// status panel can show a background child after its launch returned.
+		return t.runChild(jctx, jobID, prompt, description, continueID, nil, onActivity)
+	})
+	text := fmt.Sprintf("Started background sub-agent %q as %s.\n"+
+		"It keeps running while you continue; its report is delivered as a follow-up message when it finishes.\n"+
+		"Use task_output (job_id %q, wait true to block) to check on it.", t.spec.Name, job.ID(), job.ID())
+	return agentcore.AgentToolResult{
+		Content: agentcore.ContentList{agentcore.NewTextContent(text)},
+		Details: map[string]any{"jobId": job.ID(), "agent": t.spec.Name, "background": true},
+	}, nil
+}
+
+// runChild executes one child agent run to completion and returns its report, its
+// persisted session id ("" when the run has no backing session) and any error. It
+// is shared by the synchronous path and background jobs; emitID keys the progress
+// events (the parent tool call id, or the job id for a background child) and
+// onActivity, when set, records the child's current activity on the job.
+func (t *SubAgentTool) runChild(ctx context.Context, emitID, prompt, description, continueID string, onUpdate agentcore.ToolUpdateFunc, onActivity func(string)) (string, string, error) {
 	// Concurrency guard: when a shared semaphore is configured, acquire a slot
 	// before spawning the child and release it via defer so a panic or error
 	// still frees the slot. A full channel blocks (queues) the acquire; a
@@ -269,10 +360,20 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 		case t.spec.Sem <- struct{}{}:
 			defer func() { <-t.spec.Sem }()
 		case <-ctx.Done():
-			return agentcore.AgentToolResult{}, ctx.Err()
+			return "", "", ctx.Err()
 		}
 	}
 	runCfg := t.spec.NewRunConfig()
+	if t.spec.ThinkingLevel != "" {
+		runCfg.ThinkingLevel = t.spec.ThinkingLevel
+	}
+	// A per-agent timeout bounds one run: the child is cancelled when it trips, so
+	// a runaway delegation cannot hold the parent turn forever.
+	if t.spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.spec.Timeout)
+		defer cancel()
+	}
 	// Advertise the child's tools to the model. A spec may pin an explicit set
 	// (spec.Tools); otherwise fall back to the run config's registry — the tools
 	// the executor can actually run — so a factory that wires only the registry
@@ -283,12 +384,25 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 	if len(tools) == 0 && runCfg.Batch.ToolExecutorConfig.Registry != nil {
 		tools = runCfg.Batch.ToolExecutorConfig.Registry.List()
 	}
+	// Persist the child run as a session of its own, parented to the conversation
+	// that dispatched it. Continuing an earlier run seeds its transcript first, so
+	// the agent picks up where it left off (the fallback for a sub-agent that needs
+	// a decision: the parent asks the user, then continues this session with the
+	// answer). Nothing is written when the run has no backing session.
+	sess, prior, err := openSubAgentSession(
+		agentcore.SessionIDFromContext(ctx), continueID, t.spec.Name,
+		runCfg.LoopConfig.Model, runCfg.LoopConfig.Provider, t.spec.SystemPrompt,
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("sub-agent %q: %w", t.spec.Name, err)
+	}
+	msgs := make(agentcore.MessageList, 0, len(prior)+1)
+	msgs = append(msgs, prior...)
+	msgs = append(msgs, agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent(prompt)}})
 	childCtx := &agentcore.AgentContext{
 		SystemPrompt: t.spec.SystemPrompt,
-		Messages: agentcore.MessageList{
-			agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent(prompt)}},
-		},
-		Tools: tools,
+		Messages:     msgs,
+		Tools:        tools,
 	}
 
 	stream := StartRun(ctx, childCtx, runCfg)
@@ -324,8 +438,11 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 			if act == "" {
 				return
 			}
+			if onActivity != nil {
+				onActivity(act)
+			}
 			_ = parentEmit(ctx, agentcore.SubAgentProgressEvent{
-				ToolCallID:  id,
+				ToolCallID:  emitID,
 				Description: description,
 				Activity:    act,
 				Tokens:      estimateTokens(chars),
@@ -334,7 +451,10 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 	}
 	final, err := DrainStream(ctx, stream, h)
 	if err != nil {
-		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: %w", t.spec.Name, err)
+		// Persist whatever the child produced before failing, so the transcript on
+		// disk matches what the parent was told.
+		_ = sess.save(childCtx.Messages)
+		return "", "", fmt.Errorf("sub-agent %q: %w", t.spec.Name, err)
 	}
 	text := ""
 	if final != nil {
@@ -343,14 +463,24 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 	if text == "" {
 		text = fmt.Sprintf("(sub-agent %q produced no text output)", t.spec.Name)
 	}
+	sessionID := ""
+	if sess != nil {
+		sessionID = sess.header.ID
+		if saveErr := sess.save(childCtx.Messages); saveErr != nil {
+			text += fmt.Sprintf("\n\nwarning: could not save the sub-agent transcript: %v", saveErr)
+		}
+		// Report the child session id so the parent can continue this same
+		// conversation (e.g. after asking the user a question) instead of starting over.
+		text += fmt.Sprintf("\n\n[sub-agent session: %s]", sessionID)
+	}
 	// Surface a failed child run as a tool error so the parent model gets a
 	// signal the delegation failed (the tool executor marks the result
 	// IsError). A child whose final turn stopped on error/aborted otherwise
 	// looks like a successful delegation carrying error text.
 	if final != nil && (final.StopReason == agentcore.StopReasonError || final.StopReason == agentcore.StopReasonAborted) {
-		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q failed (%s): %s", t.spec.Name, final.StopReason, text)
+		return "", sessionID, fmt.Errorf("sub-agent %q failed (%s): %s", t.spec.Name, final.StopReason, text)
 	}
-	return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(text)}}, nil
+	return text, sessionID, nil
 }
 
 // executeProcess runs the child agent loop in a fresh pigo subprocess over stdio

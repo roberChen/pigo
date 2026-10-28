@@ -24,7 +24,7 @@ import (
 // TestTaskToolContract pins the tool identity, parallel execution mode, and the
 // {description?, prompt} schema with prompt required.
 func TestTaskToolContract(t *testing.T) {
-	tool := NewTaskTool(func() RunConfig { return RunConfig{} }, nil)
+	tool := NewTaskTool(func() RunConfig { return RunConfig{} }, nil, nil)
 	if tool.Name() != "task" {
 		t.Errorf("Name() = %q, want task", tool.Name())
 	}
@@ -63,7 +63,7 @@ func TestTaskReturnsChildText(t *testing.T) {
 			Batch:      agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: agenttool.NewToolRegistry()}},
 		}
 	}
-	tool := NewTaskTool(factory, nil)
+	tool := NewTaskTool(factory, nil, nil)
 	res, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"description":"do x","prompt":"do the work"}`), nil)
 	if err != nil {
 		t.Fatalf("Execute err = %v", err)
@@ -104,7 +104,7 @@ func TestTaskFailedChildErrors(t *testing.T) {
 			Batch:      agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: agenttool.NewToolRegistry()}},
 		}
 	}
-	tool := NewTaskTool(factory, nil)
+	tool := NewTaskTool(factory, nil, nil)
 	_, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
 	if err == nil {
 		t.Fatal("a child that stopped on error must surface as a tool error")
@@ -160,7 +160,7 @@ func TestTaskSemaphoreBoundsConcurrency(t *testing.T) {
 			Batch:      agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: reg}},
 		}
 	}
-	tool := NewTaskTool(factory, sem)
+	tool := NewTaskTool(factory, sem, nil)
 
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -219,7 +219,7 @@ func TestTaskAdvertisesRegistryTools(t *testing.T) {
 			Batch:      agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: reg}},
 		}
 	}
-	tool := NewTaskTool(factory, nil)
+	tool := NewTaskTool(factory, nil, nil)
 	if _, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil); err != nil {
 		t.Fatalf("Execute err = %v", err)
 	}
