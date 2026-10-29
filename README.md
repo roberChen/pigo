@@ -30,6 +30,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [项目信任](#项目信任)
 - [pigorc：用 shell 脚本配置](#pigorc用-shell-脚本配置)
 - [自定义 sub-agent（Agent 定义）](#自定义-sub-agentagent-定义)
+- [MCP（Model Context Protocol）](#mcpmodel-context-protocol)
 - [技能 Skills](#技能-skills)
 - [提示词模板](#提示词模板)
 - [插件](#插件)
@@ -688,6 +689,65 @@ agent remove researcher      # 取消（例如在项目文件里屏蔽全局定�
 - 子 agent 也会按上下文窗口自动压缩（与主 agent 一致），并设置自己的推理强度、超时与 hook。
 - 定义冲突（与内置工具/其它 agent 重名、未知 isolation、未知 thinking、未知工具名）会在启动运行时告警并跳过该定义，不影响其它配置。
 - process 隔离模式下子进程只返回最终文本：会话持久化与续跑仅支持 goroutine 模式（默认）。
+
+## MCP（Model Context Protocol）
+
+pigo 可以作为 MCP **客户端**连接外部 MCP 服务器，把它们的工具直接暴露给模型（工具名 `mcp__<server>__<tool>`，参数 schema 由服务器提供）。支持三种传输：
+
+| 传输 | 配置 |
+|------|------|
+| stdio | `command` + `args` + `env`（子进程，行分隔 JSON-RPC） |
+| Streamable HTTP（默认） | `url` + `headers`（POST JSON-RPC，响应可为 JSON 或 SSE；自动回传 `Mcp-Session-Id`） |
+| 旧版 HTTP+SSE | `url` + `transport = "sse"`（GET 事件流 + 服务端宣告的 POST 端点） |
+
+```toml
+# ~/.config/pigo/config.toml
+[[mcp]]
+name    = "github"
+url     = "https://api.githubcopilot.com/mcp/"
+timeout_seconds = 60
+[mcp.headers]
+Authorization = "Bearer ..."
+
+[[mcp]]
+name    = "hosted"            # 需要授权的服务：首次 401 时走 OAuth（浏览器批准，令牌缓存在 ~/.pigo/mcp-oauth/）
+url     = "https://mcp.example.com/mcp"
+oauth   = true
+
+[[mcp]]
+name    = "legacy"            # 旧版 HTTP+SSE 服务
+url     = "https://legacy.example.com/mcp"
+transport = "sse"
+
+[[mcp]]
+name    = "files"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+[mcp.env]
+LOG_LEVEL = "warn"
+```
+
+```bash
+# 等价的 pigorc 写法（可放在 ~/.pigo/pigorc 或项目 ./.pigorc，后者需信任目录）
+mcp add github --url "https://api.githubcopilot.com/mcp/" --header Authorization "Bearer $GH_PAT"
+mcp add files --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /tmp
+mcp add hosted --url https://mcp.example.com/mcp --oauth
+mcp add legacy --url https://legacy.example.com/mcp --transport sse
+mcp remove github
+```
+
+行为要点：
+
+- 启动时连接（`--no-tools` 时跳过），每个服务器做 `initialize` 握手并按其能力注册工具，单个服务器失败只告警并跳过，不影响启动；
+- **tools**：`tools/list`（跟随分页）+ `tools/call`，`text`/`image`/`resource` 内容分别映射为文本/图片/文本化资源，`isError` 转为工具错误；
+- **resources**：服务器声明 resources 能力时额外提供 `mcp__<server>__list_resources` / `read_resource`（文本、图片与二进制资源都有对应呈现）；
+- **prompts**：声明 prompts 能力时提供 `mcp__<server>__list_prompts` / `get_prompt`（参数为字符串 map，返回渲染后的文本）；
+- **服务端主动消息**：应答 `ping`、`roots/list`（返回当前工作目录作为 root），明确拒绝 `sampling/createMessage` / `elicitation/create`（pigo 不会为服务端再跑一次模型调用）；
+- **热更新**：服务器发 `notifications/tools|resources|prompts/list_changed` 后，下一轮自动重新列举并替换工具集（无需重启），新工具同时注册进执行器；
+- **OAuth**：`oauth = true` 时对 401 端点执行 MCP 授权流程——protected-resource 元数据发现、授权服务器元数据、动态客户端注册、授权码 + PKCE（本地回环回调，自动打开浏览器并打印 URL）、令牌缓存与刷新（`$PIGO_HOME/mcp-oauth/<server>.json`，0600）；
+- 每请求超时默认 60s（`timeout_seconds` 可调）；工具与其他内置工具同权（`--allowed-tools` / `--disallowed-tools`、sub-agent 继承）。
+
+> 配置参考里的 `[[mcp]]` 字段与 pigorc `mcp` 语法会随内置 `pigorc` 技能的 `reference.md` 自动更新。
 
 ## 提示词模板
 

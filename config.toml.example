@@ -87,6 +87,35 @@ no_skills = false
 # auth       = "bearer"                    # bearer | x-api-key
 # models     = ["mycorp-large", "mycorp-small"]  # first one is the default
 
+# --- MCP servers (array of tables) ---
+# Connect external Model Context Protocol servers; their tools are exposed to the
+# model as mcp__<name>__<tool>. Use command/args/env for stdio servers, or
+# url/headers for a Streamable HTTP server.
+#
+# [[mcp]]
+# name    = "github"
+# url     = "https://api.githubcopilot.com/mcp/"
+# timeout_seconds = 60
+# [mcp.headers]
+# Authorization = "Bearer ..."
+#
+# [[mcp]]                      # OAuth on 401 (browser approval, cached token)
+# name  = "hosted"
+# url   = "https://mcp.example.com/mcp"
+# oauth = true
+#
+# [[mcp]]                      # legacy HTTP+SSE transport
+# name      = "legacy"
+# url       = "https://legacy.example.com/mcp"
+# transport = "sse"
+#
+# [[mcp]]
+# name    = "files"
+# command = "npx"
+# args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# [mcp.env]
+# LOG_LEVEL = "warn"
+
 # --- Custom sub-agents ---
 # Custom agents are defined in the pigorc only (their single source of truth):
 #   agent add researcher --description "..." --prompt-file ./researcher.md \

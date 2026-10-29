@@ -306,6 +306,9 @@ func main() {
 	// for agent definitions) and are registered by the tool assembly
 	// (run.SetupEnv), which runs later per driver; publish them for this process.
 	config.SetCurrentAgents(pigorc.Agents)
+	// MCP servers come from config.toml `[[mcp]]` and pigorc `mcp add ...`; the tool
+	// assembly (run.SetupEnv) connects them.
+	config.SetCurrentMCP(cfg.MCP)
 
 	// A bare provider name ("zai", "deepseek") means that provider's default
 	// model (issue #564): canonicalize once here so every downstream consumer —
@@ -526,6 +529,9 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		if env.Plugins != nil {
 			defer env.Plugins.Close()
 		}
+		if env.MCP != nil {
+			defer env.MCP.Close()
+		}
 		if env.Memory != nil {
 			defer env.Memory.Close()
 		}
@@ -554,6 +560,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 				Approve:           opts.approve,
 				Skills:            env.Skills,
 				Plugins:           env.Plugins,
+				MCP:               env.MCP,
 				ConfigPrompts:     opts.configPrompts,
 				CliPrompts:        opts.promptTemplates,
 				NoPromptTemplates: opts.noPromptTemplates,
@@ -577,6 +584,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			Approve:           opts.approve,
 			Skills:            env.Skills,
 			Plugins:           env.Plugins,
+			MCP:               env.MCP,
 			ConfigPrompts:     opts.configPrompts,
 			CliPrompts:        opts.promptTemplates,
 			NoPromptTemplates: opts.noPromptTemplates,
@@ -601,6 +609,9 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 	}
 	if env.Plugins != nil {
 		defer env.Plugins.Close()
+	}
+	if env.MCP != nil {
+		defer env.MCP.Close()
 	}
 	if env.Memory != nil {
 		defer env.Memory.Close()
@@ -652,6 +663,9 @@ func runGitHubReview(ctx context.Context, opts cliOptions, errOut io.Writer) int
 	}
 	if env.Plugins != nil {
 		defer env.Plugins.Close()
+	}
+	if env.MCP != nil {
+		defer env.MCP.Close()
 	}
 	if env.Memory != nil {
 		defer env.Memory.Close()

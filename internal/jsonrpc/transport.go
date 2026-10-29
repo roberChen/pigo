@@ -42,6 +42,9 @@ type Client struct {
 	closed   bool
 	closeErr error
 
+	onRequest      func(ctx context.Context, method string, params json.RawMessage) (any, error)
+	onNotification func(method string, params json.RawMessage)
+
 	done chan struct{} // closed when the reader goroutine exits
 }
 
@@ -65,6 +68,13 @@ type Config struct {
 	// Stderr optionally receives the child's stderr (e.g. for logging). When nil
 	// the child's stderr is discarded.
 	Stderr io.Writer
+	// OnRequest handles a server->client request (a message carrying both an id
+	// and a method). Returning a *jsonrpc.Error sends that error back; any other
+	// error becomes an internal error (-32603). When nil, every server request is
+	// answered with "method not found" so the peer is never left hanging.
+	OnRequest func(ctx context.Context, method string, params json.RawMessage) (any, error)
+	// OnNotification observes a server->client notification (method, no id).
+	OnNotification func(method string, params json.RawMessage)
 }
 
 // NewClient starts the subprocess and begins reading its stdout. The caller must
@@ -91,11 +101,13 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		pending: make(map[string]chan res),
-		done:    make(chan struct{}),
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         stdout,
+		pending:        make(map[string]chan res),
+		done:           make(chan struct{}),
+		onRequest:      cfg.OnRequest,
+		onNotification: cfg.OnNotification,
 	}
 	go c.readLoop()
 	return c, nil
@@ -115,17 +127,27 @@ func (c *Client) readLoop() {
 		if len(line) == 0 {
 			continue
 		}
-		var resp Response
-		if err := json.Unmarshal(line, &resp); err != nil {
-			// A line we can't parse as a response is skipped (it may be a
-			// server->client request/notification, which this minimal client
-			// does not handle).
+		var in inbound
+		if err := json.Unmarshal(line, &in); err != nil {
 			continue
 		}
-		if resp.ID == nil {
-			continue // notification from server; nothing to correlate
+		switch {
+		case in.Method != "" && in.ID == nil:
+			// Server notification: hand it to the observer, never blocking the reader.
+			if c.onNotification != nil {
+				params := in.Params
+				go c.onNotification(in.Method, params)
+			}
+		case in.Method != "":
+			// Server request: answer it so the peer is not left waiting.
+			go c.answer(in)
+		default:
+			resp := Response{JSONRPC: in.JSONRPC, ID: in.ID, Result: in.Result, Error: in.Error}
+			if resp.ID == nil {
+				continue
+			}
+			c.deliver(resp.ID.String(), res{resp: &resp})
 		}
-		c.deliver(resp.ID.String(), res{resp: &resp})
 	}
 
 	err := scanner.Err()
@@ -133,6 +155,45 @@ func (c *Client) readLoop() {
 		err = io.EOF
 	}
 	c.failAll(fmt.Errorf("jsonrpc: reader stopped: %w", err))
+}
+
+// inbound is one decoded line from the child: a response, a request or a
+// notification (the shapes are distinguished by which fields are present).
+type inbound struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *ID             `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *Error          `json:"error,omitempty"`
+}
+
+// answer replies to a server->client request.
+func (c *Client) answer(in inbound) {
+	resp := Response{JSONRPC: Version, ID: in.ID}
+	if c.onRequest == nil {
+		resp.Error = &Error{Code: -32601, Message: "method not found: " + in.Method}
+		_ = c.write(resp)
+		return
+	}
+	result, err := c.onRequest(context.Background(), in.Method, in.Params)
+	if err != nil {
+		var rpcErr *Error
+		if errors.As(err, &rpcErr) {
+			resp.Error = rpcErr
+		} else {
+			resp.Error = &Error{Code: -32603, Message: err.Error()}
+		}
+		_ = c.write(resp)
+		return
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		resp.Error = &Error{Code: -32603, Message: err.Error()}
+	} else {
+		resp.Result = raw
+	}
+	_ = c.write(resp)
 }
 
 // deliver hands a response to its waiter (if still registered).

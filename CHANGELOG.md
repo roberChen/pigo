@@ -12,6 +12,28 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **MCP client support**: pigo connects to external Model Context Protocol servers
+  and exposes their tools as `mcp__<server>__<tool>`, with the server's argument
+  schema passed through. Servers that advertise resources also get
+  `list_resources` / `read_resource`, and servers that advertise prompts get
+  `list_prompts` / `get_prompt`. Three transports are supported: stdio
+  (`command`/`args`/`env`, line-delimited JSON-RPC), Streamable HTTP (`url`/
+  `headers`, JSON or SSE replies, session id echoed), and the legacy HTTP+SSE
+  transport (`transport = "sse"`). HTTP servers behind OAuth run the MCP
+  authorization flow (`oauth = true`: protected-resource and authorization-server
+  discovery, dynamic client registration, authorization code with PKCE over a
+  loopback redirect, token caching under `$PIGO_HOME/mcp-oauth/` and refresh).
+  Server-initiated requests are answered (`ping`, `roots/list`), while sampling and
+  elicitation are declined explicitly. A `tools/resources/prompts list_changed`
+  notification hot-reloads the affected tool set on the next turn instead of
+  requiring a restart. Servers are configured with `[[mcp]]` tables in config.toml
+  or `mcp add ...` / `mcp remove ...` in a pigorc (a project pigorc layers onto the
+  global one, so it can add args/env/headers or disable a server without repeating
+  the command). Connections happen during tool assembly, a server that fails to
+  start or initialize is reported and skipped, `--no-tools` disables MCP like the
+  other tools, results map text/image/embedded resources onto pigo content blocks,
+  `isError` becomes a tool error, and per-request timeouts default to 60s. The
+  generated configuration reference documents the fields and DSL automatically.
 - **Built-in `pigorc` skill with a generated config reference**: pigo now ships a
   `pigorc` skill (installed to the skills directory on first run, invocable as
   `/pigorc`) whose hand-written `SKILL.md` covers the workflow and recipes, alongside

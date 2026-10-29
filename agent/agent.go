@@ -86,7 +86,7 @@ func New(opts ...Option) (*Session, error) {
 
 	runCfg := run.NewConfig(
 		c.model, env.ProviderName, thinking, env.Provider, creds,
-		run.ToolRegistry(env.Tools), run.TodoReminders(env.Tools), env.Schedule, env.SubAgentJobs,
+		run.ToolRegistry(env.Tools), run.TodoReminders(env.Tools), env.Schedule, env.SubAgentJobs, env.MCP,
 	)
 
 	return &Session{
@@ -185,6 +185,11 @@ func (s *Session) Close() error {
 	var firstErr error
 	if s.env.Plugins != nil {
 		if err := s.env.Plugins.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.env.MCP != nil {
+		if err := s.env.MCP.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

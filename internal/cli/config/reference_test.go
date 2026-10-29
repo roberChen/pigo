@@ -14,13 +14,14 @@ import (
 	"testing"
 
 	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/smallnest/pigo/internal/mcp"
 )
 
 // TestReferenceCoversEveryFileConfigField fails when a config.toml field has no
 // option registry entry (and therefore no documentation).
 func TestReferenceCoversEveryFileConfigField(t *testing.T) {
 	// Definitions covered by their own DSL sections and field tables.
-	documented := map[string]bool{"providers": true, "agents": true}
+	documented := map[string]bool{"providers": true, "agents": true, "mcp": true}
 
 	covered := map[string]bool{}
 	for _, spec := range optionSpecs {
@@ -77,6 +78,7 @@ func TestReferenceCoversDefinitionFields(t *testing.T) {
 	}{
 		{"ProviderConfig", reflect.TypeOf(ProviderConfig{}), providerFieldDocs},
 		{"AgentConfig", reflect.TypeOf(AgentConfig{}), agentFieldDocs},
+		{"mcp.ServerConfig", reflect.TypeOf(mcp.ServerConfig{}), mcpFieldDocs},
 	}
 	for _, tc := range cases {
 		// Documentation rows use the config spelling (system_prompt); the struct

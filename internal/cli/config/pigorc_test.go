@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/smallnest/pigo/internal/mcp"
 	"time"
 )
 
@@ -556,4 +558,83 @@ func writeNamed(t *testing.T, dir, content string) string {
 	path := filepath.Join(dir, "extra-"+time.Now().Format("150405.000000000")+".pigorc")
 	writeFile(t, path, content)
 	return path
+}
+
+// TestPigorcMCPDefinitions verifies the `mcp add` / `mcp remove` DSL: flags become an
+// mcp.ServerConfig (stdio or http), repeated --arg/--env/--header accumulate, a
+// re-declaration keeps them, and applying the script replaces same-name definitions
+// and drops removed ones.
+func TestPigorcMCPDefinitions(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	// The script expands $GH_PAT; with `set -u` an unset variable aborts the load.
+	t.Setenv("GH_PAT", "test-pat")
+
+	global := filepath.Join(dir, "pigorc")
+	writeFile(t, global, `
+mcp add local --command npx --arg -y --arg server-filesystem --arg /tmp \
+  --env FOO bar --timeout 30
+mcp add github --url "https://api.githubcopilot.com/mcp/" --header Authorization "Bearer $GH_PAT"
+mcp add legacy --command old-server
+mcp add old --url "https://legacy.test/sse" --transport sse --oauth
+`)
+	project := filepath.Join(dir, ".pigorc")
+	writeFile(t, project, `
+mcp add local --disabled
+mcp remove legacy
+`)
+	p, err := EvaluatePigorc(dir, []string{global, project}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.MCP) != 3 {
+		t.Fatalf("mcp servers = %+v, want local + github + old", p.MCP)
+	}
+	local := p.MCP[0]
+	// The project file only refined it (disable): command/timeout/args/env survive.
+	if local.Name != "local" || local.Command != "npx" || local.TimeoutSeconds != 30 || !local.Disabled {
+		t.Errorf("local = %+v", local)
+	}
+	if got := local.Args; len(got) != 3 || got[0] != "-y" || got[2] != "/tmp" {
+		t.Errorf("local args = %v", got)
+	}
+	if local.Env["FOO"] != "bar" || local.Headers != nil {
+		t.Errorf("local env/headers = %v / %v", local.Env, local.Headers)
+	}
+	github := p.MCP[1]
+	if github.Name != "github" || github.URL != "https://api.githubcopilot.com/mcp/" {
+		t.Errorf("github = %+v", github)
+	}
+	if got := github.Headers["Authorization"]; got != "Bearer test-pat" {
+		t.Errorf("github headers = %v, want the expanded Authorization value", got)
+	}
+	if old := p.MCP[2]; old.Name != "old" || old.Transport != "sse" || !old.OAuth {
+		t.Errorf("old = %+v, want the sse transport with oauth", old)
+	}
+	if len(p.RemovedMCP) != 1 || p.RemovedMCP[0] != "legacy" {
+		t.Errorf("removed = %v, want [legacy]", p.RemovedMCP)
+	}
+
+	// Applying to a file config: script definitions win by name, removed ones drop.
+	cfg := FileConfig{MCP: []mcp.ServerConfig{
+		{Name: "legacy", Command: "old-server"},
+		{Name: "local", Command: "from-file"},
+		{Name: "keepme", URL: "https://keep.test/mcp"},
+	}}
+	if warnings := p.ApplyToFileConfig(&cfg); len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	byName := map[string]mcp.ServerConfig{}
+	for _, def := range cfg.MCP {
+		byName[def.Name] = def
+	}
+	if _, ok := byName["legacy"]; ok {
+		t.Error("mcp remove did not drop the lower-layer definition")
+	}
+	if got := byName["local"]; got.Command != "npx" || !got.Disabled {
+		t.Errorf("script definition did not win: %+v", got)
+	}
+	if _, ok := byName["keepme"]; !ok {
+		t.Error("unrelated file definitions must survive")
+	}
 }

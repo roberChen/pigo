@@ -19,6 +19,7 @@ import (
 	"github.com/smallnest/pigo/internal/builtinskills"
 	"github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -61,6 +62,12 @@ type Env struct {
 	// GetFollowUpMessages seam (see NewConfig) and front-ends can reach it via
 	// agenttool.ScheduleFromTools.
 	Schedule *agenttool.Schedule
+
+	// MCP is the connected MCP server manager, or nil when no MCP servers are
+	// configured (or tools are disabled). Its tools are already in Tools; the
+	// manager is surfaced so the owner can close the server connections when the
+	// run ends.
+	MCP *mcp.Manager
 
 	// SubAgentJobs is the run's background sub-agent registry, or nil when the
 	// sub-agent tools are not wired in (--no-tools). Its task_output tool is
@@ -183,6 +190,16 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 			fmt.Fprintf(os.Stderr, "pigo: plugin discovery failed: %v\n", err)
 		}
 	}
+	// Connect the configured MCP servers and expose their tools. Like plugins this is
+	// skipped under --no-tools, and a server that fails to start is reported and
+	// skipped rather than failing the run. MCP commands run with the user's
+	// privileges, exactly like hooks and plugins.
+	var mcpMgr *mcp.Manager
+	if !noTools {
+		mcpMgr = connectMCP(context.Background(), config.CurrentMCP(), os.Stderr)
+		tools = append(tools, mcpMgr.Tools()...)
+	}
+
 	// Enforce the --allowed-tools/--disallowed-tools boundary now that the set is
 	// complete. Validation must happen here rather than at flag-parse time: plugin
 	// and memory tool names only exist at runtime, so an earlier check would reject
@@ -235,6 +252,7 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		Memory:       memStore,
 		Schedule:     sched,
 		SubAgentJobs: jobs,
+		MCP:          mcpMgr,
 	}, nil
 }
 
@@ -669,7 +687,7 @@ func Trusted(cwd string) bool {
 // stream, the dynamic API-key resolver, and the tool registry. It is the single
 // definition of "how a run is wired", so the REPL (streamRun) and the headless
 // driver cannot drift apart.
-func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, prov provider.Provider, creds *provider.CredentialStore, reg *agenttool.ToolRegistry, reminders *runtime.ReminderRegistry, sched *agenttool.Schedule, jobs *runtime.SubAgentJobs) runtime.RunConfig {
+func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, prov provider.Provider, creds *provider.CredentialStore, reg *agenttool.ToolRegistry, reminders *runtime.ReminderRegistry, sched *agenttool.Schedule, jobs *runtime.SubAgentJobs, mcpMgr *mcp.Manager) runtime.RunConfig {
 	cfg := runtime.RunConfig{
 		LoopConfig: runtime.LoopConfig{
 			Model:         model,
@@ -689,7 +707,48 @@ func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, pro
 	// queues each due reminder as a normal user turn. With neither configured the
 	// seam stays unwired.
 	cfg.GetFollowUpMessages = FollowUps(jobs, sched)
+	// Live MCP tool refresh: a server may change its tool list mid-run.
+	AttachMCP(&cfg, mcpMgr)
 	return cfg
+}
+
+// AttachMCP wires live MCP tool refresh onto cfg. An MCP server can announce a
+// list_changed notification while a run is in progress; before each turn the loop
+// then re-advertises the manager's current tool set (keeping every non-MCP tool the
+// previous turn had) and the refreshed tools are registered for execution.
+func AttachMCP(cfg *runtime.RunConfig, mgr *mcp.Manager) {
+	if cfg == nil || mgr == nil {
+		return
+	}
+	mgr.BindRegistry(cfg.Batch.ToolExecutorConfig.Registry)
+	prev := cfg.PrepareNextTurn
+	cfg.PrepareNextTurn = func(ctx context.Context, agentCtx *agentcore.AgentContext) *runtime.TurnUpdate {
+		var upd *runtime.TurnUpdate
+		if prev != nil {
+			upd = prev(ctx, agentCtx)
+		}
+		if !mgr.Refresh(ctx) {
+			return upd
+		}
+		// Rebuild the advertised list: whatever the turn would have used, minus the
+		// old MCP tools, plus the manager's current ones.
+		current := agentCtx.Tools
+		if upd != nil && upd.Tools != nil {
+			current = *upd.Tools
+		}
+		base := make([]agentcore.AgentTool, 0, len(current))
+		for _, tool := range current {
+			if !strings.HasPrefix(tool.Name(), mcp.ToolNamePrefix) {
+				base = append(base, tool)
+			}
+		}
+		tools := append(base, mgr.Tools()...)
+		if upd == nil {
+			upd = &runtime.TurnUpdate{}
+		}
+		upd.Tools = &tools
+		return upd
+	}
 }
 
 // FollowUps composes the run's follow-up providers: finished background sub-agent
@@ -711,3 +770,7 @@ func FollowUps(jobs *runtime.SubAgentJobs, sched *agenttool.Schedule) func(ctx c
 		return sched.FollowUpMessages(ctx, agentCtx)
 	}
 }
+
+// connectMCP is the MCP connection seam; tests replace it to avoid spawning
+// processes while still exercising the tool-set assembly.
+var connectMCP = mcp.Connect

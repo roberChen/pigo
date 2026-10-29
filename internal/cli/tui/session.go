@@ -28,6 +28,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/compaction"
 	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -50,6 +51,9 @@ type runSession struct {
 	reg       *agenttool.ToolRegistry
 	reminders *runtime.ReminderRegistry
 	schedule  *agenttool.Schedule
+	// mcp is the connected MCP server manager (nil when none are configured), used
+	// to re-advertise tools when a server announces a list change.
+	mcp *mcp.Manager
 	// jobs is the background sub-agent registry shared by the sub-agent tools. It is
 	// wired onto the follow-up seam so a finished background child's report reaches
 	// the model as a user turn. nil when no sub-agent tools are present.
@@ -226,6 +230,7 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		reminders:  run.TodoReminders(opts.Tools),
 		schedule:   agenttool.ScheduleFromTools(opts.Tools),
 		jobs:       runtime.SubAgentJobsFromTools(opts.Tools),
+		mcp:        opts.MCP,
 		creds:      creds,
 		cwd:        cwd,
 		trust:      mgr,
@@ -331,6 +336,7 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 	// scheduler (no schedule_* tools) leaves the seam unwired.
 	// Background sub-agent reports and due reminders ride the follow-up seam.
 	cfg.GetFollowUpMessages = run.FollowUps(s.jobs, s.schedule)
+	run.AttachMCP(&cfg, s.mcp)
 	// When remote control is active, route side-effect tool-call confirmations to
 	// the paired browser (no-op when no client is connected or the cwd is trusted,
 	// so the non-remote path is unchanged). The trust manager is read from the

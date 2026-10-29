@@ -93,6 +93,20 @@ var agentFieldDocs = []fieldDoc{
 	{"hooks", "[]AgentHookConfig", "This agent's own hooks: event, matcher, command, timeout."},
 }
 
+// mcpFieldDocs documents every field of mcp.ServerConfig.
+var mcpFieldDocs = []fieldDoc{
+	{"name", "string", "Server name; its tools are exposed as mcp__<name>__<tool>. Required."},
+	{"command", "string", "Executable for a stdio server (mutually exclusive with url)."},
+	{"args", "[]string", "Command arguments for a stdio server."},
+	{"env", "map[string]string", "Extra environment variables for a stdio server (the parent environment is inherited)."},
+	{"url", "string", "Endpoint of a Streamable HTTP server (POST JSON-RPC, JSON or SSE reply)."},
+	{"headers", "map[string]string", "Extra HTTP headers (for example Authorization)."},
+	{"timeout_seconds", "int", "Per-request timeout; 0 uses the 60s default."},
+	{"transport", "string", "HTTP flavor: http (Streamable HTTP, default) or sse (legacy HTTP+SSE)."},
+	{"oauth", "bool", "Run the MCP OAuth flow when the endpoint answers 401 (discovery + dynamic registration + PKCE; the token is cached under $PIGO_HOME/mcp-oauth/)."},
+	{"disabled", "bool", "Keep the definition but skip connecting."},
+}
+
 // envVarDocs documents the environment variables pigo reads. XDG_CONFIG_HOME and
 // the provider credential conventions are included because they change behaviour.
 var envVarDocs = []fieldDoc{
@@ -161,6 +175,13 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("  --tools read,grep --model claude-haiku-4 --thinking off --timeout 300\n")
 	b.WriteString("agent hook researcher PreToolUse --matcher '^bash$' --command './hooks/no-bash.sh'\n")
 	b.WriteString("agent remove researcher\n\n")
+	b.WriteString("# MCP server (stdio: command/args/env; Streamable HTTP: url/headers)\n")
+	b.WriteString("mcp add github --url https://api.githubcopilot.com/mcp/ \\\n")
+	b.WriteString("  --header Authorization \"Bearer $GH_PAT\"\n")
+	b.WriteString("mcp add local --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /tmp\n")
+	b.WriteString("mcp add legacy --url https://legacy.example/mcp --transport sse\n")
+	b.WriteString("mcp add hosted --url https://api.example.com/mcp --oauth   # OAuth on 401\n")
+	b.WriteString("mcp remove github\n\n")
 	b.WriteString("# environment (provider keys, base URLs, PIGO_* knobs)\n")
 	b.WriteString("export ANTHROPIC_API_KEY=\"$(pass show anthropic)\"\n")
 	b.WriteString("```\n\n")
@@ -199,6 +220,17 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	writeFieldTable(&b, "field", agentFieldDocs)
 	b.WriteString("\nPer-agent hooks use `agent hook <name> <event> [--matcher RE] [--timeout N] --command CMD`;\n")
 	b.WriteString("they are independent of the main agent's hooks unless `inherit_hooks` is set.\n\n")
+
+	b.WriteString("## MCP servers (`mcp add` / `[[mcp]]`)\n\n")
+	b.WriteString("A Model Context Protocol server contributes its tools to the agent, named\n")
+	b.WriteString("`mcp__<server>__<tool>`. stdio servers are spawned (`command`/`args`/`env`); HTTP\n")
+	b.WriteString("servers are Streamable HTTP endpoints (`url`/`headers`, JSON or SSE replies). A\n")
+	b.WriteString("server that fails to start or initialize is reported and skipped, and `--no-tools`\n")
+	b.WriteString("disables MCP along with the other tools. Servers advertising resources or prompts\n")
+	b.WriteString("also get mcp__<server>__list_resources / read_resource and list_prompts / get_prompt;\n")
+	b.WriteString("a tools/list_changed notification refreshes the tool list on the next turn.\n\n")
+	writeFieldTable(&b, "field", mcpFieldDocs)
+	b.WriteString("\n")
 
 	b.WriteString("## Hook events\n\n")
 	b.WriteString("| event | can it block? |\n")

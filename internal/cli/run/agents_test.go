@@ -6,6 +6,8 @@ package run
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/runtime"
 )
 
@@ -288,4 +291,92 @@ func TestSetupEnvWiresBackgroundJobs(t *testing.T) {
 	if got := runtime.SubAgentJobsFromTools(env.Tools); got != env.SubAgentJobs {
 		t.Error("the tools and Env should share one registry")
 	}
+}
+
+// TestSetupEnvRegistersMCPTools verifies the configured MCP servers are connected
+// during tool assembly, their tools join the tool set, and the manager is exposed
+// for the owner to close. The connection seam is stubbed so no process is spawned.
+func TestSetupEnvRegistersMCPTools(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
+	config.SetCurrentMCP([]mcp.ServerConfig{{Name: "demo", Command: "fake-server"}})
+	t.Cleanup(func() { config.SetCurrentMCP(nil) })
+
+	var gotConfigs []mcp.ServerConfig
+	manager := &mcp.Manager{} // empty manager: Tools() is nil, Close is a no-op
+	original := connectMCP
+	connectMCP = func(_ context.Context, cfgs []mcp.ServerConfig, _ io.Writer) *mcp.Manager {
+		gotConfigs = cfgs
+		return manager
+	}
+	t.Cleanup(func() { connectMCP = original })
+
+	env, err := SetupEnv("openrouter/free", "", "", "", "", false /*noTools*/, true /*noSkills*/, "", nil, false /*memEnabled*/, ToolPolicy{})
+	if err != nil {
+		t.Fatalf("SetupEnv: %v", err)
+	}
+	if len(gotConfigs) != 1 || gotConfigs[0].Name != "demo" {
+		t.Fatalf("connect received %+v, want the configured server", gotConfigs)
+	}
+	if env.MCP != manager {
+		t.Error("Env.MCP should expose the manager so the owner can close it")
+	}
+
+	// --no-tools disables MCP alongside the other tools.
+	called := false
+	connectMCP = func(context.Context, []mcp.ServerConfig, io.Writer) *mcp.Manager {
+		called = true
+		return manager
+	}
+	if _, err := SetupEnv("openrouter/free", "", "", "", "", true /*noTools*/, true, "", nil, false, ToolPolicy{}); err != nil {
+		t.Fatalf("SetupEnv(noTools): %v", err)
+	}
+	if called {
+		t.Error("--no-tools must not connect MCP servers")
+	}
+}
+
+// TestAttachMCPRefreshesTools verifies the live-refresh seam: when the MCP manager
+// reports a changed tool set before a turn, the loop's advertised tools keep the
+// non-MCP tools and pick up the new MCP ones.
+func TestAttachMCPRefreshesTools(t *testing.T) {
+	cfg := runtime.RunConfig{
+		Batch: agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: agenttool.NewToolRegistry()}},
+	}
+	// The manager has no servers here, so Refresh reports no change and the seam is
+	// inert; assert AttachMCP installs it without disturbing an existing update hook.
+	mgr := mcp.Connect(context.Background(), nil, nil)
+	prevCalled := false
+	cfg.PrepareNextTurn = func(context.Context, *agentcore.AgentContext) *runtime.TurnUpdate {
+		prevCalled = true
+		return nil
+	}
+	AttachMCP(&cfg, mgr)
+	if cfg.PrepareNextTurn == nil {
+		t.Fatal("AttachMCP should install the turn seam")
+	}
+	agentCtx := &agentcore.AgentContext{Tools: []agentcore.AgentTool{stubTool("read")}}
+	if upd := cfg.PrepareNextTurn(context.Background(), agentCtx); upd != nil {
+		t.Errorf("with no MCP change the seam should return the previous update (nil), got %+v", upd)
+	}
+	if !prevCalled {
+		t.Error("the previous PrepareNextTurn must still run")
+	}
+
+	// A nil manager leaves the config untouched.
+	cfg2 := runtime.RunConfig{}
+	AttachMCP(&cfg2, nil)
+	if cfg2.PrepareNextTurn != nil {
+		t.Error("AttachMCP(nil) should be a no-op")
+	}
+}
+
+// stubTool is a minimal AgentTool for assertions.
+type stubTool string
+
+func (s stubTool) Name() string                               { return string(s) }
+func (s stubTool) Description() string                        { return "stub" }
+func (s stubTool) Schema() json.RawMessage                    { return json.RawMessage(`{"type":"object"}`) }
+func (s stubTool) ExecutionMode() agentcore.ToolExecutionMode { return agentcore.ToolExecutionParallel }
+func (s stubTool) Execute(context.Context, string, json.RawMessage, agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+	return agentcore.AgentToolResult{}, nil
 }

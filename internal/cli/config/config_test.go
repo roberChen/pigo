@@ -219,3 +219,53 @@ api_key = "inline"
 		t.Errorf("second provider = %+v", got)
 	}
 }
+
+// TestLoadFileConfigMCPTables verifies the [[mcp]] array of tables decodes into
+// mcp.ServerConfig entries for both transports.
+func TestLoadFileConfigMCPTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[[mcp]]
+name = "local"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+timeout_seconds = 30
+
+[mcp.env]
+FOO = "bar"
+
+[[mcp]]
+name = "github"
+url = "https://api.githubcopilot.com/mcp/"
+
+[mcp.headers]
+Authorization = "Bearer token"
+
+[[mcp]]
+name = "off"
+command = "x"
+disabled = true
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFileConfig(path)
+	if err != nil {
+		t.Fatalf("LoadFileConfig: %v", err)
+	}
+	if len(cfg.MCP) != 3 {
+		t.Fatalf("mcp servers = %d, want 3: %+v", len(cfg.MCP), cfg.MCP)
+	}
+	local := cfg.MCP[0]
+	if local.Name != "local" || local.Command != "npx" || len(local.Args) != 3 || local.Args[2] != "/tmp" ||
+		local.TimeoutSeconds != 30 || local.Env["FOO"] != "bar" {
+		t.Errorf("local = %+v", local)
+	}
+	github := cfg.MCP[1]
+	if github.URL != "https://api.githubcopilot.com/mcp/" || github.Headers["Authorization"] != "Bearer token" {
+		t.Errorf("github = %+v", github)
+	}
+	if !cfg.MCP[2].Disabled {
+		t.Errorf("off = %+v, want disabled", cfg.MCP[2])
+	}
+}

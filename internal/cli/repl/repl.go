@@ -36,6 +36,7 @@ import (
 	"github.com/smallnest/pigo/internal/clipboard"
 	"github.com/smallnest/pigo/internal/compaction"
 	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -66,8 +67,12 @@ type replDeps struct {
 	// a finished background child's report reaches the model as a user turn. nil
 	// when no sub-agent tools are present (e.g. --no-tools).
 	subagentJobs *runtime.SubAgentJobs
-	slash        *runtime.SlashRegistry
-	creds        *provider.CredentialStore
+	// mcp is the connected MCP server manager, or nil when no MCP servers are
+	// configured. Each turn re-advertises its tools when a server announces a list
+	// change.
+	mcp   *mcp.Manager
+	slash *runtime.SlashRegistry
+	creds *provider.CredentialStore
 
 	// notifier delivers agent lifecycle events to subscribed plugins (US-017,
 	// #133). It is nil when no plugin subscribes; DrainStream's OnEvent stays
@@ -633,6 +638,7 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 	// settle while a background child it started is still running), followed by any
 	// due schedule reminder. With neither configured the seam stays unwired.
 	cfg.GetFollowUpMessages = run.FollowUps(deps.subagentJobs, deps.schedule)
+	run.AttachMCP(&cfg, deps.mcp)
 	// Install the human-in-the-loop seam for this turn: the question tool reads
 	// the operator's answer from the shared input (serialized with the tool-call
 	// confirmation prompt), so a run can pause for a decision and continue.

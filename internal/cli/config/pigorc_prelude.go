@@ -194,6 +194,58 @@ agent() {
   esac
 }
 
+# mcp add <name> [--command CMD] [--arg A ...] [--env K V ...]
+#               [--url URL] [--header K V ...] [--timeout N]
+#               [--transport http|sse] [--oauth] [--disabled]
+# mcp remove <name>
+mcp() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    add)
+      local name="${1:-}"
+      if [ -z "$name" ]; then
+        echo "pigorc: mcp add needs a name" >&2
+        return 0
+      fi
+      shift || true
+      local command="" url="" timeout="" disabled="false" transport="" oauth="false"
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --command)
+            command="${2:-}"; shift 2 || break ;;
+          --arg)
+            __pigo_emit mcparg "$name" "${2:-}"; shift 2 || break ;;
+          --env)
+            __pigo_emit mcpenv "$name" "${2:-}" "${3:-}"; shift 3 || break ;;
+          --url)
+            url="${2:-}"; shift 2 || break ;;
+          --header)
+            __pigo_emit mcphdr "$name" "${2:-}" "${3:-}"; shift 3 || break ;;
+          --timeout)
+            timeout="${2:-}"; shift 2 || break ;;
+          --transport)
+            transport="${2:-}"; shift 2 || break ;;
+          --oauth)
+            oauth="true"; shift ;;
+          --disabled)
+            disabled="true"; shift ;;
+          *)
+            echo "pigorc: mcp add: unknown argument $1" >&2
+            shift ;;
+        esac
+      done
+      __pigo_emit mcp add "$name" "$command" "$url" "$timeout" "$disabled" "$transport" "$oauth"
+      ;;
+    remove|rm)
+      __pigo_emit mcp remove "${1:-}"
+      ;;
+    *)
+      echo "pigorc: usage: mcp add <name> [--command CMD] [--arg A ...] [--env K V ...] [--url URL] [--header K V ...] [--timeout N] [--transport http|sse] [--oauth] [--disabled] | mcp remove <name>" >&2
+      ;;
+  esac
+}
+
 # __pigo_env dumps the exported environment as NUL-separated name/value pairs so
 # pigo can diff it and apply whatever the script exported.
 __pigo_env() {

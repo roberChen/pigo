@@ -20,6 +20,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/prompts"
 	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/dream"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -66,6 +67,10 @@ type Options struct {
 	// Plugins holds the loaded plugin manager so the REPL can deliver lifecycle
 	// events to subscribed plugins (US-017, #133). It may be nil (no plugins).
 	Plugins *plugin.Manager
+
+	// MCP holds the connected MCP server manager so each turn can pick up a
+	// server's live tool-list changes. It may be nil (no MCP servers).
+	MCP *mcp.Manager
 
 	// ConfigPrompts holds prompt-template paths from the config.toml `prompts`
 	// array (settings tier); each is a file or dir loaded non-recursively.
@@ -231,6 +236,7 @@ func Run(opts Options) error {
 		reminders:    run.TodoReminders(opts.Tools),
 		schedule:     agenttool.ScheduleFromTools(opts.Tools),
 		subagentJobs: runtime.SubAgentJobsFromTools(opts.Tools),
+		mcp:          opts.MCP,
 		slash:        slash,
 		creds:        creds,
 		trust:        mgr,

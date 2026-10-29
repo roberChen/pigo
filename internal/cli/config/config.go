@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/smallnest/pigo/internal/mcp"
 )
 
 // FileConfig is the on-disk shape of config.toml. Every field is optional; an
@@ -54,6 +56,10 @@ type FileConfig struct {
 	// Prompts is the config.toml `prompts` array: paths (files or dirs) to load
 	// prompt templates from at the settings tier (mirrors pi's settings prompts).
 	Prompts []string `toml:"prompts"`
+	// MCP defines Model Context Protocol servers whose tools are exposed to the
+	// agent (stdio: command/args/env; Streamable HTTP: url/headers). Written as
+	// [[mcp]] tables or `mcp add ...` in a pigorc.
+	MCP []mcp.ServerConfig `toml:"mcp"`
 	// Providers defines third-party (custom) providers: endpoints that are not in
 	// pigo's built-in registry. Each entry is registered at startup, so it behaves
 	// like a built-in one: `--provider <name>`, model-id resolution, the preset

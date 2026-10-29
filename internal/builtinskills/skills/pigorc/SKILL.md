@@ -105,6 +105,16 @@ it says so in its report; ask the user yourself, then continue that child with t
 the background: the report arrives as a follow-up message and `task_output` lists
 or waits for jobs.
 
+**MCP servers.** `mcp add <name> --command CMD [--arg A ...] [--env K V ...]` for a
+stdio server, or `mcp add <name> --url URL [--header K V ...]` for an HTTP one
+(Streamable HTTP by default; `--transport sse` for the legacy HTTP+SSE flavor;
+`--oauth` when the endpoint requires authorization; `--timeout N` / `--disabled`
+optional). Tools appear as `mcp__<name>__<tool>`; a server advertising resources or
+prompts also gets `mcp__<name>__list_resources` / `read_resource` and
+`list_prompts` / `get_prompt`. `--no-tools` disables MCP along with the other
+tools, a server that fails to start is reported and skipped, and a
+`tools/list_changed` notification refreshes the tool set on the next turn.
+
 **Hooks.** Per agent, hooks are its own by default (`inherit_hooks` / `--inherit-hooks`
 also runs the global/project set). Sub-agent runs end on `SubagentStop`, not `Stop`.
 Hook input is one line of JSON on stdin; exit codes and stdout JSON follow the same

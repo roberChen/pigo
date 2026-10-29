@@ -24,6 +24,10 @@
 //	          [--timeout N] [--inherit-hooks]   define a custom sub-agent
 //	agent hook <name> <event> [--matcher RE] [--timeout N] --command CMD
 //	agent remove <name>                 drop an agent defined by an earlier file
+//	mcp add <name> [--command CMD] [--arg A ...] [--env K V ...]
+//	               [--url URL] [--header K V ...] [--timeout N]
+//	               [--transport http|sse] [--oauth] [--disabled]
+//	mcp remove <name>                   define an MCP server (stdio or http)
 //
 // Custom sub-agents are defined here only: the pigorc is their single source of
 // truth (config.toml has no agent table). The evaluated definitions are published
@@ -58,6 +62,7 @@ import (
 	"time"
 
 	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/smallnest/pigo/internal/mcp"
 )
 
 // pigorcTimeout bounds the whole evaluation so a script waiting on input cannot
@@ -88,6 +93,11 @@ type Pigorc struct {
 	// keeping its hooks, and `agent remove` drops a definition gathered from an
 	// earlier file (e.g. the global pigorc cancelled by the project one).
 	Agents []AgentConfig
+	// MCP holds the MCP server definitions the scripts added (a repeated name
+	// replaces the earlier one). RemovedMCP names definitions to drop from a lower
+	// layer.
+	MCP        []mcp.ServerConfig
+	RemovedMCP []string
 	// Env holds the exported variables whose value differs from the launching
 	// environment; Unset holds the names the script removed.
 	Env   map[string]string
@@ -304,6 +314,30 @@ func (p *Pigorc) parseRecords(records string) {
 			p.addProviderModel(fields[1], fields[2])
 		case "agent":
 			p.parseAgentRecord(fields)
+		case "mcp":
+			p.parseMCPRecord(fields)
+		case "mcparg":
+			if len(fields) == 3 {
+				p.addMCPValue(fields[1], func(c *mcp.ServerConfig) { c.Args = append(c.Args, fields[2]) })
+			}
+		case "mcpenv":
+			if len(fields) == 4 {
+				p.addMCPValue(fields[1], func(c *mcp.ServerConfig) {
+					if c.Env == nil {
+						c.Env = make(map[string]string)
+					}
+					c.Env[fields[2]] = fields[3]
+				})
+			}
+		case "mcphdr":
+			if len(fields) == 4 {
+				p.addMCPValue(fields[1], func(c *mcp.ServerConfig) {
+					if c.Headers == nil {
+						c.Headers = make(map[string]string)
+					}
+					c.Headers[fields[2]] = fields[3]
+				})
+			}
 		case "agenthook":
 			if len(fields) != 6 {
 				p.warnf("agent hook: malformed record %q", line)
@@ -506,6 +540,118 @@ func atoiOrZero(s string) int {
 	return n
 }
 
+// parseMCPRecord folds one `mcp add|remove` record into p.
+func (p *Pigorc) parseMCPRecord(fields []string) {
+	if len(fields) < 3 {
+		p.warnf("mcp: malformed record %v", fields)
+		return
+	}
+	switch fields[1] {
+	case "add":
+		// mcp, add, name, command, url, timeout, disabled, transport, oauth
+		if len(fields) != 9 {
+			p.warnf("mcp add: malformed record %v", fields)
+			return
+		}
+		def := mcp.ServerConfig{
+			Name:           strings.TrimSpace(fields[2]),
+			Command:        strings.TrimSpace(fields[3]),
+			URL:            strings.TrimSpace(fields[4]),
+			TimeoutSeconds: atoiOrZero(fields[5]),
+			Disabled:       strings.EqualFold(strings.TrimSpace(fields[6]), "true"),
+			Transport:      strings.TrimSpace(fields[7]),
+			OAuth:          strings.EqualFold(strings.TrimSpace(fields[8]), "true"),
+		}
+		if def.Name == "" {
+			p.warnf("mcp add: the server name must not be empty")
+			return
+		}
+		// A repeated definition layers onto the earlier one so a project file can
+		// refine a global server (add args/env/headers, disable it) without repeating
+		// the command. Empty scalars keep the previous value; disabled is last-wins so
+		// a later `mcp add` re-enables a disabled server.
+		if i := p.mcpIndex(def.Name); i >= 0 {
+			existing := p.MCP[i]
+			if def.Command == "" {
+				def.Command = existing.Command
+			}
+			if def.URL == "" {
+				def.URL = existing.URL
+			}
+			if def.TimeoutSeconds == 0 {
+				def.TimeoutSeconds = existing.TimeoutSeconds
+			}
+			if def.Transport == "" {
+				def.Transport = existing.Transport
+			}
+			if !def.OAuth {
+				def.OAuth = existing.OAuth
+			}
+			def.Args = append(append([]string(nil), existing.Args...), def.Args...)
+			def.Env = mergeStringMap(existing.Env, def.Env)
+			def.Headers = mergeStringMap(existing.Headers, def.Headers)
+			p.MCP[i] = def
+			return
+		}
+		p.MCP = append(p.MCP, def)
+	case "remove":
+		name := strings.TrimSpace(fields[2])
+		if name == "" {
+			p.warnf("mcp remove: the server name must not be empty")
+			return
+		}
+		for i, def := range p.MCP {
+			if def.Name == name {
+				p.MCP = append(p.MCP[:i], p.MCP[i+1:]...)
+				break
+			}
+		}
+		p.RemovedMCP = append(p.RemovedMCP, name)
+	default:
+		p.warnf("mcp: unknown action %q", fields[1])
+	}
+}
+
+// mergeStringMap layers add over base (nil-safe), returning a fresh map.
+func mergeStringMap(base, add map[string]string) map[string]string {
+	if len(base) == 0 && len(add) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(add))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range add {
+		out[k] = v
+	}
+	return out
+}
+
+// addMCPValue mutates the named server definition, creating it when a value was
+// declared before its `mcp add`.
+func (p *Pigorc) addMCPValue(name string, mutate func(*mcp.ServerConfig)) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	i := p.mcpIndex(name)
+	if i < 0 {
+		p.MCP = append(p.MCP, mcp.ServerConfig{Name: name})
+		i = len(p.MCP) - 1
+	}
+	mutate(&p.MCP[i])
+}
+
+// mcpIndex returns the position of an MCP definition by name, or -1.
+func (p *Pigorc) mcpIndex(name string) int {
+	for i, def := range p.MCP {
+		if def.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // addHook registers one command hook on an event, validating the event name.
 func (p *Pigorc) addHook(event, matcher, timeout, command string) {
 	canonical, ok := hooks.CanonicalEvent(event)
@@ -624,6 +770,25 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 		p.applyPigorcList(cfg, key, p.Lists[key])
 	}
 
+	// MCP server definitions: script definitions win over the file's, and
+	// `mcp remove` drops a lower-layer definition.
+	for _, name := range p.RemovedMCP {
+		cfg.MCP = removeMCPConfig(cfg.MCP, name)
+	}
+	for _, def := range p.MCP {
+		replaced := false
+		for i, existing := range cfg.MCP {
+			if existing.Name == def.Name {
+				cfg.MCP[i] = def
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.MCP = append(cfg.MCP, def)
+		}
+	}
+
 	// Third-party provider definitions: script definitions win over the file's,
 	// and `provider remove` drops a lower-layer definition.
 	for _, name := range p.RemovedProviders {
@@ -643,6 +808,17 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 		}
 	}
 	return p.Warnings[firstNew:]
+}
+
+// removeMCPConfig drops the MCP server named name from defs.
+func removeMCPConfig(defs []mcp.ServerConfig, name string) []mcp.ServerConfig {
+	out := defs[:0]
+	for _, def := range defs {
+		if def.Name != name {
+			out = append(out, def)
+		}
+	}
+	return out
 }
 
 // removeProviderConfig drops the definition named name from defs.
@@ -719,3 +895,15 @@ func SetCurrentAgents(agents []AgentConfig) { currentAgents = agents }
 // CurrentAgents returns the custom agent definitions (nil when none were
 // configured, or in library use where no config was loaded).
 func CurrentAgents() []AgentConfig { return currentAgents }
+
+// currentMCP holds the MCP server definitions resolved at startup so the tool
+// assembly (run.SetupEnv) can connect them without threading config through every
+// driver.
+var currentMCP []mcp.ServerConfig
+
+// SetCurrentMCP records the MCP server definitions for this process.
+func SetCurrentMCP(servers []mcp.ServerConfig) { currentMCP = servers }
+
+// CurrentMCP returns the MCP server definitions (nil when none were configured or
+// no config was loaded, e.g. in library use).
+func CurrentMCP() []mcp.ServerConfig { return currentMCP }
