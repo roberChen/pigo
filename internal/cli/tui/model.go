@@ -504,6 +504,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcript.addSystem("(context compacted)")
 		return m, m.pumpNext()
 
+	case reloadDoneMsg:
+		// A config reload finished (explicit /reload or the automatic pickup before a
+		// turn): clear the spinner, apply the new assembly on the UI goroutine, report
+		// what changed, and start the turn that was waiting for it.
+		m.spinner.unpin()
+		m.spinner.stop()
+		m.running = false
+		if msg.err != nil {
+			m.transcript.addSystem("config reload failed: " + msg.err.Error() + " (still using the previous configuration)")
+		} else if m.session != nil && msg.res != nil {
+			m.session.applyReload(msg.res)
+			m.live = m.session.live
+			m.slash = m.session.slash
+			for _, line := range msg.res.Summary {
+				m.transcript.addSystem(line)
+			}
+		}
+		m.relayout()
+		if msg.startPrompt != "" {
+			return m.startPrompt(msg.startPrompt)
+		}
+		return m, nil
+
 	case rebuildDoneMsg:
 		// A manual /rebuild finished: clear the pinned "Preparing conversation
 		// context…" spinner (no run is pumping, so stop it and drop out of the
@@ -978,6 +1001,25 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, tea.Batch(m.session.rebuildCmd(), m.tickSpinner())
 	}
+	// /reload is intercepted before registry resolution (like /rebuild): it re-reads
+	// the config layers and swaps the session onto the newly assembled tools, prompt,
+	// hooks, skills and MCP connections — state a slash Action closure cannot reach.
+	// It runs off the tea loop because connecting MCP servers can block.
+	if line == "/reload" {
+		m.transcript.addUser(line)
+		m.input.Clear()
+		m.menu.close()
+		if m.session == nil {
+			m.transcript.addSystem("(reload unavailable: no active session)")
+			m.relayout()
+			return m, nil
+		}
+		m.spinner.begin(time.Now(), m.thinkingLabel())
+		m.spinner.pin("Reloading configuration")
+		m.running = true
+		m.relayout()
+		return m, tea.Batch(m.session.reloadCmd(""), m.tickSpinner())
+	}
 	// /remote-control is intercepted before registry resolution (like /rebuild):
 	// it starts/stops the LAN mirror server, which owns state (server, bridge,
 	// listener Cmd) a string→string slash Action cannot hold.
@@ -1082,6 +1124,16 @@ func (m Model) startPrompt(prompt string) (tea.Model, tea.Cmd) {
 	if m.startRunFn == nil {
 		m.transcript.addSystem("(run not wired up: see session assembly in #392)")
 		return m, nil
+	}
+	// A config file changed since the last reload: apply it before this turn (a
+	// turn boundary is the only place a reload can land), then run the prompt.
+	if m.session != nil && m.session.configChanged() {
+		m.input.Blur()
+		m.spinner.begin(time.Now(), m.thinkingLabel())
+		m.spinner.pin("Reloading configuration")
+		m.running = true
+		m.relayout()
+		return m, tea.Batch(m.session.reloadCmd(prompt), m.tickSpinner())
 	}
 	m.input.Blur()
 	ch, cmd := m.startRunFn(prompt)

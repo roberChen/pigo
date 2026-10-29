@@ -97,6 +97,15 @@ type Env struct {
 // error rather than a silently ineffective boundary. It returns an error rather
 // than exiting so the caller owns exit-code mapping.
 func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy) (Env, error) {
+	return setupEnv(model, baseURL, protocol, providerName, apiKey, noTools, noSkills, systemPrompt, appendSystemPrompt, memEnabled, policy, nil)
+}
+
+// setupEnv is SetupEnv plus the session state a rebuild must carry over. state is
+// nil on a first assembly (every store is created here); a config reload passes
+// the previous run's ToolState so the rebuilt tool set keeps its background bash
+// jobs, todo list, schedule, sub-agent registry, memory database and plugins
+// instead of orphaning them.
+func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy, state *ToolState) (Env, error) {
 	cwd, _ := os.Getwd()
 	prov, resolvedName, err := provider.ResolveProvider(model, baseURL, protocol, providerName, os.Getenv)
 	if err != nil {
@@ -107,6 +116,9 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		return Env{}, err
 	}
 	tools := BuiltinTools(cwd, noTools)
+	if state != nil {
+		rebindStatefulTools(tools, state)
+	}
 	// Open the persistent memory store once (issue #481) and expose it as the
 	// memory_search tool so the agent can recall earlier context. Memory is a
 	// tool, so it is skipped under --no-tools; memory.enabled=false disables it
@@ -116,7 +128,15 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// memoryNote explains an absent store in the config report, so "why is
 	// memory_search missing?" is answerable without reading the config.
 	var memoryNote string
-	if !noTools {
+	switch {
+	case noTools:
+	case state != nil && state.Memory != nil && memEnabled:
+		// A reload keeps the open database: the tool is rebuilt, the store is not.
+		// When the new configuration disables memory the store is not reused, and the
+		// reloader closes the old one.
+		memStore = state.Memory
+		tools = append(tools, &agenttool.MemorySearchTool{Store: state.Memory})
+	default:
 		if store, err := OpenMemoryStore(memEnabled); err != nil {
 			fmt.Fprintf(os.Stderr, "pigo: memory disabled: %v\n", err)
 			memoryNote = "open failed: " + err.Error()
@@ -136,8 +156,13 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	if !noTools {
 		sem := runtime.NewSubagentSemaphore()
 		// One background-job registry per session, shared by every sub-agent tool and
-		// by the follow-up seam that delivers finished reports.
-		jobs = runtime.NewSubAgentJobs()
+		// by the follow-up seam that delivers finished reports. A reload reuses it so
+		// background children started before the reload stay observable.
+		if state != nil && state.SubAgentJobs != nil {
+			jobs = state.SubAgentJobs
+		} else {
+			jobs = runtime.NewSubAgentJobs()
+		}
 		// The child resolves credentials the same way the parent does: env/OAuth via
 		// a fresh store, plus the CLI/config api key as an override. Without the
 		// override a child would get an empty key whenever auth comes from config.toml
@@ -187,7 +212,11 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// (NewConfig) and front-ends (ScheduleFromTools) can wire delivery.
 	var sched *agenttool.Schedule
 	if !noTools {
-		sched = agenttool.NewSchedule()
+		if state != nil && state.Schedule != nil {
+			sched = state.Schedule
+		} else {
+			sched = agenttool.NewSchedule()
+		}
 		tools = append(tools, agenttool.ScheduleTools(sched)...)
 	}
 	// Discover external plugins (US-016) and append their tools. Plugin loading
@@ -195,7 +224,11 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// disabling tools (--no-tools) skips plugin discovery entirely.
 	var mgr *plugin.Manager
 	if !noTools {
-		if m, err := plugin.Discover(PluginsDir(), os.Stderr, os.Stderr); err == nil {
+		if state != nil && state.Plugins != nil {
+			// Plugins are processes: restarting them on a reload would drop their
+			// in-memory state for no reason.
+			mgr = state.Plugins
+		} else if m, err := plugin.Discover(PluginsDir(), os.Stderr, os.Stderr); err == nil {
 			tools = append(tools, m.Tools()...)
 			mgr = m
 		} else {

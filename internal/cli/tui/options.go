@@ -2,6 +2,7 @@ package tui
 
 import (
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -51,6 +52,11 @@ type Options struct {
 	// MCP holds the connected MCP server manager so each turn can pick up a
 	// server's live tool-list changes. It may be nil (no MCP servers).
 	MCP *mcp.Manager
+
+	// Reloader applies a live configuration reload (/reload, plus automatic pickup
+	// when a config file changes before the next turn). It is seeded with the
+	// initial assembly by the caller; nil disables reloading for this run.
+	Reloader *run.Reloader
 
 	// ConfigPrompts holds prompt-template paths from the config.toml `prompts`
 	// array (settings tier); each is a file or dir loaded non-recursively.

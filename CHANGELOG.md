@@ -12,6 +12,18 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **Live configuration reload**: editing a pigorc or config.toml no longer
+  requires restarting pigo. The interactive modes check the config files'
+  modification time before each turn and apply a changed one first, and `/reload`
+  applies them on demand (REPL and TUI alike). A reload re-reads the pigorc (and the
+  environment variables it exports), config.toml, third-party provider definitions
+  (an edited definition replaces the old one, a deleted one stops resolving),
+  custom sub-agents, MCP servers (reconnected), hooks, skills, the system prompt,
+  the tool set and its boundary, and the model/provider/reasoning level. Session
+  state is carried over instead of being thrown away: background shell jobs, the
+  todo list, the reminder schedule, background sub-agents, the memory database and
+  the plugin processes. A configuration that cannot be assembled is rejected and
+  the running one keeps working, with the reason reported.
 - **`pigo_config` tool**: the agent can now report its own effective
   configuration instead of guessing. One read-only tool answers "which config files
   are actually loaded?", "is that hook active?", "why is this tool missing?" and

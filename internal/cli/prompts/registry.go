@@ -362,16 +362,17 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 			return b.String()
 		},
 	})
-	// /exit, /quit, /compact, /fork, /clone, /tree, /rewind, /export, /import,
-	// /resume, /copy, /session and /status are intercepted by the REPL loop before
-	// slash resolution (they must return from the loop, run an agent stream,
-	// read/swap the active session/leaf, or list and load another stored session —
-	// none of which an Action closure can do). They are registered here only so
-	// /help lists them; their Action is never actually reached.
+	// /exit, /quit, /compact, /reload, /fork, /clone, /tree, /rewind, /export,
+	// /import, /resume, /copy, /session and /status are intercepted by the front-end
+	// before slash resolution (they must return from the loop, run an agent stream,
+	// read/swap the active session/leaf, reload the configuration, or list and load
+	// another stored session — none of which an Action closure can do). They are
+	// registered here only so /help lists them; their Action is never reached.
 	for _, c := range []struct{ name, desc string }{
 		{"exit", "exit the REPL"},
 		{"quit", "exit the REPL"},
 		{"compact", "summarize and compact the conversation context now"},
+		{"reload", "re-read the config files (pigorc, config.toml, hooks) and apply them now"},
 		{"fork", "branch from a historical message into a new session: /fork [n]"},
 		{"clone", "duplicate the current session into an independent branch"},
 		{"tree", "show the session branch tree; switch active branch: /tree [n]"},

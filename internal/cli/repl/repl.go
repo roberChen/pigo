@@ -175,6 +175,15 @@ type replDeps struct {
 	// exit its still-running jobs are killed so background processes are not
 	// orphaned. nil when the shell tool is disabled.
 	jobs *agenttool.BashJobStore
+
+	// reloader applies a live configuration reload (/reload, and automatically
+	// when a config file changes between turns). nil when the driver did not wire
+	// one (tests, library use), which makes /reload report that it is unavailable.
+	reloader *run.Reloader
+	// rebuildSlash rebuilds the slash registry after a reload so skills and prompt
+	// templates added or removed on disk appear without a restart. nil disables the
+	// rebuild (the old registry stays usable).
+	rebuildSlash func(skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry
 }
 
 // replScanBufInit is the initial size of the shared input reader. A REPL user
@@ -519,6 +528,15 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			btw.RunBtw(setCancel, out, &deps, editor, line)
 			continue
 		}
+		if line == "/reload" {
+			// /reload re-reads the config layers (pigorc, config.toml, the JSON hook
+			// layers) and swaps the session onto the newly assembled tools, prompt,
+			// hooks, skills and MCP connections — state a slash Action closure cannot
+			// reach. Session state (background jobs, todo list, schedule, sub-agents,
+			// memory) is carried over, not discarded.
+			reloadNow(out, &deps)
+			continue
+		}
 		if line == "/remote-control" || strings.HasPrefix(line, "/remote-control ") {
 			// /remote-control is intercepted here (not a slash Action) because it
 			// starts/stops the in-process server and toggles deps.remote / the
@@ -559,6 +577,11 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			}
 			prompt = outcome.Prompt
 		}
+
+		// Pick up configuration edited since the last turn before this one starts:
+		// a reload only has to land before a request can observe it, and doing it
+		// here means a half-written file is never used mid-request.
+		autoReload(out, &deps)
 
 		// Launch the run and stream it to out. runCancel is published so the SIGINT
 		// handler can interrupt this run; it is cleared when the run settles.

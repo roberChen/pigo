@@ -123,6 +123,17 @@ type runSession struct {
 	// nil when /remote-control is off. buildConfig reads it to install the remote
 	// confirm seam so risky tool calls route to the paired browser while connected.
 	remote *remoteSession
+
+	// opts is the launch configuration, retained so a config reload can rebuild the
+	// slash registry (skills, prompt templates, plugins) against the same sources.
+	opts Options
+	// reloader applies a live configuration reload. nil disables /reload and the
+	// automatic pickup of changed config files.
+	reloader *run.Reloader
+	// skills and plugins are the ones the current slash registry was built from;
+	// a reload replaces them before rebuilding it.
+	skills  []*runtime.Skill
+	plugins *plugin.Manager
 }
 
 // newRunSession assembles the run session from the resolved Options, opening the
@@ -240,6 +251,10 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		persisted:  len(history),
 		memoryRoot: run.MemoryRootFromTools(opts.Tools),
 		memstore:   run.MemoryStoreFromTools(opts.Tools),
+		opts:       opts,
+		reloader:   opts.Reloader,
+		skills:     opts.Skills,
+		plugins:    opts.Plugins,
 	}
 	// /trust is a per-session command (its closure captures mgr + cwd), so it is
 	// registered here rather than in newSlashRegistry. A nil mgr is a no-op.

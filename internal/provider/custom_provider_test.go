@@ -170,7 +170,7 @@ func TestCustomProviderAnthropicProtocol(t *testing.T) {
 
 // TestRegisterCustomProviderValidation verifies the definitions that must be
 // rejected: a missing/invalid name, an unknown protocol, a missing base URL, and
-// a name that collides with a built-in or an earlier custom definition.
+// a name that collides with a built-in provider.
 func TestRegisterCustomProviderValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -191,10 +191,44 @@ func TestRegisterCustomProviderValidation(t *testing.T) {
 		}
 	}
 
+	// Re-registering a custom name replaces it instead of failing, so a config
+	// reload can change a provider definition without a restart.
 	registerTestProvider(t, ProviderSpec{Name: "testcorp-dupe", DefaultBaseURL: "https://x/v1"}, nil, "")
-	err := RegisterCustomProvider(ProviderSpec{Name: "testcorp-dupe", DefaultBaseURL: "https://y/v1"}, nil, "")
-	if err == nil || !strings.Contains(err.Error(), "already defined") {
-		t.Fatalf("duplicate registration error = %v, want an already-defined error", err)
+	if err := RegisterCustomProvider(ProviderSpec{Name: "testcorp-dupe", DefaultBaseURL: "https://y/v1"}, nil, ""); err != nil {
+		t.Fatalf("re-registering a custom provider: %v", err)
+	}
+	spec, ok := LookupProviderSpec("testcorp-dupe")
+	if !ok {
+		t.Fatal("re-registered provider is missing")
+	}
+	if spec.DefaultBaseURL != "https://y/v1" {
+		t.Errorf("DefaultBaseURL = %q, want the replacement definition", spec.DefaultBaseURL)
+	}
+}
+
+// TestUnregisterCustomProvider verifies a custom provider can be removed (a
+// reload after the definition is deleted) while a built-in name is never touched.
+func TestUnregisterCustomProvider(t *testing.T) {
+	registerTestProvider(t, ProviderSpec{Name: "testcorp-gone", DefaultBaseURL: "https://x/v1"}, []PresetModel{{ID: "testcorp-gone-model"}}, "inline-key")
+	if !UnregisterCustomProvider("testcorp-gone") {
+		t.Fatal("UnregisterCustomProvider reported no removal")
+	}
+	if _, ok := LookupProviderSpec("testcorp-gone"); ok {
+		t.Error("the provider spec should be gone")
+	}
+	if _, ok := LookupPreset("testcorp-gone-model"); ok {
+		t.Error("its models should be gone from the catalog")
+	}
+	for _, p := range PresetProviders {
+		if p.Name == "testcorp-gone" {
+			t.Error("its preset entry should be gone")
+		}
+	}
+	if UnregisterCustomProvider("openai") {
+		t.Error("a built-in provider must never be unregistered")
+	}
+	if UnregisterCustomProvider("testcorp-gone") {
+		t.Error("removing an absent provider should report false")
 	}
 }
 

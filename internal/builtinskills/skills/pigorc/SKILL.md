@@ -145,6 +145,11 @@ run. Keep secrets out of config files: export the provider key or use
 - To trace the script: `bash -x ~/.pigo/pigorc 2>&1 | head`.
 - A project `.pigorc` and project hooks load only when the directory is trusted
   (fail-closed); run `pigo --approve` once or trust it in the REPL/TUI.
+- Edits take effect without a restart in the interactive modes: the config files
+  are re-read when they change before the next turn, and `/reload` applies them
+  immediately. A reload keeps the session's own state (background jobs, todo list,
+  scheduled reminders, background sub-agents, memory store, plugin processes) and
+  leaves the previous configuration running if the new one cannot be assembled.
 - Call the built-in `pigo_config` tool (or ask the agent to) to see what is actually
   in effect in this run: the config files that were read versus skipped, the
   resolved model/endpoint/thinking level, the tools and the boundary, skills, MCP

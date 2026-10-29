@@ -164,6 +164,11 @@ type cliOptions struct {
 	// but can never widen the boundary.
 	allowedTools    []string
 	disallowedTools []string
+
+	// reloader applies a live configuration reload in the interactive modes. It is
+	// not a flag: main builds it from the pristine flag values so a reload re-derives
+	// the same precedence chain the launch used (CLI > config file > default).
+	reloader *run.Reloader
 }
 
 // registerFlags binds every CLI flag on fs. It is a function (rather than inline in
@@ -262,76 +267,24 @@ func main() {
 		}
 	}
 
-	// Evaluate pigorc, the Bash config script ($PIGO_HOME/pigorc plus ./.pigorc in
-	// a trusted directory). It runs before the TOML overlay so its options outrank
-	// every config file (an explicit CLI flag still wins), and the variables it
-	// exports are applied to this process so provider keys, base URLs and PIGO_*
-	// knobs behave exactly as if they had been exported in the shell.
+	// flagsOnly is the pristine CLI surface: everything the user typed, before any
+	// config file is overlaid. It is kept so a live config reload can re-derive the
+	// effective options from the same starting point (CLI > file > default) instead
+	// of layering the file onto already-overlaid values.
+	flagsOnly := opts
+
+	// Read the configuration layers (pigorc, then config.toml) and overlay them
+	// onto the flags. This publishes everything a run needs before assembly —
+	// exported environment variables, third-party providers, custom sub-agents and
+	// MCP servers — and is the exact code a live reload re-runs, so a reloaded
+	// session cannot drift from a freshly launched one.
 	cwd, _ := os.Getwd()
-	pigorc := config.LoadPigorc(cwd, opts.approve || run.Trusted(cwd), version)
-	config.SetCurrentPigorc(pigorc)
-	if pigorc.Output != "" {
-		fmt.Fprintln(os.Stderr, pigorc.Output)
+	resolved, messages := resolveConfig(flagsOnly, cwd)
+	for _, msg := range messages {
+		fmt.Fprintf(os.Stderr, "pigo: %s\n", msg)
 	}
-	for _, w := range pigorc.Warnings {
-		fmt.Fprintf(os.Stderr, "pigo: %s\n", w)
-	}
-	for k, v := range pigorc.Env {
-		_ = os.Setenv(k, v)
-	}
-	for _, k := range pigorc.Unset {
-		_ = os.Unsetenv(k)
-	}
-
-	// Overlay ~/.config/pigo/config.toml: file values replace built-in defaults,
-	// but any flag the user set on the command line still wins (CLI > file >
-	// default). A malformed file warns but does not abort — defaults apply. The
-	// pigorc options are folded into the decoded file first, so a script option
-	// beats the file's value while a CLI flag still beats both.
-	cfg, err := config.LoadFileConfig(config.FileConfigPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: %v\n", err)
-	}
-	for _, w := range pigorc.ApplyToFileConfig(&cfg) {
-		fmt.Fprintf(os.Stderr, "pigo: %s\n", w)
-	}
-	applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
-
-	// Register the third-party providers defined in config.toml / pigorc before
-	// anything resolves a provider: this is what makes `--provider <name>`,
-	// model-id inference and the /model picker treat them like built-ins. A bad
-	// definition warns instead of aborting, so one typo cannot brick the CLI.
-	registerConfiguredProviders(cfg.Providers)
-	// Custom sub-agents come only from the pigorc scripts (the one config system
-	// for agent definitions) and are registered by the tool assembly
-	// (run.SetupEnv), which runs later per driver; publish them for this process.
-	config.SetCurrentAgents(pigorc.Agents)
-	// MCP servers come from config.toml `[[mcp]]` and pigorc `mcp add ...`; the tool
-	// assembly (run.SetupEnv) connects them.
-	config.SetCurrentMCP(cfg.MCP)
-
-	// A bare provider name ("zai", "deepseek") means that provider's default
-	// model (issue #564): canonicalize once here so every downstream consumer —
-	// SetupEnv, the REPL/TUI live seeds, sub-agent children — carries a real
-	// model id instead of routing the literal name to OpenRouter.
-	opts.model = provider.CanonicalizeModel(opts.model)
-
-	// Resolve a credential reference into an API key (issue #568): the config
-	// carries only a NAME; the literal secret lives in
-	// $PIGO_HOME/.credentials.yaml (0600). A missing reference warns rather
-	// than aborts — the provider may authenticate from the ambient environment.
-	if opts.credentialRef != "" && opts.apiKey == "" {
-		path := provider.CredentialFilePath()
-		if provider.CredentialFilePermissionsWarn(path) {
-			fmt.Fprintf(os.Stderr, "pigo: warning: %s is readable by group/other; chmod 600 recommended\n", path)
-		}
-		key, err := provider.ResolveCredentialReference(path, opts.credentialRef)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: credential %q: %v\n", opts.credentialRef, err)
-		} else {
-			opts.apiKey = key
-		}
-	}
+	opts = resolved
+	opts.reloader = newReloader(flagsOnly, cwd)
 
 	// --version is a standalone action: print build metadata and exit.
 	if opts.showVersion {
@@ -425,13 +378,32 @@ func applyFileConfig(opts *cliOptions, cfg config.FileConfig, changed func(strin
 // config.toml and pigorc. A named credential reference is resolved here (the
 // literal secret stays in $PIGO_HOME/.credentials.yaml); the environment still
 // wins over an inline key, so a key can be rotated without editing config.
-func registerConfiguredProviders(defs []config.ProviderConfig) {
+//
+// It is also the reload path, so a definition that disappeared from the config
+// stops resolving, and a definition that changed replaces the previous one. The
+// messages it returns are shown to the user; a rejected definition never aborts.
+func registerConfiguredProviders(defs []config.ProviderConfig) []string {
+	var messages []string
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, strings.ToLower(strings.TrimSpace(def.Name)))
+	}
+	// Drop providers the previous load registered and this one no longer defines.
+	for _, name := range configuredProviderNames {
+		if name == "" || containsString(names, name) {
+			continue
+		}
+		if provider.UnregisterCustomProvider(name) {
+			messages = append(messages, fmt.Sprintf("provider %q removed", name))
+		}
+	}
+	configuredProviderNames = names
 	for _, def := range defs {
 		key := strings.TrimSpace(def.APIKey)
 		if key == "" && def.Credential != "" {
 			resolved, err := provider.ResolveCredentialReference(provider.CredentialFilePath(), def.Credential)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "pigo: provider %q: credential %q: %v\n", def.Name, def.Credential, err)
+				messages = append(messages, fmt.Sprintf("provider %q: credential %q: %v", def.Name, def.Credential, err))
 			} else {
 				key = resolved
 			}
@@ -452,9 +424,20 @@ func registerConfiguredProviders(defs []config.ProviderConfig) {
 			}
 		}
 		if err := provider.RegisterCustomProvider(spec, models, key); err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: provider %q: %v\n", def.Name, err)
+			messages = append(messages, fmt.Sprintf("provider %q: %v", def.Name, err))
 		}
 	}
+	return messages
+}
+
+// containsString reports whether ss holds s.
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatch runs the resolved command and returns a process exit code, writing
@@ -541,6 +524,12 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			fmt.Fprintf(errOut, "pigo: %v\n", err)
 			return 2
 		}
+		// Seed the reloader with the assembly this session is running, so a later
+		// /reload (or an automatic pickup of an edited config file) has a baseline to
+		// diff and the session state to carry over.
+		if opts.reloader != nil {
+			opts.reloader.Seed(env)
+		}
 		if shouldUseTUI(opts, isTTY) {
 			// Refresh the cached latest-release check off the hot path so the banner
 			// can show an upgrade hint on this or the next launch without blocking
@@ -565,6 +554,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 				ConfigPrompts:     opts.configPrompts,
 				CliPrompts:        opts.promptTemplates,
 				NoPromptTemplates: opts.noPromptTemplates,
+				Reloader:          opts.reloader,
 			}); err != nil {
 				fmt.Fprintf(errOut, "pigo: %v\n", err)
 				return 1
@@ -590,6 +580,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			CliPrompts:        opts.promptTemplates,
 			NoPromptTemplates: opts.noPromptTemplates,
 			Dream:             opts.dreamCfg,
+			Reloader:          opts.reloader,
 		}); err != nil {
 			fmt.Fprintf(errOut, "pigo: %v\n", err)
 			return 1
@@ -629,33 +620,25 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 	}, out, errOut)
 }
 
-// runtimeSnapshot captures the settings only cmd/pigo resolved — the endpoint,
-// reasoning effort, output format, approval mode and memory tables — so the
-// pigo_config tool reports this run instead of a set of defaults it would have to
-// re-derive. A thinking-level lookup failure is ignored here: the driver that
-// needs the level reports it properly, and the report simply omits that line.
-func runtimeSnapshot(opts cliOptions) config.RuntimeSnapshot {
-	snap := config.RuntimeSnapshot{
-		Model:        opts.model,
-		Provider:     opts.provider,
-		Protocol:     opts.protocol,
-		BaseURL:      opts.baseURL,
-		OutputFormat: opts.outputFmt,
-		Approve:      opts.approve,
-		NoTools:      opts.noTools,
-		NoSkills:     opts.noSkills,
-		Memory:       opts.memory,
-	}
-	if lvl, err := run.ResolveThinkingLevel(opts.thinkingLevel); err == nil {
-		snap.Thinking = string(lvl)
-	}
-	return snap
-}
-
 // applyRuntimeSnapshot hands the resolved settings to the run's config report (a
-// no-op when tools are disabled and no report exists).
+// no-op when tools are disabled and no report exists), so the pigo_config tool
+// describes this run instead of re-deriving defaults. It goes through
+// reloadSettings, the same projection a reload uses, so the report reads
+// identically before and after a config reload.
 func applyRuntimeSnapshot(opts cliOptions, env run.Env) {
-	env.Report.SetSnapshot(runtimeSnapshot(opts))
+	s := reloadSettings(opts, nil)
+	env.Report.SetSnapshot(config.RuntimeSnapshot{
+		Model:        s.Model,
+		Provider:     s.ProviderName,
+		Protocol:     s.Protocol,
+		BaseURL:      s.BaseURL,
+		Thinking:     s.Thinking,
+		OutputFormat: s.OutputFormat,
+		Approve:      s.Approve,
+		NoTools:      s.NoTools,
+		NoSkills:     s.NoSkills,
+		Memory:       s.MemoryConfig,
+	})
 }
 
 // setupExitCode maps a run.SetupEnv failure to a process exit code. A bad tool

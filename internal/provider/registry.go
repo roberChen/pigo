@@ -376,6 +376,12 @@ var registryMu sync.RWMutex
 // a key can be rotated without editing config.
 var customProviderKeys = map[string]string{}
 
+// customProviders records which registered names came from a user definition
+// rather than the built-in table. Only these may be replaced or unregistered: a
+// config file must never be able to redefine a built-in provider's endpoint,
+// which would silently redirect traffic meant for that service.
+var customProviders = map[string]bool{}
+
 // LookupProviderSpec returns the ProviderSpec for a provider name and whether it
 // is a known provider (built-in or registered custom). The returned spec is a
 // copy; mutating its slice or map fields is discouraged as they are shared with
@@ -431,10 +437,15 @@ func RegisterCustomProvider(spec ProviderSpec, models []PresetModel, apiKey stri
 
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	if _, exists := providerRegistryByName[name]; exists {
+	if customProviders[name] {
+		// A reloaded definition replaces the previous one, so editing a provider in
+		// the config and reloading takes effect without a restart.
+		unregisterCustomProviderLocked(name)
+	} else if _, exists := providerRegistryByName[name]; exists {
 		return fmt.Errorf("provider %q is already defined (point a built-in at another endpoint with %s_BASE_URL instead)",
 			name, strings.ToUpper(strings.ReplaceAll(name, "-", "_")))
 	}
+	customProviders[name] = true
 	providerRegistry = append(providerRegistry, spec)
 	providerRegistryByName[name] = spec
 	PresetProviders = append(PresetProviders, PresetProvider{Name: name, EnvVar: spec.EnvVars[0]})
@@ -456,6 +467,53 @@ func RegisterCustomProvider(spec ProviderSpec, models []PresetModel, apiKey stri
 		customProviderKeys[name] = apiKey
 	}
 	return nil
+}
+
+// UnregisterCustomProvider removes a provider that a config definition added,
+// returning whether it was there. It exists for configuration reloads: a
+// provider deleted from the config must stop resolving. A built-in name is never
+// touched, and false is returned so the caller can report the ignored request.
+func UnregisterCustomProvider(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if !customProviders[name] {
+		return false
+	}
+	unregisterCustomProviderLocked(name)
+	return true
+}
+
+// unregisterCustomProviderLocked drops a custom provider and everything derived
+// from it: its spec, its preset entry, the models that resolved to it, and any
+// inline key. Callers hold registryMu.
+func unregisterCustomProviderLocked(name string) {
+	delete(customProviders, name)
+	delete(customProviderKeys, name)
+	delete(providerRegistryByName, name)
+	kept := providerRegistry[:0]
+	for _, spec := range providerRegistry {
+		if spec.Name != name {
+			kept = append(kept, spec)
+		}
+	}
+	providerRegistry = kept
+
+	keptProviders := PresetProviders[:0]
+	for _, p := range PresetProviders {
+		if p.Name != name {
+			keptProviders = append(keptProviders, p)
+		}
+	}
+	PresetProviders = keptProviders
+
+	keptModels := PresetCatalog[:0]
+	for _, m := range PresetCatalog {
+		if m.Provider != name {
+			keptModels = append(keptModels, m)
+		}
+	}
+	PresetCatalog = keptModels
 }
 
 // validProviderName accepts the characters a provider name may use: a name ends

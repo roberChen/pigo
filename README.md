@@ -31,6 +31,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [pigorc：用 shell 脚本配置](#pigorc用-shell-脚本配置)
 - [自定义 sub-agent（Agent 定义）](#自定义-sub-agentagent-定义)
 - [MCP（Model Context Protocol）](#mcpmodel-context-protocol)
+- [配置热加载](#配置热加载reload)
 - [技能 Skills](#技能-skills)
 - [提示词模板](#提示词模板)
 - [插件](#插件)
@@ -400,7 +401,7 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 - webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
 - 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
-REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/help`、`/compact`、`/fork`、`/clone`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
 在交互终端输入时，pigo 会用灰色文字提示最近匹配的输入或斜杠命令；
 输入 `/model ` 时还会从最近使用的模型和内置模型目录中匹配。按 `Tab`
@@ -750,6 +751,24 @@ mcp remove github
 - 用内置工具 `pigo_config` 可随时查看每个服务器的配置项、传输方式、实际连接状态与工具数量（见[内置工具](#内置工具)）。
 
 > 配置参考里的 `[[mcp]]` 字段与 pigorc `mcp` 语法会随内置 `pigorc` 技能的 `reference.md` 自动更新。
+
+## 配置热加载（`/reload`）
+
+交互模式下改配置不需要重启：
+
+- **自动生效**：每轮开始前对比 `~/.config/pigo/config.toml`、`$PIGO_HOME/pigorc`、`./.pigorc`（仅受信任目录）、`$PIGO_HOME/config.json`、`./.pigo/config.json` 的修改时间与大小，有变化就先应用再跑这一轮，并打印一行提示。
+- **手动生效**：随时输入 `/reload` 立即重新读取；REPL 与 TUI 行为一致。无头 `-p` 运行没有热加载。
+- **重新读取**：pigorc（含它导出的环境变量）、config.toml、第三方 provider（改了定义就替换，删了就注销）、自定义 sub-agent、MCP 服务器（重新连接，旧连接关闭）、hooks（重新解析，含刚被信任的项目层）、skills、系统提示词、工具集与准入边界、model / provider / 推理强度。
+- **原样保留**：会话本身（历史消息、会话 id）、后台 bash 任务、todo 清单、定时提醒、后台 sub-agent、持久化记忆库（不重开）、插件进程（不重启）。
+- **失败即回退**：新配置无法装配时（例如准入边界里写了不存在的工具名、provider 解析失败）保持旧配置继续运行，并打印失败原因。
+
+```bash
+pigo                     # 交互模式
+# ... 另开一个终端编辑 ~/.pigo/pigorc，例如加 mcp add、改 hook、加 agent
+/reload                  # 立即生效；也可以直接继续提问，下一轮会自动应用
+```
+
+> 想确认当前实际生效的配置，问 agent 用 `pigo_config` 工具，或看 `/status`。
 
 ## 提示词模板
 

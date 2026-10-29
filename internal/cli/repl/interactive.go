@@ -72,6 +72,11 @@ type Options struct {
 	// server's live tool-list changes. It may be nil (no MCP servers).
 	MCP *mcp.Manager
 
+	// Reloader applies a live configuration reload (/reload, plus automatic
+	// pickup when a config file changes between turns). It is seeded with the
+	// initial assembly by the caller; nil disables reloading for this run.
+	Reloader *run.Reloader
+
 	// ConfigPrompts holds prompt-template paths from the config.toml `prompts`
 	// array (settings tier); each is a file or dir loaded non-recursively.
 	ConfigPrompts []string
@@ -252,6 +257,22 @@ func Run(opts Options) error {
 		notifier:     plugin.NewEventNotifier(opts.Plugins, os.Stderr),
 		goal:         agenttool.NewGoalState(),
 		telemetry:    cli.NewTelemetryHolder(),
+		reloader:     opts.Reloader,
+		// A reload re-reads skills and plugins, so the slash registry is rebuilt
+		// from the sources resolved at launch (same tiers, same precedence).
+		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry {
+			reg, err := prompts.BuildSlashRegistry(live, creds, skills, plugins, prompts.PromptTemplateSources{
+				Settings:       opts.ConfigPrompts,
+				CLI:            opts.CliPrompts,
+				Disable:        opts.NoPromptTemplates,
+				ProjectDir:     filepath.Join(cwd, ".pigo", "prompts"),
+				ProjectTrusted: mgr != nil && mgr.IsTrusted(cwd),
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
+			}
+			return reg
+		},
 	})
 }
 
