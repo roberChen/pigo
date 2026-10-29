@@ -112,9 +112,11 @@ type Pigorc struct {
 	Output string
 }
 
-// defaultPigorcPath returns $PIGO_HOME/pigorc (default ~/.pigo/pigorc), or "" when
-// the home directory cannot be resolved and PIGO_HOME is unset.
-func defaultPigorcPath() string {
+// DefaultPigorcPath returns $PIGO_HOME/pigorc (default ~/.pigo/pigorc), or "" when
+// the home directory cannot be resolved and PIGO_HOME is unset. It is exported so
+// diagnostics (the pigo_config report) can name the file that was looked for even
+// when it does not exist.
+func DefaultPigorcPath() string {
 	dir := os.Getenv("PIGO_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -140,7 +142,7 @@ func ProjectPigorcPath(cwd string) string {
 // trust gate as project hooks). Non-existent paths are dropped.
 func PigorcPaths(cwd string, trusted bool) []string {
 	var paths []string
-	if p := defaultPigorcPath(); p != "" && fileExists(p) {
+	if p := DefaultPigorcPath(); p != "" && fileExists(p) {
 		paths = append(paths, p)
 	}
 	if trusted {

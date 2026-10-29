@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	pigoconfig "github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -63,6 +64,19 @@ func New(opts ...Option) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Record what this Session resolved for the pigo_config tool. The library
+	// auto-executes tools (equivalent to --approve), so the report says so.
+	env.Report.SetSnapshot(pigoconfig.RuntimeSnapshot{
+		Model:        c.model,
+		Provider:     c.provider,
+		Protocol:     c.protocol,
+		BaseURL:      c.baseURL,
+		Thinking:     string(thinking),
+		Approve:      true,
+		NoTools:      c.noTools,
+		NoSkills:     !c.skills,
+		OutputFormat: "text",
+	})
 
 	allTools, err := adaptCustomTools(c.customTools, env.Tools)
 	if err != nil {

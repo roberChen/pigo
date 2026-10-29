@@ -47,7 +47,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 
 - **两种模式**：无头 `-p` 一次性执行（适合脚本 / CI），或直接进入交互式 REPL。
 - **多 Provider**：OpenRouter（默认）、本地 Ollama、NVIDIA NIM、Anthropic、任意 OpenAI 兼容端点。
-- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash`）/ `todo` / `question`（toolcall 提问）/ `webfetch`。
+- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash`）/ `todo` / `question`（toolcall 提问）/ `webfetch` / `pigo_config`（回显当前生效配置）。
 - **会话续跑**：`--list-sessions` / `--resume` / `--continue`，无头与 REPL 均可续跑。
 - **stream-json 输出**：逐行 JSON 事件，首个事件携带 `session_id`，便于调用方关联。
 - **系统提示词分层组装**：base 指令 + 环境块 + `AGENTS.md`（general→specific）+ `--append-system-prompt`。
@@ -327,6 +327,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `webfetch` | 抓取 URL 并转为精简 Markdown 正文，HTTP 自动升级 HTTPS |
 | `websearch` | 联网搜索并返回标题/URL/摘要，按凭证自动选后端（`TAVILY_API_KEY`→Tavily，`BRAVE_API_KEY`→Brave，否则回落无 key 的 DuckDuckGo），支持 `allowed_domains`/`blocked_domains` 过滤 |
 | `memory_search` | 检索持久化记忆（`memory.enabled = false` 或 `--no-tools` 时不注册） |
+| `pigo_config` | 回显当前运行的生效配置：实际读取的配置文件（config.toml、全局/项目 config.json、pigorc、skills/plugins/memory 目录）、model/provider/endpoint、thinking 与输出格式、启用的工具及准入边界、skills、MCP 服务器（配置项 vs 实际连接）、hooks、自定义 sub-agent、memory/checkpoint/compaction。可用 `{"section": "hooks"}` 只看一节；只读，`--no-tools` 时不注册 |
 | `task` | 派发通用子 Agent，子 Agent 继承父级工具边界且不能再次派发 |
 
 > `bash` / `write` / `edit` 属于"副作用工具"，在未信任目录下需确认（见[项目信任](#项目信任)）。
@@ -746,6 +747,7 @@ mcp remove github
 - **热更新**：服务器发 `notifications/tools|resources|prompts/list_changed` 后，下一轮自动重新列举并替换工具集（无需重启），新工具同时注册进执行器；
 - **OAuth**：`oauth = true` 时对 401 端点执行 MCP 授权流程——protected-resource 元数据发现、授权服务器元数据、动态客户端注册、授权码 + PKCE（本地回环回调，自动打开浏览器并打印 URL）、令牌缓存与刷新（`$PIGO_HOME/mcp-oauth/<server>.json`，0600）；
 - 每请求超时默认 60s（`timeout_seconds` 可调）；工具与其他内置工具同权（`--allowed-tools` / `--disallowed-tools`、sub-agent 继承）。
+- 用内置工具 `pigo_config` 可随时查看每个服务器的配置项、传输方式、实际连接状态与工具数量（见[内置工具](#内置工具)）。
 
 > 配置参考里的 `[[mcp]]` 字段与 pigorc `mcp` 语法会随内置 `pigorc` 技能的 `reference.md` 自动更新。
 

@@ -12,6 +12,18 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **`pigo_config` tool**: the agent can now report its own effective
+  configuration instead of guessing. One read-only tool answers "which config files
+  are actually loaded?", "is that hook active?", "why is this tool missing?" and
+  "which MCP servers connected?" by rendering what the run assembled: the
+  config.toml / global and project config.json / pigorc layers (with
+  present-but-skipped files named as such, e.g. a project layer under an untrusted
+  directory), the resolved model, provider, endpoint, reasoning effort and output
+  format, the advertised tools grouped by origin plus the
+  `--allowed-tools`/`--disallowed-tools` boundary, skills, configured versus
+  connected MCP servers with their tool counts, the resolved hook set, custom
+  sub-agents, and the memory/checkpoint/compaction settings. A `section` argument
+  narrows the report. `--no-tools` disables it along with every other tool.
 - **MCP client support**: pigo connects to external Model Context Protocol servers
   and exposes their tools as `mcp__<server>__<tool>`, with the server's argument
   schema passed through. Servers that advertise resources also get

@@ -75,6 +75,12 @@ type Env struct {
 	// delivery into the loop's GetFollowUpMessages seam (see NewConfig) and
 	// front-ends can reach it via runtime.SubAgentJobsFromTools.
 	SubAgentJobs *runtime.SubAgentJobs
+
+	// Report is the snapshot behind the pigo_config tool (that tool is already in
+	// Tools). It is surfaced so a driver can record the settings only it resolved
+	// (endpoint, reasoning effort, output format, approval, memory tables) with
+	// Report.SetSnapshot, keeping the tool's answer identical to the run's.
+	Report *ConfigReport
 }
 
 // SetupEnv resolves the provider for model/baseURL, builds the tool set rooted
@@ -107,12 +113,18 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// too. Opening is non-fatal: a failure logs and leaves memory off, matching
 	// the "fall back to file-based auto-memory" contract.
 	var memStore *memory.Store
+	// memoryNote explains an absent store in the config report, so "why is
+	// memory_search missing?" is answerable without reading the config.
+	var memoryNote string
 	if !noTools {
 		if store, err := OpenMemoryStore(memEnabled); err != nil {
 			fmt.Fprintf(os.Stderr, "pigo: memory disabled: %v\n", err)
+			memoryNote = "open failed: " + err.Error()
 		} else if store != nil {
 			memStore = store
 			tools = append(tools, &agenttool.MemorySearchTool{Store: store})
+		} else if !memEnabled {
+			memoryNote = "memory.enabled = false"
 		}
 	}
 	// Wire the generic task tool (US-002, #454) unless tools are disabled. It
@@ -199,6 +211,29 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		mcpMgr = connectMCP(context.Background(), config.CurrentMCP(), os.Stderr)
 		tools = append(tools, mcpMgr.Tools()...)
 	}
+	// The self-description tool: it reports what this run actually assembled (files
+	// read, tools advertised, skills, MCP servers, hooks, sub-agents, memory). It is
+	// appended before the policy check so --allowed-tools/--disallowed-tools govern
+	// it like any other tool; the report pointer is filled in below, once the final
+	// tool list and the discovered skills are known.
+	// --no-tools means no tools at all, this one included, so the report only
+	// exists when tools do.
+	var report *ConfigReport
+	if !noTools {
+		report = &ConfigReport{
+			Cwd:          cwd,
+			Model:        model,
+			ProviderName: resolvedName,
+			MCP:          mcpMgr,
+			Plugins:      mgr,
+			Policy:       policy,
+			NoSkills:     noSkills,
+			MemoryOn:     memStore != nil,
+			MemoryNote:   memoryNote,
+			ScheduleOn:   sched != nil,
+		}
+		tools = append(tools, newConfigTool(report))
+	}
 
 	// Enforce the --allowed-tools/--disallowed-tools boundary now that the set is
 	// complete. Validation must happen here rather than at flag-parse time: plugin
@@ -211,6 +246,9 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		return Env{}, err
 	}
 	tools = ApplyToolPolicy(tools, policy)
+	if report != nil {
+		report.Tools = tools
+	}
 	if len(tools) == 0 && !noTools && !policy.IsZero() {
 		fmt.Fprintln(os.Stderr, "pigo: warning: the tool policy removed every tool; the model will run without tools")
 	}
@@ -227,6 +265,11 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	skills, err := LoadSkills(noSkills)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pigo: skills: %v\n", err)
+	}
+	// Skills are discovered after the tool boundary is applied, so the report is
+	// completed here rather than at construction.
+	if report != nil {
+		report.Skills = skills
 	}
 	// The model can only load a skill's body when the read tool is present, so
 	// advertise skills in the prompt only then (mirrors pi's selectedTools check).
@@ -253,6 +296,7 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		Schedule:     sched,
 		SubAgentJobs: jobs,
 		MCP:          mcpMgr,
+		Report:       report,
 	}, nil
 }
 

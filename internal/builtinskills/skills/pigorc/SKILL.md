@@ -145,6 +145,12 @@ run. Keep secrets out of config files: export the provider key or use
 - To trace the script: `bash -x ~/.pigo/pigorc 2>&1 | head`.
 - A project `.pigorc` and project hooks load only when the directory is trusted
   (fail-closed); run `pigo --approve` once or trust it in the REPL/TUI.
+- Call the built-in `pigo_config` tool (or ask the agent to) to see what is actually
+  in effect in this run: the config files that were read versus skipped, the
+  resolved model/endpoint/thinking level, the tools and the boundary, skills, MCP
+  servers with their connection state, the resolved hooks, sub-agents and memory
+  settings. Pass `{"section": "hooks"}` (or `files`, `tools`, `skills`, `mcp`,
+  `agents`, `memory`, `runtime`) to narrow it.
 
 ## Safety
 

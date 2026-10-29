@@ -526,6 +526,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			fmt.Fprintf(errOut, "pigo: %v\n", err)
 			return setupExitCode(err)
 		}
+		applyRuntimeSnapshot(opts, env)
 		if env.Plugins != nil {
 			defer env.Plugins.Close()
 		}
@@ -607,6 +608,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "pigo: %v\n", err)
 		return setupExitCode(err)
 	}
+	applyRuntimeSnapshot(opts, env)
 	if env.Plugins != nil {
 		defer env.Plugins.Close()
 	}
@@ -625,6 +627,35 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		ThinkingLevel: opts.thinkingLevel,
 		ResumeID:      resumeID,
 	}, out, errOut)
+}
+
+// runtimeSnapshot captures the settings only cmd/pigo resolved — the endpoint,
+// reasoning effort, output format, approval mode and memory tables — so the
+// pigo_config tool reports this run instead of a set of defaults it would have to
+// re-derive. A thinking-level lookup failure is ignored here: the driver that
+// needs the level reports it properly, and the report simply omits that line.
+func runtimeSnapshot(opts cliOptions) config.RuntimeSnapshot {
+	snap := config.RuntimeSnapshot{
+		Model:        opts.model,
+		Provider:     opts.provider,
+		Protocol:     opts.protocol,
+		BaseURL:      opts.baseURL,
+		OutputFormat: opts.outputFmt,
+		Approve:      opts.approve,
+		NoTools:      opts.noTools,
+		NoSkills:     opts.noSkills,
+		Memory:       opts.memory,
+	}
+	if lvl, err := run.ResolveThinkingLevel(opts.thinkingLevel); err == nil {
+		snap.Thinking = string(lvl)
+	}
+	return snap
+}
+
+// applyRuntimeSnapshot hands the resolved settings to the run's config report (a
+// no-op when tools are disabled and no report exists).
+func applyRuntimeSnapshot(opts cliOptions, env run.Env) {
+	env.Report.SetSnapshot(runtimeSnapshot(opts))
 }
 
 // setupExitCode maps a run.SetupEnv failure to a process exit code. A bad tool
@@ -661,6 +692,7 @@ func runGitHubReview(ctx context.Context, opts cliOptions, errOut io.Writer) int
 		fmt.Fprintf(errOut, "pigo: %v\n", err)
 		return setupExitCode(err)
 	}
+	applyRuntimeSnapshot(opts, env)
 	if env.Plugins != nil {
 		defer env.Plugins.Close()
 	}

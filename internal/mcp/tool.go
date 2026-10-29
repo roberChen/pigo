@@ -23,7 +23,14 @@ const ToolNamePrefix = "mcp__"
 // character outside [a-z0-9_] folded to '_' (pigo tool names are lowercase
 // identifiers, and the separator must stay unambiguous).
 func ToolName(server, tool string) string {
-	return ToolNamePrefix + sanitizeToolName(server) + "__" + sanitizeToolName(tool)
+	return ServerToolPrefix(server) + sanitizeToolName(tool)
+}
+
+// ServerToolPrefix returns the prefix shared by every tool of one server, so a
+// diagnostic can attribute a flat tool list back to its server without parsing
+// names (a server name may contain characters the tool name cannot).
+func ServerToolPrefix(server string) string {
+	return ToolNamePrefix + sanitizeToolName(server) + "__"
 }
 
 // sanitizeToolName lowercases s and replaces anything that is not a lowercase
