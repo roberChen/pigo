@@ -240,9 +240,13 @@ var providerRegistry = []ProviderSpec{
 		AuthScheme:     AuthBearer,
 	},
 	{
+		// Kimi's coding plan serves both wire formats under /v1: OpenAI-compatible
+		// chat completions at /v1/chat/completions (and Anthropic Messages at
+		// /v1/messages). Without the version segment a request lands on
+		// /chat/completions, which the endpoint answers with a 404.
 		Name:           "kimi-coding",
 		EnvVars:        []string{"KIMI_API_KEY"},
-		DefaultBaseURL: "https://api.kimi.com/coding",
+		DefaultBaseURL: "https://api.kimi.com/coding/v1",
 		Protocol:       ProtocolOpenAI,
 		AuthScheme:     AuthBearer,
 	},

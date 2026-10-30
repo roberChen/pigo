@@ -41,7 +41,7 @@ var openAIProviderCases = []openAIWiringCase{
 	{"nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY"},
 	{"zai", "https://api.z.ai/api/coding/paas/v4", "ZAI_API_KEY"},
 	{"zai-coding-cn", "https://open.bigmodel.cn/api/coding/paas/v4", "ZAI_CODING_CN_API_KEY"},
-	{"kimi-coding", "https://api.kimi.com/coding", "KIMI_API_KEY"},
+	{"kimi-coding", "https://api.kimi.com/coding/v1", "KIMI_API_KEY"},
 	{"opencode", "https://opencode.ai/zen", "OPENCODE_API_KEY"},
 	{"opencode-go", "https://opencode.ai/zen/go", "OPENCODE_API_KEY"},
 	{"huggingface", "https://router.huggingface.co/v1", "HF_TOKEN"},

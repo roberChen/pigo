@@ -56,6 +56,7 @@ var PresetProviders = []PresetProvider{
 	{Name: "cerebras", EnvVar: "CEREBRAS_API_KEY"},
 	{Name: "mistral", EnvVar: "MISTRAL_API_KEY"},
 	{Name: "moonshotai", EnvVar: "MOONSHOT_API_KEY"},
+	{Name: "kimi-coding", EnvVar: "KIMI_API_KEY"},
 	{Name: "zai", EnvVar: "ZAI_API_KEY"},
 	{Name: "fireworks", EnvVar: "FIREWORKS_API_KEY"},
 	{Name: "together", EnvVar: "TOGETHER_API_KEY"},
@@ -171,6 +172,12 @@ var PresetCatalog = []PresetModel{
 	{Provider: "moonshotai", ID: "kimi-k2-thinking", DisplayName: "Kimi K2 Thinking"},
 	{Provider: "moonshotai", ID: "kimi-k2.6", DisplayName: "Kimi K2.6"},
 	{Provider: "moonshotai", ID: "kimi-k3", DisplayName: "Kimi K3"},
+
+	// --- Kimi Coding (the coding-plan models; the plan also speaks the Anthropic
+	// wire format, but pigo drives it with the OpenAI-compatible endpoint) ---
+	{Provider: "kimi-coding", ID: "k3", DisplayName: "Kimi K3 (Coding)"},
+	{Provider: "kimi-coding", ID: "k3-256k", DisplayName: "Kimi K3 256K (Coding)"},
+	{Provider: "kimi-coding", ID: "kimi-for-coding", DisplayName: "Kimi for Coding"},
 
 	// --- Z.AI GLM (ids from pi zai.models.ts; glm-5.3-flash is the vision-capable tier) ---
 	{Provider: "zai", ID: "glm-4.7", DisplayName: "GLM-4.7"},

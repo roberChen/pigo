@@ -1,6 +1,9 @@
 package provider
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestPresetProvidersIncludeNewProviders verifies the curated preset provider
 // list gained the expanded set of gateways, each paired with the correct API-key
@@ -128,5 +131,35 @@ func TestLookupPresetNewEntries(t *testing.T) {
 
 	if _, ok := LookupPreset("this-model-does-not-exist"); ok {
 		t.Error("LookupPreset returned ok for an unknown id")
+	}
+}
+
+// TestKimiCodingResolution pins the coding-plan wiring: its endpoint carries the
+// API version segment (without it requests land on /chat/completions and get a 404),
+// and the plan's model ids resolve to kimi-coding rather than being guessed as the
+// Moonshot gateway by their name prefix.
+func TestKimiCodingResolution(t *testing.T) {
+	spec, ok := LookupProviderSpec("kimi-coding")
+	if !ok {
+		t.Fatal("kimi-coding is not registered")
+	}
+	if !strings.HasSuffix(spec.DefaultBaseURL, "/v1") {
+		t.Errorf("DefaultBaseURL = %q, want the /v1 endpoint", spec.DefaultBaseURL)
+	}
+
+	for _, id := range []string{"k3", "k3-256k", "kimi-for-coding"} {
+		preset, ok := LookupPreset(id)
+		if !ok || preset.Provider != "kimi-coding" {
+			t.Errorf("LookupPreset(%q) = %+v (ok=%v), want the kimi-coding plan", id, preset, ok)
+			continue
+		}
+		_, name, err := ResolveProvider(id, "", "", "", func(string) string { return "" })
+		if err != nil {
+			t.Errorf("ResolveProvider(%q): %v", id, err)
+			continue
+		}
+		if name != "kimi-coding" {
+			t.Errorf("ResolveProvider(%q) = %q, want kimi-coding", id, name)
+		}
 	}
 }

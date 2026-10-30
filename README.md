@@ -1126,7 +1126,7 @@ git push origin v0.2.0
 | `novita` | `NOVITA_API_KEY` | `https://api.novita.ai/openai/v1` | openai |
 | `opencode` | `OPENCODE_API_KEY` | `https://opencode.ai/zen` | openai |
 | `opencode-go` | `OPENCODE_API_KEY` | `https://opencode.ai/zen/go` | openai |
-| `kimi-coding` | `KIMI_API_KEY` | `https://api.kimi.com/coding` | openai |
+| `kimi-coding` | `KIMI_API_KEY` | `https://api.kimi.com/coding/v1` | openai |
 | `xiaomi` | `XIAOMI_API_KEY` | `https://api.xiaomimimo.com/v1` | openai |
 | `xiaomi-token-plan-cn` | `XIAOMI_TOKEN_PLAN_CN_API_KEY` | `https://token-plan-cn.xiaomimimo.com/v1` | openai |
 | `xiaomi-token-plan-ams` | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` | `https://token-plan-ams.xiaomimimo.com/v1` | openai |
