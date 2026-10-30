@@ -40,8 +40,12 @@ APIs and adds a real Responses API driver, implemented with the official
 - [ ] Unit test covers each accepted value + one rejected value
 - [ ] Typecheck / `go vet` / lint passes
 
-### US-002: Add the official openai-go dependency
+### US-002: Add the official openai-go dependency — **withdrawn (#546)**
 **Description:** As a developer, I need the official OpenAI Go SDK pinned so the Responses driver can use it.
+
+> **Withdrawn:** the Responses driver was reworked onto the shared transport and
+> parses the wire directly (see FR-5), so this user story and its acceptance
+> criteria no longer apply. The dependency was removed by `go mod tidy`.
 
 **Acceptance Criteria:**
 - [ ] `github.com/openai/openai-go` added to `go.mod` at an exact pinned version
@@ -124,7 +128,14 @@ APIs and adds a real Responses API driver, implemented with the official
 - FR-2: The system must treat `openai` and `openai/chat` as the existing Chat Completions protocol.
 - FR-3: The system must route `openai/resp_api` to a Responses API driver that posts to `{base_url}/responses`.
 - FR-4: The system must reject unknown OpenAI sub-variants with an error naming the accepted values.
-- FR-5: The system must implement the Responses driver using the official `github.com/openai/openai-go` SDK pinned to an exact version.
+- FR-5: ~~The system must implement the Responses driver using the official `github.com/openai/openai-go` SDK pinned to an exact version.~~
+  **Superseded (#546):** the driver speaks the Responses SSE wire directly on the
+  shared `internal/provider/transport`. Rationale: gateways implement the protocol
+  with vendor extensions (DeepSeek streams raw reasoning as
+  `response.reasoning_text.delta`) that a pinned SDK's event union rejects as
+  unknown, so SDK-bound drivers lag the vendors instead of the wire; and the SDK
+  path additionally lost the shared retries, idle/stall watchdogs and dual failure
+  model that every other driver already had. `openai-go` is no longer a dependency.
 - FR-6: The Responses driver must support streaming output.
 - FR-7: The Responses driver must support tool/function calls in the agent loop.
 - FR-8: The Responses driver must support image inputs.
@@ -143,7 +154,7 @@ APIs and adds a real Responses API driver, implemented with the official
 
 ## Technical Considerations
 
-- Existing drivers are hand-rolled `http` clients (`internal/provider/providers.go`); the SDK-based Responses driver will coexist as a new driver type behind the same `Provider` interface.
+- Existing drivers are hand-rolled `http` clients (`internal/provider/providers.go`); the Responses driver is now one of them, behind the same `Provider` interface (#546).
 - Protocol values currently live as flat constants (`ProtocolOpenAI`, `ProtocolAnthropic` in `registry.go:50`); the slash variants need a normalization/parse step, likely near `ResolveProvider` (`resolve.go:49`) so the switch can branch on chat vs resp_api.
 - Base-URL/auth reuse: the SDK client must be pointed at the resolved `base_url` and given the resolved key rather than reading env directly, to preserve `ResolveBaseURL` precedence.
 - Banner reads a raw `opts.Protocol` today (`banner.go:64`); showing the normalized variant may require surfacing the normalized value (ties into the separately-noted resolved-protocol gap).

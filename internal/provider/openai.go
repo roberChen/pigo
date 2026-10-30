@@ -9,11 +9,16 @@
 //
 //	{"choices":[{"delta":{"role":"assistant"}}]}                 → first chunk
 //	{"choices":[{"delta":{"content":"Hel"}}]}                    → text delta
+//	{"choices":[{"delta":{"reasoning_content":"Let me"}}]}       → thinking delta
 //	{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",
 //	    "function":{"name":"f","arguments":"{\"a\":"}}}]}]}       → tool-call delta
 //	{"choices":[{"finish_reason":"tool_calls"}]}                 → stop reason
 //	{"usage":{"prompt_tokens":10,"completion_tokens":5}}         → final usage
 //	[DONE]                                                        → transport-level
+//
+// The chunk is parsed here; accumulation, content ordering and the terminal
+// AssistantMessage come from the shared assistantTurn (turn.go), so the thinking
+// block behaves identically to the Anthropic and Responses decoders.
 //
 // Per the dual failure model (FR-13) the decoder never panics: malformed
 // payloads surface as a returned error which the transport turns into a
@@ -23,40 +28,34 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 )
-
-// openaiToolCall accumulates one streamed tool call, keyed by its delta index.
-// id/name arrive once (usually in the first fragment); arguments accumulate.
-type openaiToolCall struct {
-	id   string
-	name string
-	args strings.Builder
-}
 
 // OpenAIDecoder is the stateful SSE decoder for the OpenAI Chat Completions API
 // and compatible gateways. It implements the transport Decoder interface and is
 // not safe for concurrent use — the transport drives it from one goroutine.
 type OpenAIDecoder struct {
-	text      strings.Builder
-	thinking  strings.Builder // reasoning_content / reasoning stream (if any)
-	toolCalls map[int]*openaiToolCall
-	toolOrder []int // tool-call indices in first-seen order
-
-	responseID    string
-	responseModel string
-	inputTokens   int
-	outputTokens  int
-	stopReason    string // mapped pigo stop reason (empty until finish_reason)
-	done          bool
+	turn *assistantTurn
+	// toolByIndex maps each streamed tool_calls[].index onto its accumulated
+	// block, since Chat Completions can interleave fragments of several calls.
+	toolByIndex map[int]*turnBlock
+	done        bool
 }
 
 // NewOpenAIDecoder builds a fresh decoder for one streamed response.
 func NewOpenAIDecoder() *OpenAIDecoder {
-	return &OpenAIDecoder{toolCalls: make(map[int]*openaiToolCall)}
+	return NewOpenAIDecoderFor("openai")
+}
+
+// NewOpenAIDecoderFor builds a decoder whose terminal message is tagged with
+// the given concrete provider name (an OpenAI-compatible gateway such as
+// "openrouter"), keeping error text and session metadata accurate.
+func NewOpenAIDecoderFor(provider string) *OpenAIDecoder {
+	return &OpenAIDecoder{
+		turn:        newAssistantTurn("openai", provider),
+		toolByIndex: make(map[int]*turnBlock),
+	}
 }
 
 // openaiChunk is the streamed chat.completion.chunk envelope.
@@ -116,37 +115,40 @@ func (d *OpenAIDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 	}
 
 	if chunk.ID != "" {
-		d.responseID = chunk.ID
+		d.turn.responseID = chunk.ID
 	}
 	if chunk.Model != "" {
-		d.responseModel = chunk.Model
+		d.turn.responseModel = chunk.Model
 	}
 	if chunk.Usage != nil {
-		d.inputTokens = chunk.Usage.PromptTokens
-		d.outputTokens = chunk.Usage.CompletionTokens
+		d.turn.usage(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens)
 	}
 
 	var events []StreamEvent
 	for _, choice := range chunk.Choices {
 		// Reasoning stream (DeepSeek-R1 / Kimi / …): reasoning_content is the
 		// common field; a few gateways use "reasoning". Accumulate whichever is set.
+		// Use the "leading" variant: some gateways interleave or emit reasoning
+		// after the answer even though it logically precedes it, and the reasoning
+		// must stay one leading block (unlike Anthropic, whose interleaved
+		// thinking order is significant and is preserved verbatim).
 		if r := choice.Delta.ReasoningContent; r != "" {
-			d.thinking.WriteString(r)
-			events = append(events, StreamThinkingEvent{Partial: d.partial()})
+			d.turn.thinkingDeltaLeading(r)
+			events = append(events, StreamThinkingEvent{Partial: d.turn.message()})
 		} else if r := choice.Delta.Reasoning; r != "" {
-			d.thinking.WriteString(r)
-			events = append(events, StreamThinkingEvent{Partial: d.partial()})
+			d.turn.thinkingDeltaLeading(r)
+			events = append(events, StreamThinkingEvent{Partial: d.turn.message()})
 		}
 		if choice.Delta.Content != "" {
-			d.text.WriteString(choice.Delta.Content)
-			events = append(events, StreamTextEvent{Partial: d.partial()})
+			d.turn.textDelta(choice.Delta.Content)
+			events = append(events, StreamTextEvent{Partial: d.turn.message()})
 		}
 		for _, tc := range choice.Delta.ToolCalls {
 			d.applyToolDelta(tc)
-			events = append(events, StreamToolCallEvent{Partial: d.partial()})
+			events = append(events, StreamToolCallEvent{Partial: d.turn.message()})
 		}
 		if choice.FinishReason != "" {
-			d.stopReason = mapOpenAIFinishReason(choice.FinishReason)
+			d.turn.stop(choice.FinishReason)
 		}
 	}
 	return events, nil
@@ -161,21 +163,26 @@ func (d *OpenAIDecoder) Finish() ([]StreamEvent, error) {
 	return d.finishDone(), nil
 }
 
-// applyToolDelta merges one tool-call fragment into the accumulated state.
+// applyToolDelta merges one tool-call fragment into the accumulated state. The
+// delta index identifies the call across fragments; id/name usually arrive once
+// in the first fragment and arguments accumulate.
 func (d *OpenAIDecoder) applyToolDelta(tc openaiToolDelta) {
-	call := d.toolCalls[tc.Index]
+	call := d.toolByIndex[tc.Index]
 	if call == nil {
-		call = &openaiToolCall{}
-		d.toolCalls[tc.Index] = call
-		d.toolOrder = append(d.toolOrder, tc.Index)
+		// First fragment for this index: it carries the header and often the
+		// opening of the argument JSON as well, so fall through and append.
+		call = d.turn.beginTool(tc.ID, tc.Function.Name)
+		d.toolByIndex[tc.Index] = call
 	}
 	if tc.ID != "" {
-		call.id = tc.ID
+		call.toolID = tc.ID
 	}
 	if tc.Function.Name != "" {
-		call.name = tc.Function.Name
+		call.toolName = tc.Function.Name
 	}
-	call.args.WriteString(tc.Function.Arguments)
+	if tc.Function.Arguments != "" {
+		call.args.WriteString(tc.Function.Arguments)
+	}
 }
 
 // finishDone builds the terminal assistant message and marks the decoder done.
@@ -184,62 +191,10 @@ func (d *OpenAIDecoder) finishDone() []StreamEvent {
 		return nil
 	}
 	d.done = true
-	msg := d.partial()
-	if msg.StopReason == "" {
-		msg.StopReason = agentcore.StopReasonEndTurn
-	}
-	return []StreamEvent{StreamDoneEvent{Message: msg}}
+	return []StreamEvent{StreamDoneEvent{Message: d.turn.message()}}
 }
 
-// partial materializes the accumulated state into an AssistantMessage: the text
-// block first (if any), then tool-call blocks in first-seen index order.
+// partial is the current snapshot; kept for callers that only need the message.
 func (d *OpenAIDecoder) partial() agentcore.AssistantMessage {
-	msg := agentcore.AssistantMessage{
-		RoleField:     agentcore.RoleAssistant,
-		API:           "openai",
-		Provider:      "openai",
-		StopReason:    d.stopReason,
-		ResponseID:    d.responseID,
-		ResponseModel: d.responseModel,
-	}
-	if d.inputTokens != 0 || d.outputTokens != 0 {
-		msg.Usage = &agentcore.Usage{InputTokens: d.inputTokens, OutputTokens: d.outputTokens}
-	}
-	if d.thinking.Len() > 0 {
-		msg.Content = append(msg.Content, agentcore.NewThinkingContent(d.thinking.String()))
-	}
-	if d.text.Len() > 0 {
-		msg.Content = append(msg.Content, agentcore.NewTextContent(d.text.String()))
-	}
-
-	idx := make([]int, len(d.toolOrder))
-	copy(idx, d.toolOrder)
-	sort.Ints(idx)
-	for _, i := range idx {
-		call := d.toolCalls[i]
-		if call == nil {
-			continue
-		}
-		args := json.RawMessage(strings.TrimSpace(call.args.String()))
-		if len(args) == 0 {
-			args = json.RawMessage("{}")
-		}
-		msg.Content = append(msg.Content, agentcore.NewToolCallContent(call.id, call.name, args))
-	}
-	return msg
-}
-
-// mapOpenAIFinishReason maps an OpenAI finish_reason to the pigo StopReason set.
-// Unknown reasons default to end_turn (a natural, non-error stop).
-func mapOpenAIFinishReason(reason string) string {
-	switch reason {
-	case "length":
-		return agentcore.StopReasonLength
-	case "tool_calls", "function_call":
-		return agentcore.StopReasonToolUse
-	case "stop":
-		return agentcore.StopReasonEndTurn
-	default:
-		return agentcore.StopReasonEndTurn
-	}
+	return d.turn.message()
 }

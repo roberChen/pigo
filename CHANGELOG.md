@@ -12,6 +12,22 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **Interleaved thinking no longer collapses into one block**: an Anthropic turn can
+  alternate thinking and `tool_use` several times, and each thinking block must be
+  echoed back adjacent to the tool call that follows it or the next request is
+  rejected. Blocks are now kept in production order (routed by content-block index)
+  instead of being grouped by channel, while `redacted_thinking` payloads are
+  preserved and empty thinking/text blocks are dropped. Chat-style wires, which have
+  no block boundaries, still keep their reasoning as one leading block even when the
+  gateway emits it after the answer.
+- **The TUI shows a reasoning block for `deepseek` and other Responses-API
+  providers**: the driver only understood OpenAI's
+  `response.reasoning_summary_text.delta`, but DeepSeek's Responses endpoint streams
+  raw reasoning as `response.reasoning_text.delta`, so every reasoning delta was
+  silently dropped while the answer streamed normally. Raw reasoning deltas are now
+  decoded from the payload's string delta, and the terminal message also reads the
+  reasoning item's `content` parts (with `summary` empty), so the thinking block
+  survives into the session and reappears on resume.
 - **Tool cards no longer crash the TUI on non-ASCII arguments**: the card's
   line-clipping helper measured a word boundary in bytes and then sliced runes, so a
   long CJK argument (or any multibyte text past the clip budget) ran off the end of
@@ -39,6 +55,18 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **One assistant-turn model behind every wire protocol**: the OpenAI Chat,
+  Anthropic and Responses drivers used to accumulate a response each in their own
+  way — block ordering, empty-block suppression, usage and stop-reason mapping were
+  re-implemented three times, so a capability could work on one protocol and quietly
+  do nothing on another. All three now record into a shared accumulator, and a
+  cross-protocol conformance suite drives the same logical turn through each real
+  decoder and asserts identical results (thinking → text → tool call, joined
+  arguments, shared usage, `tool_use`). The Responses driver also stops going
+  through the `openai-go` SDK and speaks SSE on the shared transport, which drops
+  the dependency (and four transitive ones), gives it the same retries, idle/stall
+  watchdogs and dual failure model as the other drivers, and lets it read events a
+  pinned SDK union would reject as unknown.
 - **TUI: the `/model` picker is navigable from the keyboard**: a bare `/model`
   (or `/models`) opens a filterable overlay instead of printing the catalog, and
   the highlight now moves with `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`), wrapping at both

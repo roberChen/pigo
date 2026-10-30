@@ -35,6 +35,8 @@
 
 > 优先级判据：**P0** = 影响面最大、是长任务上下文溢出/CC 标志能力的直接诱因；**P1** = 支撑鲁棒性度量与错误恢复；**P2** = 次优先级，本文仅记录、协同设计后期展开。
 >
+> **2026-10 刷新**（#546）：provider 层的三种线上协议收敛到 `internal/provider/turn.go` 的共享 `assistantTurn`；新增跨协议一致性测试作为回归网。Responses driver 从 `openai-go` SDK 切换为自有 SSE 解码器 + 共享 transport，`go.mod` 随之移除该依赖及 4 个传递依赖。协议选择与 `--protocol openai/resp_api` 的用户可见行为不变。
+>
 > **2026-09 刷新**（issue #572）：US-003/004（工具结果统一预算）、US-006（工具失败分类重试）、US-005（结构化遥测）均已落地，对应行的"现状/主要缺口"已改写为闭环状态。基线之外新落地且影响对标结论的能力：公开 SDK 包（#554）、SDK 结构化事件与自定义工具（#563）、裸 Provider 名解析（#564）、会话级定时提醒（#565）、在线模型发现（#566）、GitHub review webhook（#567）、凭证引用与子进程环境清洗（#568）、遥测导出契约（#569）、会话分享导出（#570）、沙箱文档（#571）。
 
 ---
@@ -99,6 +101,7 @@
 - **连接期重试** —— `internal/provider/transport.go` 的 `connect`：仅在 **429 / 503 / 529**（`statusTooManyRequestsCF`）时重试，尊重 `Retry-After`（`retryAfter` 解析秒数或 HTTP-date），默认 `defaultMaxConnectRetries = 2`。网络层错误经 `isRetryableNetErr` 仅对超时类重连。
 - **绝不重放已消费的流** —— `NewRequest` 每次连接重新构造请求；一旦 `pump` 开始流式读取，所有运行时失败都编码为终态 `StreamErrorEvent`（双失败模型），不再作为 Go error 返回、更不重放。
 - **截断保护** —— `loop.go` `failToolCallsFromTruncatedMessage`：`stopReason == length` 时把该消息所有 tool call 判失败并回喂固定文案，让模型重发。
+- **协议无关的单轮累加** —— `internal/provider/turn.go` 的 `assistantTurn`：三种线上协议（OpenAI Chat / Anthropic Messages / OpenAI Responses）共用同一累加器，块顺序、空块丢弃、usage 与 stop_reason 映射只实现一次；`turn_test.go` 的跨协议一致性用例把同一逻辑轮次喂给三个真实解码器并断言输出相同。Responses driver 亦已改为在共享 transport 上直接解析 SSE，不再依赖 `openai-go`，因此与其余 driver 共享连接期重试、idle/stall 看门狗与双失败模型。
 
 ### 缺口
 

@@ -1,18 +1,23 @@
 // This file implements the Anthropic Messages API streaming decoder (US-008).
 // It is a stateful Decoder (see transport.go) that translates Anthropic SSE
-// event payloads into the provider-agnostic AssistantMessageEvent set,
-// accumulating a partial AssistantMessage as deltas arrive.
+// event payloads into the provider-agnostic AssistantMessageEvent set.
 //
 // Anthropic streams a fixed event sequence:
 //
 //	message_start        → seeds id/model and initial usage (input tokens)
-//	content_block_start  → opens a text / thinking / tool_use block at an index
+//	content_block_start  → opens a text / thinking / redacted_thinking / tool_use
+//	                       block at an index
 //	content_block_delta  → text_delta / thinking_delta / signature_delta /
 //	                       input_json_delta append to the open block
 //	content_block_stop   → closes the block (tool_use JSON is parsed here)
 //	message_delta        → carries the final stop_reason and output-token usage
 //	message_stop         → terminal; the accumulated message is emitted as done
 //	error                → a runtime error payload → terminal error event
+//
+// Only the parsing of these payloads lives here. Block ordering, signatures,
+// usage and stop-reason mapping come from the shared assistantTurn (turn.go),
+// so the thinking block behaves identically to the OpenAI Chat and Responses
+// decoders.
 //
 // Per the dual failure model (FR-13) the decoder never panics: malformed
 // payloads and Anthropic `error` events are surfaced as a returned error (which
@@ -22,45 +27,44 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 )
 
-// anthropicBlock accumulates one content block's streaming state, keyed by its
-// Anthropic content-block index. text/thinking append their deltas; tool_use
-// accumulates a partial JSON string parsed lazily when the block is realized.
-type anthropicBlock struct {
-	kind        string // "text" | "thinking" | "tool_use" | "redacted_thinking"
-	text        strings.Builder
-	thinking    strings.Builder
-	thinkingSig string
-	textSig     string
-	toolID      string
-	toolName    string
-	toolJSON    strings.Builder
-	redacted    bool
+// anthropicBlockRef remembers which accumulated block an Anthropic content-block
+// index maps onto, so deltas land in the right block even when the wire
+// interleaves blocks (extended thinking emits thinking, text and tool_use in
+// one message, and interleaved thinking repeats the pattern per step).
+type anthropicBlockRef struct {
+	block *turnBlock
+	// kind is the Anthropic content_block type as written on the wire.
+	kind string
 }
 
 // AnthropicDecoder is the stateful SSE decoder for the Anthropic Messages API.
 // It implements the transport Decoder interface. It is not safe for concurrent
 // use — the transport drives it from a single goroutine.
 type AnthropicDecoder struct {
-	blocks map[int]*anthropicBlock
-	order  []int // content-block indices in first-seen order
-
-	responseID    string
-	responseModel string
-	inputTokens   int
-	outputTokens  int
-	stopReason    string // mapped pigo stop reason (empty until message_delta)
-	done          bool   // message_stop / done already emitted
+	turn *assistantTurn
+	// refs maps a wire content-block index onto the accumulated block. The
+	// shared turn keeps production order; this map only routes deltas.
+	refs map[int]*anthropicBlockRef
+	done bool // message_stop / done already emitted
 }
 
 // NewAnthropicDecoder builds a fresh decoder for one streamed response.
 func NewAnthropicDecoder() *AnthropicDecoder {
-	return &AnthropicDecoder{blocks: make(map[int]*anthropicBlock)}
+	return NewAnthropicDecoderFor("anthropic")
+}
+
+// NewAnthropicDecoderFor builds a decoder whose terminal message is tagged with
+// the given provider name (e.g. "bedrock", "minimax"), keeping session metadata
+// and error text accurate for Anthropic-compatible gateways.
+func NewAnthropicDecoderFor(provider string) *AnthropicDecoder {
+	return &AnthropicDecoder{
+		turn: newAssistantTurn("anthropic", provider),
+		refs: make(map[int]*anthropicBlockRef),
+	}
 }
 
 // anthropicEvent is the discriminated envelope shared by every Anthropic SSE
@@ -81,6 +85,8 @@ type anthropicEvent struct {
 		Text string `json:"text"`
 		// thinking
 		Thinking string `json:"thinking"`
+		// redacted_thinking carries its opaque payload in data.
+		Data string `json:"data"`
 		// tool_use
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -108,6 +114,9 @@ type anthropicEvent struct {
 	} `json:"error"`
 }
 
+// anthropicUsage is the token usage block. cache_creation_input_tokens and
+// cache_read_input_tokens are already counted in input_tokens by the API, so
+// they are not added again here; only the wire names are accepted.
 type anthropicUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
@@ -115,6 +124,24 @@ type anthropicUsage struct {
 
 // Decode turns one Anthropic SSE data payload into zero or more StreamEvents.
 func (d *AnthropicDecoder) Decode(payload []byte) ([]StreamEvent, error) {
+	// Read the discriminator first: a future event type may reuse a field name
+	// with a different shape (a string "delta", say), and unmarshalling the full
+	// envelope before knowing the type would turn that into a fatal stream error
+	// instead of an ignored event.
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &head); err != nil {
+		return nil, fmt.Errorf("anthropic: parse event: %w", err)
+	}
+	switch head.Type {
+	case "message_start", "content_block_start", "content_block_delta",
+		"content_block_stop", "message_delta", "message_stop", "ping", "error":
+		// Known event: decode the full envelope below.
+	default:
+		return nil, nil
+	}
+
 	var ev anthropicEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {
 		return nil, fmt.Errorf("anthropic: parse event: %w", err)
@@ -128,7 +155,7 @@ func (d *AnthropicDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 	case "content_block_delta":
 		return d.onBlockDelta(ev), nil
 	case "content_block_stop":
-		// Nothing to emit on stop; the block is already reflected in the partial.
+		d.endBlock(ev.Index)
 		return nil, nil
 	case "message_delta":
 		return d.onMessageDelta(ev), nil
@@ -148,7 +175,8 @@ func (d *AnthropicDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 		}
 		return nil, fmt.Errorf("%s", msg)
 	default:
-		// Unknown event types are ignored (forward-compatible).
+		// Unknown event types are ignored (forward-compatible): new capability
+		// events (server tool use, citations, …) must not break the stream.
 		return nil, nil
 	}
 }
@@ -165,41 +193,61 @@ func (d *AnthropicDecoder) Finish() ([]StreamEvent, error) {
 
 func (d *AnthropicDecoder) onMessageStart(ev anthropicEvent) []StreamEvent {
 	if ev.Message != nil {
-		d.responseID = ev.Message.ID
-		d.responseModel = ev.Message.Model
+		d.turn.responseID = ev.Message.ID
+		d.turn.responseModel = ev.Message.Model
 		if ev.Message.Usage != nil {
-			d.inputTokens = ev.Message.Usage.InputTokens
-			d.outputTokens = ev.Message.Usage.OutputTokens
+			d.turn.usage(ev.Message.Usage.InputTokens, ev.Message.Usage.OutputTokens)
 		}
 	}
-	return []StreamEvent{StreamStartEvent{Partial: d.partial()}}
+	return []StreamEvent{StreamStartEvent{Partial: d.turn.message()}}
 }
 
 func (d *AnthropicDecoder) onBlockStart(ev anthropicEvent) []StreamEvent {
 	if ev.ContentBlock == nil {
 		return nil
 	}
-	b := &anthropicBlock{kind: ev.ContentBlock.Type}
+	var block *turnBlock
 	switch ev.ContentBlock.Type {
 	case "text":
-		b.text.WriteString(ev.ContentBlock.Text)
+		block = d.turn.openBlock(turnBlockText)
+		if ev.ContentBlock.Text != "" {
+			block.text.WriteString(ev.ContentBlock.Text)
+		}
 	case "thinking":
-		b.thinking.WriteString(ev.ContentBlock.Thinking)
+		block = d.turn.beginThinking()
+		if ev.ContentBlock.Thinking != "" {
+			block.thinking.WriteString(ev.ContentBlock.Thinking)
+		}
 	case "redacted_thinking":
-		b.redacted = true
+		d.turn.redactedThinking(ev.ContentBlock.Data)
+		d.refs[ev.Index] = &anthropicBlockRef{kind: ev.ContentBlock.Type}
+		return []StreamEvent{StreamThinkingEvent{Partial: d.turn.message()}}
 	case "tool_use":
-		b.toolID = ev.ContentBlock.ID
-		b.toolName = ev.ContentBlock.Name
-	}
-	d.putBlock(ev.Index, b)
-
-	switch ev.ContentBlock.Type {
-	case "thinking", "redacted_thinking":
-		return []StreamEvent{StreamThinkingEvent{Partial: d.partial()}}
-	case "tool_use":
-		return []StreamEvent{StreamToolCallEvent{Partial: d.partial()}}
+		block = d.turn.beginTool(ev.ContentBlock.ID, ev.ContentBlock.Name)
 	default:
-		return []StreamEvent{StreamTextEvent{Partial: d.partial()}}
+		// Server tool results, citations, images, … are not part of pigo's
+		// assistant content model; still record the index so a later delta does
+		// not open a stray block.
+		d.refs[ev.Index] = &anthropicBlockRef{kind: ev.ContentBlock.Type}
+		return nil
+	}
+	d.refs[ev.Index] = &anthropicBlockRef{block: block, kind: ev.ContentBlock.Type}
+
+	// Announce only blocks that already carry content: an empty thinking or text
+	// card in the transcript is noise, and the matching delta will announce it.
+	switch block.kind {
+	case turnBlockThinking:
+		if block.thinking.Len() == 0 {
+			return nil
+		}
+		return []StreamEvent{StreamThinkingEvent{Partial: d.turn.message()}}
+	case turnBlockTool:
+		return []StreamEvent{StreamToolCallEvent{Partial: d.turn.message()}}
+	default:
+		if block.text.Len() == 0 {
+			return nil
+		}
+		return []StreamEvent{StreamTextEvent{Partial: d.turn.message()}}
 	}
 }
 
@@ -207,26 +255,61 @@ func (d *AnthropicDecoder) onBlockDelta(ev anthropicEvent) []StreamEvent {
 	if ev.Delta == nil {
 		return nil
 	}
-	b := d.blocks[ev.Index]
-	if b == nil {
-		// A delta for an unseen index: open a bare block so we don't drop data.
-		b = &anthropicBlock{}
-		d.putBlock(ev.Index, b)
+	ref := d.refs[ev.Index]
+	if ref == nil {
+		// A delta for an unseen index: open a block of the matching kind so data
+		// is never silently dropped by a non-conforming stream.
+		ref = d.openImplicitBlock(ev.Delta.Type)
+		if ref == nil {
+			return nil
+		}
+		d.refs[ev.Index] = ref
 	}
+	if ref.block == nil {
+		// The index belongs to a block type pigo does not model (server tool use,
+		// citations, …). Its deltas must not touch the open block, or they would
+		// append text/tool state to an unrelated block.
+		return nil
+	}
+	// Route the delta to the block its index names rather than to whatever was
+	// opened last: interleaved thinking interleaves thinking/tool_use blocks, and
+	// a delta belonging to an earlier block must not extend a later one.
+	d.turn.focus(ref.block)
 	switch ev.Delta.Type {
 	case "text_delta":
-		b.text.WriteString(ev.Delta.Text)
-		return []StreamEvent{StreamTextEvent{Partial: d.partial()}}
+		d.turn.textDelta(ev.Delta.Text)
+		return []StreamEvent{StreamTextEvent{Partial: d.turn.message()}}
 	case "thinking_delta":
-		b.thinking.WriteString(ev.Delta.Thinking)
-		return []StreamEvent{StreamThinkingEvent{Partial: d.partial()}}
+		d.turn.thinkingDelta(ev.Delta.Thinking)
+		return []StreamEvent{StreamThinkingEvent{Partial: d.turn.message()}}
 	case "signature_delta":
-		// Signature belongs to the thinking block it rides on.
-		b.thinkingSig += ev.Delta.Signature
-		return []StreamEvent{StreamThinkingEvent{Partial: d.partial()}}
+		// The signature belongs to the thinking block it rides on; dropping it
+		// would make the next tool-use turn fail the extended-thinking echo.
+		d.turn.thinkingSignature(ev.Delta.Signature)
+		return []StreamEvent{StreamThinkingEvent{Partial: d.turn.message()}}
 	case "input_json_delta":
-		b.toolJSON.WriteString(ev.Delta.PartialJSON)
-		return []StreamEvent{StreamToolCallEvent{Partial: d.partial()}}
+		d.turn.toolArgs(ev.Delta.PartialJSON)
+		return []StreamEvent{StreamToolCallEvent{Partial: d.turn.message()}}
+	default:
+		return nil
+	}
+}
+
+// openImplicitBlock opens a block for a delta that arrived before its
+// content_block_start, inferring the kind from the delta type. It returns nil for
+// a delta type pigo has no block for, so the caller can ignore it instead of
+// attaching it to the wrong block.
+func (d *AnthropicDecoder) openImplicitBlock(deltaType string) *anthropicBlockRef {
+	switch deltaType {
+	case "thinking_delta", "signature_delta":
+		b := d.turn.beginThinking()
+		return &anthropicBlockRef{block: b, kind: string(b.kind)}
+	case "text_delta":
+		b := d.turn.openBlock(turnBlockText)
+		return &anthropicBlockRef{block: b, kind: string(b.kind)}
+	case "input_json_delta":
+		b := d.turn.beginTool("", "")
+		return &anthropicBlockRef{block: b, kind: string(b.kind)}
 	default:
 		return nil
 	}
@@ -234,20 +317,24 @@ func (d *AnthropicDecoder) onBlockDelta(ev anthropicEvent) []StreamEvent {
 
 func (d *AnthropicDecoder) onMessageDelta(ev anthropicEvent) []StreamEvent {
 	if ev.Delta != nil && ev.Delta.StopReason != "" {
-		d.stopReason = mapAnthropicStopReason(ev.Delta.StopReason)
+		d.turn.stop(ev.Delta.StopReason)
 	}
 	if ev.Usage != nil {
 		// message_delta reports cumulative output tokens (and sometimes input).
-		if ev.Usage.OutputTokens != 0 {
-			d.outputTokens = ev.Usage.OutputTokens
-		}
-		if ev.Usage.InputTokens != 0 {
-			d.inputTokens = ev.Usage.InputTokens
-		}
+		d.turn.usage(ev.Usage.InputTokens, ev.Usage.OutputTokens)
 	}
 	// No standalone event kind for usage/stop-reason accumulation; the values
 	// surface in the terminal done message.
 	return nil
+}
+
+// endBlock closes the shared turn's open pointer when the block at index is the
+// one currently receiving deltas, so a delta that arrives after its own
+// content_block_stop opens a fresh block instead of extending a closed one.
+func (d *AnthropicDecoder) endBlock(index int) {
+	if ref := d.refs[index]; ref != nil && ref.block != nil && d.turn.open == ref.block {
+		d.turn.endBlock()
+	}
 }
 
 // finishDone builds the terminal assistant message and marks the decoder done.
@@ -256,79 +343,10 @@ func (d *AnthropicDecoder) finishDone() []StreamEvent {
 		return nil
 	}
 	d.done = true
-	msg := d.partial()
-	if msg.StopReason == "" {
-		msg.StopReason = agentcore.StopReasonEndTurn
-	}
-	return []StreamEvent{StreamDoneEvent{Message: msg}}
+	return []StreamEvent{StreamDoneEvent{Message: d.turn.message()}}
 }
 
-// putBlock records a block at index, tracking first-seen order.
-func (d *AnthropicDecoder) putBlock(index int, b *anthropicBlock) {
-	if _, seen := d.blocks[index]; !seen {
-		d.order = append(d.order, index)
-	}
-	d.blocks[index] = b
-}
-
-// partial materializes the accumulated state into an AssistantMessage. Content
-// blocks are emitted in content-block index order. Tool-use JSON that has not
-// yet parsed cleanly is passed through as-is (raw partial), which is valid for
-// a still-streaming partial and finalized once the block completes.
+// partial is the current snapshot of the accumulated turn.
 func (d *AnthropicDecoder) partial() agentcore.AssistantMessage {
-	msg := agentcore.AssistantMessage{
-		RoleField:     agentcore.RoleAssistant,
-		API:           "anthropic",
-		Provider:      "anthropic",
-		StopReason:    d.stopReason,
-		ResponseID:    d.responseID,
-		ResponseModel: d.responseModel,
-	}
-	if d.inputTokens != 0 || d.outputTokens != 0 {
-		msg.Usage = &agentcore.Usage{InputTokens: d.inputTokens, OutputTokens: d.outputTokens}
-	}
-
-	idx := make([]int, len(d.order))
-	copy(idx, d.order)
-	sort.Ints(idx)
-
-	for _, i := range idx {
-		b := d.blocks[i]
-		if b == nil {
-			continue
-		}
-		switch b.kind {
-		case "thinking", "redacted_thinking":
-			tc := agentcore.NewThinkingContent(b.thinking.String())
-			tc.ThinkingSignature = b.thinkingSig
-			tc.Redacted = b.redacted
-			msg.Content = append(msg.Content, tc)
-		case "tool_use":
-			args := json.RawMessage(strings.TrimSpace(b.toolJSON.String()))
-			if len(args) == 0 {
-				args = json.RawMessage("{}")
-			}
-			msg.Content = append(msg.Content, agentcore.NewToolCallContent(b.toolID, b.toolName, args))
-		default: // text
-			tc := agentcore.NewTextContent(b.text.String())
-			tc.TextSignature = b.textSig
-			msg.Content = append(msg.Content, tc)
-		}
-	}
-	return msg
-}
-
-// mapAnthropicStopReason maps an Anthropic stop_reason to the pigo StopReason
-// set. Unknown reasons default to end_turn (a natural, non-error stop).
-func mapAnthropicStopReason(reason string) string {
-	switch reason {
-	case "max_tokens":
-		return agentcore.StopReasonLength
-	case "tool_use":
-		return agentcore.StopReasonToolUse
-	case "end_turn", "stop_sequence":
-		return agentcore.StopReasonEndTurn
-	default:
-		return agentcore.StopReasonEndTurn
-	}
+	return d.turn.message()
 }

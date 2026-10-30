@@ -23,7 +23,7 @@ import (
 // ProtocolOpenAIResponses is the canonical selector for the OpenAI Responses
 // API wire format (POST {base_url}/responses). It is distinct from
 // ProtocolOpenAI (Chat Completions) so ResolveProvider can route to the
-// SDK-based Responses driver.
+// Responses driver.
 const ProtocolOpenAIResponses = "openai/resp_api"
 
 // NormalizeProtocol maps a raw --protocol / protocol value to a canonical

@@ -4,30 +4,27 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/openai/openai-go/option"
-
 	"github.com/smallnest/pigo/internal/agentcore"
 )
 
 // roundTripFunc adapts a function to http.RoundTripper so a test can stub the
-// SDK transport without a live endpoint.
+// transport without a live endpoint.
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// newResponsesTestDriver builds a resp_api driver whose SDK client is pointed at
-// the given stub round-tripper, capturing the request path the SDK targets.
+// newResponsesTestDriver builds a resp_api driver whose HTTP client is pointed at
+// the given stub round-tripper, capturing the request path the driver targets.
 func newResponsesTestDriver(baseURL string, rt roundTripFunc) *responsesDriver {
-	d := NewOpenAIResponsesProvider("openai", baseURL, nil)
-	d.clientOpts = []option.RequestOption{
-		option.WithHTTPClient(&http.Client{Transport: rt}),
-	}
+	d := newResponsesDriver("openai", baseURL, nil)
+	d.httpClient = &http.Client{Transport: rt}
 	return d
 }
 
@@ -213,11 +210,11 @@ func TestResponsesDriverStreamsIncrementalDeltas(t *testing.T) {
 	}
 }
 
-// A cancelled context must terminate the stream with an error rather than
-// yielding a normal end_turn message. The transport cancels mid-flight (after
-// the stream has started) and reports the cancellation, mirroring how an
-// in-progress SSE read aborts when the caller cancels.
-func TestResponsesDriverContextCancelStopsStream(t *testing.T) {
+// A context cancelled before the connection is established is a connect-time
+// failure: StreamRequest returns it, and the runtime turns that into a terminal
+// stopReason=error message (newErrorAssistantMessage). This is the same contract
+// the Chat Completions and Anthropic drivers have.
+func TestResponsesDriverConnectCancelIsEarlyError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		cancel()
@@ -230,9 +227,47 @@ func TestResponsesDriverContextCancelStopsStream(t *testing.T) {
 		Context: LlmContext{Messages: agentcore.MessageList{userMsg("hi")}},
 		Config:  StreamConfig{APIKey: "sk-test"},
 	})
-	if err != nil {
-		t.Fatalf("StreamCompletion should not early-error on cancel: %v", err)
+	if err == nil {
+		stream.Close()
+		t.Fatal("connection-time cancellation must be a returned error")
 	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to wrap context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), d.name) {
+		t.Errorf("error = %q, want it to name the provider", err.Error())
+	}
+}
+
+// Once streaming has begun, a cancellation must terminate the stream with an
+// error event rather than yielding a normal end_turn message: the transport's
+// watchdogs and the caller's ctx both report abort through the stream.
+func TestResponsesDriverMidStreamCancelRidesStream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body, w := io.Pipe()
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       body,
+		}, nil
+	})
+	d := newResponsesTestDriver("https://api.openai.test/v1", rt)
+
+	stream, err := d.StreamCompletion(ctx, CompletionRequest{
+		Model:   "gpt-4o",
+		Context: LlmContext{Messages: agentcore.MessageList{userMsg("hi")}},
+		Config:  StreamConfig{APIKey: "sk-test"},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned early error: %v", err)
+	}
+
+	// Push one delta, then cancel while the server holds the stream open.
+	go func() {
+		w.Write([]byte("data: " + deltaFrame("partial") + "\n\n"))
+		cancel()
+	}()
 
 	var sawError bool
 	for ev := range stream.Events() {
@@ -241,7 +276,7 @@ func TestResponsesDriverContextCancelStopsStream(t *testing.T) {
 		}
 	}
 	if !sawError {
-		t.Fatal("expected a terminal StreamErrorEvent after context cancel")
+		t.Fatal("expected a terminal StreamErrorEvent after a mid-stream cancel")
 	}
 	msg, _ := stream.Result(context.Background())
 	if msg.StopReason != agentcore.StopReasonError {
@@ -249,9 +284,12 @@ func TestResponsesDriverContextCancelStopsStream(t *testing.T) {
 	}
 }
 
-// A non-2xx from the endpoint must ride the stream as a terminal error event,
-// not be returned from StreamCompletion (dual failure model, FR-13).
-func TestResponsesDriverUpstreamErrorRidesStream(t *testing.T) {
+// A non-2xx reject at connect time is a "cannot build the stream" failure, so
+// it is returned rather than streamed — identical to the Chat Completions and
+// Anthropic drivers, which share the same transport. The runtime turns this into
+// a terminal stopReason=error assistant message, so the loop still records a
+// failure uniformly.
+func TestResponsesDriverUpstreamRejectIsEarlyError(t *testing.T) {
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusUnauthorized, `{"error":{"message":"bad key"}}`), nil
 	})
@@ -263,22 +301,15 @@ func TestResponsesDriverUpstreamErrorRidesStream(t *testing.T) {
 		Config:  StreamConfig{APIKey: "sk-test"},
 	}
 	stream, err := d.StreamCompletion(context.Background(), req)
-	if err != nil {
-		t.Fatalf("StreamCompletion should not early-error on upstream failure: %v", err)
+	if err == nil {
+		stream.Close()
+		t.Fatal("a 401 at connect time must be a returned error")
 	}
-
-	var sawError bool
-	for ev := range stream.Events() {
-		if _, ok := ev.(StreamErrorEvent); ok {
-			sawError = true
-		}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("error = %q, want it to carry the upstream status", err.Error())
 	}
-	if !sawError {
-		t.Fatal("expected a terminal StreamErrorEvent for a 401 response")
-	}
-	msg, _ := stream.Result(context.Background())
-	if msg.StopReason != agentcore.StopReasonError {
-		t.Errorf("stop reason = %q, want error", msg.StopReason)
+	if !strings.Contains(err.Error(), "bad key") {
+		t.Errorf("error = %q, want it to carry the upstream body", err.Error())
 	}
 }
 
@@ -752,5 +783,104 @@ func TestResponsesDriverReasoning(t *testing.T) {
 	}
 	if thinking != "let me think" {
 		t.Errorf("thinking content = %q, want %q", thinking, "let me think")
+	}
+}
+
+// rawReasoningDeltaFrame is a response.reasoning_text.delta SSE frame: the
+// reasoning channel DeepSeek's Responses endpoint streams (raw reasoning text)
+// instead of OpenAI's response.reasoning_summary_text.delta.
+func rawReasoningDeltaFrame(delta string) string {
+	return `{"type":"response.reasoning_text.delta","content_index":0,` +
+		`"delta":"` + delta + `","item_id":"rs_1","output_index":0,"sequence_number":1}`
+}
+
+// completedRawReasoningFrame is a response.completed frame whose reasoning item
+// carries raw reasoning in `content` parts (DeepSeek shape) with an empty
+// `summary`, followed by the assistant message text.
+func completedRawReasoningFrame(id, model, reasoning, text string) string {
+	frame := map[string]any{
+		"type":            "response.completed",
+		"sequence_number": 99,
+		"response": map[string]any{
+			"id":    id,
+			"model": model,
+			"output": []any{
+				map[string]any{
+					"type":    "reasoning",
+					"id":      "rs_1",
+					"summary": []any{},
+					"content": []any{map[string]any{
+						"type": "reasoning_text",
+						"text": reasoning,
+					}},
+				},
+				map[string]any{
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []any{map[string]any{
+						"type": "output_text",
+						"text": text,
+					}},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens":          3,
+				"output_tokens":         4,
+				"input_tokens_details":  map[string]any{"cached_tokens": 0},
+				"output_tokens_details": map[string]any{"reasoning_tokens": 2},
+			},
+		},
+	}
+	b, _ := json.Marshal(frame)
+	return string(b)
+}
+
+// TestResponsesDriverStreamsRawReasoningText covers reasoning delivered as
+// response.reasoning_text.delta: the raw-reasoning channel DeepSeek's Responses
+// endpoint uses, as opposed to OpenAI's response.reasoning_summary_text.delta.
+// Both must surface as thinking partials, or the TUI has nothing to render while
+// the model reasons and the thinking block never reaches the session.
+func TestResponsesDriverStreamsRawReasoningText(t *testing.T) {
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return sseResponse(
+			rawReasoningDeltaFrame("check 17*"),
+			rawReasoningDeltaFrame("23 first"),
+			completedRawReasoningFrame("resp_1", "deepseek-flash", "check 17*23 first", "391"),
+		), nil
+	})
+	d := newResponsesTestDriver("https://api.deepseek.test", rt)
+
+	stream, err := d.StreamCompletion(context.Background(), CompletionRequest{
+		Model:   "deepseek-flash",
+		Context: LlmContext{Messages: agentcore.MessageList{userMsg("17*23?")}},
+		Config:  StreamConfig{APIKey: "sk-test", ThinkingLevel: agentcore.ThinkingHigh},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned early error: %v", err)
+	}
+
+	var partials []string
+	for ev := range stream.Events() {
+		if te, ok := ev.(StreamThinkingEvent); ok {
+			partials = append(partials, agentcore.ThinkingText(te.Partial.Content))
+		}
+	}
+	msg, err := stream.Result(context.Background())
+	if err != nil {
+		t.Fatalf("stream result error: %v", err)
+	}
+
+	if len(partials) == 0 {
+		t.Fatal("no StreamThinkingEvent was emitted for response.reasoning_text.delta")
+	}
+	if got := partials[len(partials)-1]; got != "check 17*23 first" {
+		t.Errorf("last streamed thinking partial = %q, want the accumulated reasoning", got)
+	}
+	if got := agentcore.ThinkingText(msg.Content); got != "check 17*23 first" {
+		t.Errorf("final thinking content = %q, want the reasoning from the completed item's content parts", got)
+	}
+	if got := agentcore.ContentToText(msg.Content); got != "391" {
+		t.Errorf("answer text = %q, want %q", got, "391")
 	}
 }
