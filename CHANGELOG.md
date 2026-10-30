@@ -11,7 +11,36 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
+### Fixed
+- **Resuming a session loads the conversation you were on**: a session is a tree,
+  and branching (`/tree` leaf switch, `/rewind`, a continued fork) leaves sibling
+  branches in the same file. Resume used to read every entry in file order, so it
+  could replay a turn you had rewound away, interleave two branches, and then append
+  the next turn to the wrong place. Resume (REPL, TUI and headless) now follows the
+  path to the session's active leaf, and the next turn continues from it.
+- **Resuming a compacted session keeps the whole conversation visible**: replay shows
+  the turns before the compaction as well, with a marker where the history was
+  summarized, while the agent's context starts at the checkpoint so the summarized
+  prefix is not resent (and re-compacted). The REPL replay also renders assistant
+  replies as Markdown again instead of printing the raw source.
+- **Compacting no longer deletes the conversation it summarizes**: after a
+  compaction the session file was rewritten to just the checkpoint plus the retained
+  tail, so the earlier turns were gone from disk (and unrecoverable without memory
+  checkpoints). The compacted context is now appended to the tree instead — the
+  checkpoint attaches to the last summarized entry and the retained tail follows it,
+  so `/tree`, export and a later resume still have the full history. A second
+  compaction attaches at the right node when the session was resumed first.
+
 ### Added
+- **`/new` starts a fresh empty session**: the interactive modes can now begin a
+  new conversation without restarting pigo. It persists the outgoing session first,
+  so nothing is lost and `/resume` (or `--resume`) brings it back, then mints a new
+  session id, clears the conversation, re-dispatches SessionStart so
+  context-injecting hooks run for the new session, and resets the branch cursor,
+  side thread and telemetry. Everything that belongs to the session machinery
+  rather than to one conversation — tools, hooks, MCP connections, the memory store,
+  trust and the slash registry — stays in place, and the new session runs the
+  configuration that is live now, including anything a reload applied.
 - **Live configuration reload**: editing a pigorc or config.toml no longer
   requires restarting pigo. The interactive modes check the config files'
   modification time before each turn and apply a changed one first, and `/reload`

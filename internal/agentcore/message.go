@@ -107,6 +107,13 @@ type CompactionMessage struct {
 	RoleField    string `json:"role"`
 	Summary      string `json:"summary"`
 	TokensBefore int    `json:"tokensBefore,omitempty"`
+	// CoveredMessages is how many messages of the context this checkpoint
+	// summarizes (the compaction cut point). Persistence uses it to attach the
+	// checkpoint to the session tree at the last summarized entry instead of
+	// rewriting the session, so the conversation it summarizes stays on disk.
+	// Zero means "not recorded" (an older file, or a checkpoint built without a
+	// cut point) and makes persistence fall back to a linear rewrite.
+	CoveredMessages int `json:"coveredMessages,omitempty"`
 	// Details is opaque at this layer (the compaction package owns its shape);
 	// kept as raw JSON so agentcore stays free of a compaction dependency.
 	Details   json.RawMessage `json:"details,omitempty"`

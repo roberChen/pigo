@@ -126,24 +126,25 @@ func Run(opts Options) error {
 	if opts.ResumeID != "" {
 		// Interactive resume always appends a fresh user message before running,
 		// so a session that ended normally (trailing assistant reply) is resumable
-		// here. Load the raw session and rebuild the context directly.
-		h, entries, err := store.LoadEntries(opts.ResumeID)
+		// here. Load the conversation (the active branch, not every abandoned branch
+		// in the file) and rebuild the context from the last compaction checkpoint
+		// on: the replay shows the full history, the agent continues from the point
+		// where the summary left off.
+		h, path, err := store.LoadPath(opts.ResumeID)
 		if err != nil {
 			return err
 		}
 		if h.IsSubAgent() {
 			return fmt.Errorf("session %s: %w", opts.ResumeID, session.ErrNotResumableSubAgent)
 		}
-		msgs := make(agentcore.MessageList, len(entries))
-		for i, e := range entries {
-			msgs[i] = e.Message
-		}
-		if len(entries) > 0 {
-			curLeaf = entries[len(entries)-1].ID
-		}
+		history = session.Messages(path)
+		curLeaf = session.TipLeaf(path)
 		header = h
-		agentCtx = &agentcore.AgentContext{SystemPrompt: h.SystemPrompt, Messages: msgs, Tools: opts.Tools}
-		history = msgs
+		agentCtx = &agentcore.AgentContext{
+			SystemPrompt: h.SystemPrompt,
+			Messages:     session.MessagesSinceLastCompaction(history),
+			Tools:        opts.Tools,
+		}
 		if agentCtx.SystemPrompt == "" {
 			agentCtx.SystemPrompt = opts.SysPrompt
 		}
@@ -249,15 +250,17 @@ func Run(opts Options) error {
 		in:           reader,
 		confirmMu:    &sync.Mutex{},
 		curLeaf:      curLeaf,
-		persisted:    len(history),
-		memoryRoot:   run.MemoryRootFromTools(opts.Tools),
-		memstore:     run.MemoryStoreFromTools(opts.Tools),
-		snap:         run.SnapshotRecorderFromTools(opts.Tools),
-		jobs:         run.BashJobStoreFromTools(opts.Tools),
-		notifier:     plugin.NewEventNotifier(opts.Plugins, os.Stderr),
-		goal:         agenttool.NewGoalState(),
-		telemetry:    cli.NewTelemetryHolder(),
-		reloader:     opts.Reloader,
+		// The persisted cursor indexes the agent's context, which after a resumed
+		// compaction starts at the checkpoint (history is the full replay).
+		persisted:  len(agentCtx.Messages),
+		memoryRoot: run.MemoryRootFromTools(opts.Tools),
+		memstore:   run.MemoryStoreFromTools(opts.Tools),
+		snap:       run.SnapshotRecorderFromTools(opts.Tools),
+		jobs:       run.BashJobStoreFromTools(opts.Tools),
+		notifier:   plugin.NewEventNotifier(opts.Plugins, os.Stderr),
+		goal:       agenttool.NewGoalState(),
+		telemetry:  cli.NewTelemetryHolder(),
+		reloader:   opts.Reloader,
 		// A reload re-reads skills and plugins, so the slash registry is rebuilt
 		// from the sources resolved at launch (same tiers, same precedence).
 		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry {

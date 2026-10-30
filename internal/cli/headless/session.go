@@ -110,21 +110,18 @@ func openHeadlessSession(resumeID, model, providerName, sysPrompt string) (agent
 	now := time.Now().UTC()
 
 	if resumeID != "" {
-		h, entries, err := store.LoadEntries(resumeID)
+		// Resume the active branch and continue from the last compaction checkpoint,
+		// exactly like the interactive drivers, so a headless turn neither replays
+		// abandoned branches nor resends history a summary already covers.
+		h, path, err := store.LoadPath(resumeID)
 		if err != nil {
 			return nil, headlessSession{}, err
 		}
 		if h.IsSubAgent() {
 			return nil, headlessSession{}, fmt.Errorf("session %s: %w", resumeID, session.ErrNotResumableSubAgent)
 		}
-		msgs := make(agentcore.MessageList, len(entries))
-		for i, e := range entries {
-			msgs[i] = e.Message
-		}
-		curLeaf := ""
-		if len(entries) > 0 {
-			curLeaf = entries[len(entries)-1].ID
-		}
+		msgs := session.MessagesSinceLastCompaction(session.Messages(path))
+		curLeaf := session.TipLeaf(path)
 		// A resumed header keeps its own SystemPrompt when present so the run is
 		// faithful to the original session.
 		if h.SystemPrompt == "" {

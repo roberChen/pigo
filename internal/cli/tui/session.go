@@ -170,27 +170,28 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		curLeaf  string
 	)
 	if opts.ResumeID != "" {
-		h, entries, err := store.LoadEntries(opts.ResumeID)
+		// Resume the active branch (not every abandoned branch in the file) and
+		// continue from the last compaction checkpoint: history replays the whole
+		// conversation, the agent's context starts where the summary left off.
+		h, path, err := store.LoadPath(opts.ResumeID)
 		if err != nil {
 			return nil, nil, err
 		}
 		if h.IsSubAgent() {
 			return nil, nil, fmt.Errorf("session %s: %w", opts.ResumeID, session.ErrNotResumableSubAgent)
 		}
-		msgs := make(agentcore.MessageList, len(entries))
-		for i, e := range entries {
-			msgs[i] = e.Message
-		}
-		if len(entries) > 0 {
-			curLeaf = entries[len(entries)-1].ID
-		}
+		history = session.Messages(path)
+		curLeaf = session.TipLeaf(path)
 		header = h
 		sysPrompt := h.SystemPrompt
 		if sysPrompt == "" {
 			sysPrompt = opts.SysPrompt
 		}
-		agentCtx = &agentcore.AgentContext{SystemPrompt: sysPrompt, Messages: msgs, Tools: opts.Tools}
-		history = msgs
+		agentCtx = &agentcore.AgentContext{
+			SystemPrompt: sysPrompt,
+			Messages:     session.MessagesSinceLastCompaction(history),
+			Tools:        opts.Tools,
+		}
 	} else {
 		agentCtx = &agentcore.AgentContext{SystemPrompt: opts.SysPrompt, Tools: opts.Tools}
 		// Stamp the launch directory onto a fresh session (#526/#524) so the
@@ -233,22 +234,24 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 	}
 
 	s := &runSession{
-		store:      store,
-		header:     header,
-		agentCtx:   agentCtx,
-		live:       live,
-		reg:        run.ToolRegistry(opts.Tools),
-		reminders:  run.TodoReminders(opts.Tools),
-		schedule:   agenttool.ScheduleFromTools(opts.Tools),
-		jobs:       runtime.SubAgentJobsFromTools(opts.Tools),
-		mcp:        opts.MCP,
-		creds:      creds,
-		cwd:        cwd,
-		trust:      mgr,
-		slash:      newSlashRegistry(opts, live),
-		telemetry:  cli.NewTelemetryHolder(),
-		curLeaf:    curLeaf,
-		persisted:  len(history),
+		store:     store,
+		header:    header,
+		agentCtx:  agentCtx,
+		live:      live,
+		reg:       run.ToolRegistry(opts.Tools),
+		reminders: run.TodoReminders(opts.Tools),
+		schedule:  agenttool.ScheduleFromTools(opts.Tools),
+		jobs:      runtime.SubAgentJobsFromTools(opts.Tools),
+		mcp:       opts.MCP,
+		creds:     creds,
+		cwd:       cwd,
+		trust:     mgr,
+		slash:     newSlashRegistry(opts, live),
+		telemetry: cli.NewTelemetryHolder(),
+		curLeaf:   curLeaf,
+		// The persisted cursor indexes the agent's context, which after a resumed
+		// compaction starts at the checkpoint (history is the full replay).
+		persisted:  len(agentCtx.Messages),
 		memoryRoot: run.MemoryRootFromTools(opts.Tools),
 		memstore:   run.MemoryStoreFromTools(opts.Tools),
 		opts:       opts,
@@ -464,23 +467,21 @@ func (s *runSession) interrupt() {
 // than a linear rewrite) keeps history intact. A no-op when nothing new was
 // produced, so an idle turn-end never regenerates entry ids.
 func (s *runSession) persist() error {
-	// A compaction during the run rewrote Messages into a summary + recent tail,
-	// so the append-a-tail branch model no longer holds: the prefix changed and
-	// the slice may be shorter than persisted. Re-save the flattened context
-	// linearly and reset the branch cursor to the new leaf, mirroring the REPL's
-	// /compact handling.
+	// A compaction during the run rewrote Messages into a checkpoint + recent tail,
+	// so the append-a-tail branch model no longer holds: the prefix changed and the
+	// slice may be shorter than persisted. Persist the compacted context, which
+	// keeps the summarized history on disk and points the branch cursor at the new
+	// leaf (see cli.PersistCompactedContext), mirroring the REPL.
 	if s.compacted || s.persisted > len(s.agentCtx.Messages) {
 		s.header.UpdatedAt = time.Now().UTC()
 		s.header.Model = s.live.Model
 		s.header.Provider = s.live.ProviderName
-		if err := s.store.Save(s.header, s.agentCtx.Messages); err != nil {
+		leaf, err := cli.PersistCompactedContext(s.store, s.header, s.curLeaf, s.agentCtx.Messages)
+		if err != nil {
 			return err
 		}
 		s.persisted = len(s.agentCtx.Messages)
-		s.curLeaf = ""
-		if _, entries, err := s.store.LoadEntries(s.header.ID); err == nil && len(entries) > 0 {
-			s.curLeaf = entries[len(entries)-1].ID
-		}
+		s.curLeaf = leaf
 		s.compacted = false
 		return nil
 	}
@@ -539,6 +540,15 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 			for _, c := range msg.ToolCalls() {
 				appendCard(newToolCard(c.ID, c.Name, c.Arguments))
 			}
+		case agentcore.CompactionMessage:
+			// The checkpoint stands in for the summarized prefix: show where the
+			// conversation was compacted, so a replayed session explains why the
+			// turns before it are only history.
+			t.blocks = append(t.blocks, transcriptBlock{
+				role: roleSystem,
+				text: "… conversation compacted here — earlier turns are shown above but summarized for the model …",
+			})
+			t.activeAssistant = -1
 		case agentcore.ToolResultMessage:
 			card, ok := cards[msg.ToolCallID]
 			if !ok {

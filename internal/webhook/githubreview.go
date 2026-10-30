@@ -301,14 +301,13 @@ func verifySignature(header, secret string, body []byte) bool {
 // produced messages are appended back to the same session.
 func (s *Server) DefaultRunner() Runner {
 	return func(ctx context.Context, req ReviewRequest) error {
-		_, entries, err := s.Store.LoadEntries(req.SessionID)
+		// Resume the review session's active branch, from the last compaction
+		// checkpoint on, like any other resume.
+		_, path, err := s.Store.LoadPath(req.SessionID)
 		if err != nil {
 			return err
 		}
-		msgs := make(agentcore.MessageList, len(entries))
-		for i, e := range entries {
-			msgs[i] = e.Message
-		}
+		msgs := session.MessagesSinceLastCompaction(session.Messages(path))
 		agentCtx := &agentcore.AgentContext{Messages: msgs, Tools: ReadOnlyTools(s.Workspace)}
 		creds := provider.NewCredentialStore(nil)
 		reg := agenttool.NewToolRegistry()

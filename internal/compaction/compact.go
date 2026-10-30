@@ -112,11 +112,12 @@ func (r *CompactionResult) Message(now int64) agentcore.CompactionMessage {
 		details = b
 	}
 	return agentcore.CompactionMessage{
-		RoleField:    agentcore.RoleCompaction,
-		Summary:      r.Summary,
-		TokensBefore: r.TokensBefore,
-		Details:      details,
-		Timestamp:    now,
+		RoleField:       agentcore.RoleCompaction,
+		Summary:         r.Summary,
+		TokensBefore:    r.TokensBefore,
+		CoveredMessages: r.FirstKeptIndex,
+		Details:         details,
+		Timestamp:       now,
 	}
 }
 

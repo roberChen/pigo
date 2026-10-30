@@ -362,8 +362,8 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 			return b.String()
 		},
 	})
-	// /exit, /quit, /compact, /reload, /fork, /clone, /tree, /rewind, /export,
-	// /import, /resume, /copy, /session and /status are intercepted by the front-end
+	// /exit, /quit, /compact, /reload, /new, /fork, /clone, /tree, /rewind,
+	// /export, /import, /resume, /copy, /session and /status are intercepted by the front-end
 	// before slash resolution (they must return from the loop, run an agent stream,
 	// read/swap the active session/leaf, reload the configuration, or list and load
 	// another stored session — none of which an Action closure can do). They are
@@ -380,6 +380,7 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 		{"export", "export the session to a file: /export [path.jsonl|path.html]"},
 		{"import", "import a JSONL export as a new session: /import <path.jsonl>"},
 		{"resume", "list stored sessions and load one: /resume [n|id]"},
+		{"new", "start a new empty session (the current one is kept on disk)"},
 		{"copy", "copy the most recent assistant reply to the clipboard"},
 		{"session", "show session stats: messages, tokens, model, compactions"},
 		{"status", "show session status: runtime config, context, telemetry, credentials, environment"},

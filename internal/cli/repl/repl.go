@@ -386,19 +386,13 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			// /compact is intercepted here (like /exit) because compaction must run
 			// an agent stream and mutate the shared context — neither of which a
 			// slash Action closure (string in, string out) can do. Compaction
-			// replaces the whole message list with a summary + tail, so the session
-			// is rewritten linearly (Save) and the branch-tracking state is reset to
-			// the new flattened leaf.
+			// replaces the context with a checkpoint + retained tail; PersistTurn
+			// appends that to the session tree (keeping the summarized history on
+			// disk) and advances the branch cursor.
 			runManualCompact(out, deps)
-			deps.header.UpdatedAt = time.Now().UTC()
-			if err := deps.store.Save(deps.header, deps.agentCtx.Messages); err != nil {
-				fmt.Fprintf(out, "pigo: session save failed: %v\n", err)
-			}
-			deps.persisted = len(deps.agentCtx.Messages)
-			deps.curLeaf = ""
-			if _, entries, err := deps.store.LoadEntries(deps.header.ID); err == nil && len(entries) > 0 {
-				deps.curLeaf = entries[len(entries)-1].ID
-			}
+			// The context now starts with a checkpoint; persisting it keeps the
+			// summarized history on disk instead of collapsing the session file.
+			cli.PersistTurn(out, &deps)
 			continue
 		}
 		if line == "/rebuild" {
@@ -406,18 +400,10 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			// reconstructs the whole message list (checkpoint summary + retained
 			// tail) and mutates the shared context, which a slash Action closure
 			// cannot do. It reloads a persisted checkpoint when present, else falls
-			// back to lossy compaction. Like /compact, the session is rewritten
-			// linearly (Save) and the branch cursor reset to the new flattened leaf.
+			// back to lossy compaction. Like /compact, the result is persisted through
+			// PersistTurn so the summarized history stays on disk.
 			runManualRebuild(out, deps)
-			deps.header.UpdatedAt = time.Now().UTC()
-			if err := deps.store.Save(deps.header, deps.agentCtx.Messages); err != nil {
-				fmt.Fprintf(out, "pigo: session save failed: %v\n", err)
-			}
-			deps.persisted = len(deps.agentCtx.Messages)
-			deps.curLeaf = ""
-			if _, entries, err := deps.store.LoadEntries(deps.header.ID); err == nil && len(entries) > 0 {
-				deps.curLeaf = entries[len(entries)-1].ID
-			}
+			cli.PersistTurn(out, &deps)
 			continue
 		}
 		if line == "/clone" || line == "/fork" || strings.HasPrefix(line, "/fork ") {
@@ -526,6 +512,14 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			// being mistaken for "/btw". It reuses the same SIGINT cancel plumbing
 			// as a normal turn via setCancel.
 			btw.RunBtw(setCancel, out, &deps, editor, line)
+			continue
+		}
+		if line == "/new" || strings.HasPrefix(line, "/new ") {
+			// /new starts a fresh, empty session in place: a new session id and an
+			// empty context, with the outgoing session persisted first. Tools, hooks,
+			// MCP connections and the rest of the session machinery are untouched.
+			// The exact-or-space-prefix guard keeps "/newer" from matching.
+			runNew(out, &deps, line)
 			continue
 		}
 		if line == "/reload" {
@@ -992,20 +986,15 @@ func runImport(out io.Writer, deps *replDeps, line string) {
 		fmt.Fprintf(out, "pigo: import failed: %v\n", err)
 		return
 	}
-	// Swap the live session to the imported one: rebuild the flat message list and
-	// point the REPL at the new header. The imported file already holds the entries
-	// verbatim, so mark them all persisted and set the active leaf to the tip.
-	msgs := make(agentcore.MessageList, len(entries))
-	for i, e := range entries {
-		msgs[i] = e.Message
-	}
+	// Swap the live session to the imported one: rebuild the conversation from the
+	// imported file's active branch (an export can carry several branches) and
+	// continue from its last compaction checkpoint. The entries are already
+	// persisted verbatim, so the cursor is marked at the tip.
+	branch := session.PathToLeaf(entries, session.TipLeaf(entries))
 	deps.header = newHeader
-	deps.agentCtx.Messages = msgs
-	deps.persisted = len(entries)
-	deps.curLeaf = ""
-	if len(entries) > 0 {
-		deps.curLeaf = entries[len(entries)-1].ID
-	}
+	deps.agentCtx.Messages = session.MessagesSinceLastCompaction(session.Messages(branch))
+	deps.persisted = len(deps.agentCtx.Messages)
+	deps.curLeaf = session.TipLeaf(branch)
 	// A side thread branched from the previous conversation no longer applies to
 	// the imported one, so drop it (#281).
 	deps.lastBtw = nil
@@ -1015,7 +1004,7 @@ func runImport(out io.Writer, deps *replDeps, line string) {
 	if deps.telemetry != nil {
 		deps.telemetry.Reset()
 	}
-	fmt.Fprintf(out, "imported %d entries from %s → session %s\n", len(entries), path, newHeader.ID)
+	fmt.Fprintf(out, "imported %d entries from %s → session %s\n", len(branch), path, newHeader.ID)
 }
 
 // resumeListLimit caps how many recent sessions /resume offers to load, so a
@@ -1057,7 +1046,7 @@ func runResume(out io.Writer, deps *replDeps, line string) {
 	// Flush any unsaved tail of the outgoing session first, so switching never
 	// drops a turn (same guard /fork and /clone use).
 	cli.PersistTurn(out, deps)
-	header, entries, err := deps.store.LoadEntries(id)
+	header, path, err := deps.store.LoadPath(id)
 	if err != nil {
 		fmt.Fprintf(out, "pigo: cannot load session %s: %v\n", id, err)
 		return
@@ -1066,20 +1055,16 @@ func runResume(out io.Writer, deps *replDeps, line string) {
 		fmt.Fprintf(out, "pigo: session %s: %v\n", id, session.ErrNotResumableSubAgent)
 		return
 	}
-	// Swap the live session to the loaded one: rebuild the flat message list,
-	// point the REPL at the loaded header, and mark the on-disk entries as
-	// persisted so the next turn appends a branch from the session's tip.
-	msgs := make(agentcore.MessageList, len(entries))
-	for i, e := range entries {
-		msgs[i] = e.Message
-	}
+	// Swap the live session to the loaded one: rebuild the conversation from the
+	// session's active branch, continue from its last compaction checkpoint, and
+	// mark those messages as persisted so the next turn appends from the tip. The
+	// replay below still shows the full branch, including history a compaction
+	// summary replaced.
+	history := session.Messages(path)
 	deps.header = header
-	deps.agentCtx.Messages = msgs
-	deps.persisted = len(entries)
-	deps.curLeaf = ""
-	if len(entries) > 0 {
-		deps.curLeaf = entries[len(entries)-1].ID
-	}
+	deps.agentCtx.Messages = session.MessagesSinceLastCompaction(history)
+	deps.persisted = len(deps.agentCtx.Messages)
+	deps.curLeaf = session.TipLeaf(path)
 	// A side thread branched from the previous conversation no longer applies,
 	// and cumulative telemetry must not bleed across conversations.
 	deps.lastBtw = nil
@@ -1087,13 +1072,17 @@ func runResume(out io.Writer, deps *replDeps, line string) {
 	if deps.telemetry != nil {
 		deps.telemetry.Reset()
 	}
-	fmt.Fprintf(out, "resumed session %s (%d messages)\n", header.ID, len(msgs))
+	trimmed := ""
+	if len(history) > len(deps.agentCtx.Messages) {
+		trimmed = fmt.Sprintf("; %d earlier messages shown but summarized in context", len(history)-len(deps.agentCtx.Messages))
+	}
+	fmt.Fprintf(out, "resumed session %s (%d messages%s)\n", header.ID, len(deps.agentCtx.Messages), trimmed)
 	if header.Cwd != "" && deps.cwd != "" && header.Cwd != deps.cwd {
 		// The session was recorded in another project: say so, since tools keep
 		// operating on the launch directory (pigo does not cd).
 		fmt.Fprintf(out, "note: this session was recorded in %s; tools still run in %s\n", header.Cwd, deps.cwd)
 	}
-	replayTranscript(out, msgs)
+	replayTranscript(out, history)
 }
 
 // runCopy handles the /copy command (US-009, #125): it copies the most recent
@@ -1251,8 +1240,16 @@ func runManualRebuild(out io.Writer, deps replDeps) {
 		source, res.TokensBefore, res.TokensAfter, res.SummarizedCount, res.KeptCount)
 }
 
+// replayMarkdown renders a replayed assistant reply. It is a seam so tests can
+// assert that replay goes through the same Markdown path as a live turn even when
+// color is off (ui.RenderMarkdown is a no-op without a terminal).
+var replayMarkdown = ui.RenderMarkdown
+
 // replayTranscript prints a resumed session's prior messages to out so the user
-// sees the conversation so far before the first new prompt.
+// sees the conversation so far before the first new prompt. Assistant replies go
+// through the same Markdown renderer a live turn uses, so a resumed conversation
+// looks like it did when it was produced instead of showing raw Markdown source. A
+// compaction checkpoint prints as a dim marker where the history was summarized.
 func replayTranscript(out io.Writer, messages []agentcore.AgentMessage) {
 	color := ui.Enabled()
 	for _, m := range messages {
@@ -1263,7 +1260,11 @@ func replayTranscript(out io.Writer, messages []agentcore.AgentMessage) {
 			}
 		case agentcore.AssistantMessage:
 			if t := agentcore.ContentToText(msg.Content); t != "" {
-				fmt.Fprintln(out, t)
+				rendered := replayMarkdown(t)
+				fmt.Fprint(out, rendered)
+				if !strings.HasSuffix(rendered, "\n") {
+					fmt.Fprintln(out)
+				}
 			}
 			for _, c := range msg.ToolCalls() {
 				fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Green, "→ tool:"), ui.ToolCallLabel(c))
@@ -1274,6 +1275,9 @@ func replayTranscript(out io.Writer, messages []agentcore.AgentMessage) {
 			} else {
 				fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Green, "← result:"), ui.OneLine(agentcore.ContentToText(msg.Content)))
 			}
+		case agentcore.CompactionMessage:
+			fmt.Fprintln(out, ui.Colorize(color, ui.Dim,
+				"… conversation compacted here — earlier turns are shown above but summarized for the model …"))
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/session"
 )
@@ -241,17 +242,11 @@ func (m Model) submitSessionPick() (tea.Model, tea.Cmd) {
 	return m.resumeSession(choice.Header.ID)
 }
 
-// resumeSession swaps the live session to id. It rebuilds the run session from
-// the model's options with ResumeID set — the exact path a `pigo --resume`
-// launch takes, so hooks, trust and the slash registry are wired identically —
-// then resets the transcript and replays the resumed history. The previous
-// conversation's tool cards, sub-agent rows, mouse selection and LAN mirror all
-// belong to the session being left, so they are dropped.
 func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 	// Persist the outgoing session's unsaved tail first (a no-op when everything
 	// was already written) so switching never drops a turn.
 	saveErr := m.session.persist()
-	opts := m.opts
+	opts := m.sessionOptions()
 	opts.ResumeID = id
 	s, history, err := newRunSessionWithStore(m.session.store, opts)
 	if err != nil {
@@ -259,6 +254,25 @@ func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	}
+	m = m.swapToSession(s, history, saveErr)
+	note := fmt.Sprintf("resumed session %s (%d messages)", s.header.ID, len(history))
+	if s.header.Cwd != "" && m.cwd != "" && s.header.Cwd != m.cwd {
+		// The session was recorded in another project: say so, since the tools
+		// keep operating on the launch directory (pigo does not cd).
+		note += fmt.Sprintf(" (recorded in %s; tools still run in %s)", s.header.Cwd, m.cwd)
+	}
+	m.transcript.addSystem(note)
+	m.relayout()
+	return m, m.input.Focus()
+}
+
+// swapToSession replaces the running conversation with s, whose history is
+// replayed into a fresh transcript. Everything that belonged to the conversation
+// being left — tool cards, sub-agent rows, mouse selection, LAN mirror, context
+// usage — is dropped, while the session machinery (store, hooks, memory, tools)
+// comes from s. A failure to save the outgoing session is reported without
+// blocking the switch.
+func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr error) Model {
 	m.shutdownRemote()
 	m.transcript = newTranscript(m.theme)
 	m.transcript.addBanner(renderBanner(m.theme, m.opts, m.cwd))
@@ -278,8 +292,8 @@ func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 	m.slash = s.slash
 	m.statusBar.SetModel(s.live.Model)
 	m.statusBar.SetThinking(string(s.live.ThinkingLevel))
-	// The context-usage readout belongs to the conversation being left, so hide
-	// it until the resumed session reports its own telemetry.
+	// The context-usage readout belongs to the conversation being left, so hide it
+	// until the new session reports its own telemetry.
 	m.statusBar.SetTelemetry(telemetryEventView{})
 	// Replay the conversation, tool cards included, and leave Ctrl+O pointing at
 	// the last replayed call as a live run would.
@@ -288,13 +302,5 @@ func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 	if saveErr != nil {
 		m.transcript.addSystem("warning: could not save the previous session: " + saveErr.Error())
 	}
-	note := fmt.Sprintf("resumed session %s (%d messages)", s.header.ID, len(history))
-	if s.header.Cwd != "" && m.cwd != "" && s.header.Cwd != m.cwd {
-		// The session was recorded in another project: say so, since the tools
-		// keep operating on the launch directory (pigo does not cd).
-		note += fmt.Sprintf(" (recorded in %s; tools still run in %s)", s.header.Cwd, m.cwd)
-	}
-	m.transcript.addSystem(note)
-	m.relayout()
-	return m, m.input.Focus()
+	return m
 }

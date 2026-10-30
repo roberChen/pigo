@@ -916,6 +916,13 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 	if line == "/resume" || strings.HasPrefix(line, "/resume ") {
 		return m.runResume(line)
 	}
+	// /new is intercepted before registry resolution (like /resume): it starts a
+	// fresh empty session — persisting the outgoing one first — and swaps the whole
+	// session and transcript, work a slash Action closure (string→string) cannot do.
+	// The guard keeps a name like "/newer" from matching.
+	if line == "/new" || strings.HasPrefix(line, "/new ") {
+		return m.newSession(line)
+	}
 	// /memory is intercepted before registry resolution (like /rebuild): it
 	// prints the persistent-memory + infinite-context report, reading the live
 	// memory store, memory root, session id, and messages that a slash Action
