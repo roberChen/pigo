@@ -162,7 +162,7 @@ pigo -m ollama/qwen2.5-coder -u http://localhost:11434/v1 -p "解释 main.go 做
 | `--model` | `-m` | `openrouter/free` | 使用的模型 id |
 | `--base-url` | `-u` | `""` | 覆盖 Provider 的 base URL（如本地 Ollama） |
 | `--api-key` | `-k` | `""` | 指定 Provider 的 API Key（覆盖 env/config，否则读 `<PROVIDER>_API_KEY`） |
-| `--protocol` | `-P` | `""` | 强制线路协议：`openai` \| `anthropic`（默认由 model id 推断） |
+| `--protocol` | `-P` | `""` | 强制线路协议：`openai`（= `openai/chat`）\| `openai/resp_api` \| `anthropic`（默认由 model id 推断） |
 | `--output-format` | `-o` | `text` | 输出格式：`text` \| `stream-json` |
 | `--no-tools` | `-n` | `false` | 禁用内置文件/shell 工具（同时跳过插件发现） |
 | `--allowed-tools` | | `nil` | 工具白名单：只把这些工具交给模型；可重复、可逗号分隔、大小写不敏感；为空表示不限制 |
@@ -207,7 +207,7 @@ pigo -a -p "运行 go test ./... 并修复失败的用例"
 
 模型 id 通过启发式规则映射到具体 Provider（`--protocol` 显式指定时优先级最高）：
 
-1. **`--protocol`** 显式选择 → `openai`（需配合 `--base-url`）或 `anthropic`（默认公有 Anthropic API）。
+1. **`--protocol`** 显式选择 → `openai`（Chat Completions，需配合 `--base-url`）、`openai/resp_api`（Responses API，需配合 `--base-url`）或 `anthropic`（默认公有 Anthropic API）。`openai` 与 `openai/chat` 等价；Responses 变体用于只实现 `POST {base_url}/responses` 的端点。
 2. **裸 Provider 名** → 视为该 Provider 的默认模型（取预置目录中该 Provider 的第一个预置 id，如 `zai` → `glm-4.7`、`deepseek` → `deepseek-v4-flash`）。`/model zai`、`pigo --model zai`、config.toml 的 `model = "zai"` 三种写法等价。
 3. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
 4. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
@@ -265,7 +265,7 @@ Key 解析顺序：OAuth token → `--api-key` → 环境变量 → 配置文件
 # ~/.config/pigo/config.toml
 [[providers]]
 name     = "mycorp"                        # 名字：小写字母/数字/.-_
-protocol = "openai"                        # openai | anthropic
+protocol = "openai"                        # openai | openai/resp_api | anthropic
 base_url = "https://llm.mycorp.com/v1"
 env_var  = "MYCORP_API_KEY"                # 可选，默认 <NAME>_API_KEY
 credential = "mycorp-work"                 # 可选，具名凭据（推荐）

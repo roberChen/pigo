@@ -52,7 +52,9 @@ no_tools = false
 # Disable skill discovery (do not load skills under ~/.agents/skills as /skill-name commands).
 no_skills = false
 
-# Force wire protocol for a custom endpoint: openai | anthropic
+# Force wire protocol for a custom endpoint: openai | openai/resp_api | anthropic
+# (openai and openai/chat are the same Chat Completions wire; openai/resp_api
+#  targets POST {base_url}/responses for endpoints that only speak that API)
 # protocol = "anthropic"
 
 # Run in headless print mode with the given prompt.
@@ -80,7 +82,7 @@ no_skills = false
 #
 # [[providers]]
 # name       = "mycorp"
-# protocol   = "openai"                    # openai | anthropic
+# protocol   = "openai"                    # openai | openai/resp_api | anthropic
 # base_url   = "https://llm.mycorp.com/v1"
 # env_var    = "MYCORP_API_KEY"
 # credential = "mycorp-work"               # name in ~/.pigo/.credentials.yaml
