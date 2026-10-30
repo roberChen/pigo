@@ -117,6 +117,12 @@ type Model struct {
 	// open it owns the arrow / Enter / Esc keys, like the slash menu.
 	picker sessionPicker
 
+	// modelPicker is the /model overlay listing the switchable models (the same
+	// presets "/models" prints). It is opened by a bare "/model" or "/models" and
+	// owns the keyboard while up; choosing a row runs the exact switch the
+	// "/model <id>" command runs (prompts.ApplyModelSwitch).
+	modelPicker modelPicker
+
 	// ask is the pending question from the question tool (agentcore asker seam):
 	// the run is blocked on the operator's answer, the prompt is shown above the
 	// composer, and the composer becomes the answer field.
@@ -200,20 +206,21 @@ func NewModel(opts Options) Model {
 		ContextWindow: cli.DefaultContextWindow,
 	}
 	return Model{
-		opts:       opts,
-		theme:      theme,
-		transcript: newTranscript(theme),
-		input:      newInput(),
-		cwd:        cwd,
-		statusBar:  newStatusBar(theme, opts, cwd),
-		toolCards:  make(map[string]*toolCard),
-		slash:      newSlashRegistry(opts, live),
-		live:       live,
-		menu:       newSlashMenu(theme),
-		picker:     newSessionPicker(theme),
-		spinner:    newSpinner(theme),
-		pastes:     make(map[int]string),
-		images:     make(map[int]string),
+		opts:        opts,
+		theme:       theme,
+		transcript:  newTranscript(theme),
+		input:       newInput(),
+		cwd:         cwd,
+		statusBar:   newStatusBar(theme, opts, cwd),
+		toolCards:   make(map[string]*toolCard),
+		slash:       newSlashRegistry(opts, live),
+		live:        live,
+		menu:        newSlashMenu(theme),
+		picker:      newSessionPicker(theme),
+		modelPicker: newModelPicker(theme),
+		spinner:     newSpinner(theme),
+		pastes:      make(map[int]string),
+		images:      make(map[int]string),
 	}
 }
 
@@ -279,6 +286,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		// While the /model chooser is up it owns the selection, so the wheel walks
+		// its rows exactly like ↑/↓ instead of scrolling the transcript behind it.
+		if !m.running && m.modelPicker.active {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.modelPicker.moveUp()
+			case tea.MouseWheelDown:
+				m.modelPicker.moveDown()
+			}
+			return m, nil
+		}
 		// Mouse-wheel scrolling reaches the transcript viewport whether idle or
 		// running, so history stays scrollable with the wheel — not just PgUp/PgDn.
 		// The viewport (MouseWheelEnabled by default) turns the wheel event into a
@@ -645,6 +663,50 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// selection, Enter loads the highlighted session, and Esc / Ctrl+C dismiss it
 	// (without quitting the program, unlike Ctrl+C with no overlay). Every other
 	// key is swallowed so the composer cannot be edited behind the overlay.
+	// The /model picker is modal in the same way: ↑/↓ (or Ctrl+P/Ctrl+N, the
+	// readline spellings) walk the highlight and wrap at the ends, PgUp/PgDn jump
+	// a screenful, Home/End jump to the first/last row, printable characters
+	// extend the filter, Backspace removes a filter rune, Enter switches to the
+	// highlighted model and Esc / Ctrl+C dismiss it. Every other key is swallowed
+	// so the composer cannot be edited behind it.
+	if !m.running && m.modelPicker.active {
+		switch msg.String() {
+		case "up", "ctrl+p":
+			m.modelPicker.moveUp()
+			return m, nil
+		case "down", "ctrl+n":
+			m.modelPicker.moveDown()
+			return m, nil
+		case "pgup":
+			m.modelPicker.pageUp()
+			return m, nil
+		case "pgdown":
+			m.modelPicker.pageDown()
+			return m, nil
+		case "home":
+			m.modelPicker.moveHome()
+			return m, nil
+		case "end":
+			m.modelPicker.moveEnd()
+			return m, nil
+		case "enter":
+			return m.submitModelPick()
+		case "esc", "ctrl+c":
+			m.modelPicker.close()
+			m.relayout()
+			return m, nil
+		case "backspace":
+			m.modelPicker.backspaceFilter()
+			m.relayout()
+			return m, nil
+		}
+		if msg.Text != "" {
+			m.modelPicker.typeFilter(msg.Text)
+			m.relayout()
+		}
+		return m, nil
+	}
+
 	if !m.running && m.picker.active {
 		switch msg.String() {
 		case "up":
@@ -953,6 +1015,14 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		m.shutdownRemote()
 		m.quitting = true
 		return m, tea.Quit
+	}
+	// A bare /model or /models opens the interactive chooser instead of printing
+	// the status / preset listing: this is the TUI counterpart of the REPL's text
+	// output, and it is intercepted here because an overlay (keyboard mode, rows
+	// reserved above the composer) is state a string→string Action cannot hold.
+	// "/model <id>" and "/models fetch|<provider>" keep their command behavior.
+	if line == "/model" || line == "/models" {
+		return m.openModelPicker(line)
 	}
 	// /resume is intercepted before registry resolution (like /rebuild): it lists
 	// the stored sessions and loads one, swapping the whole session and transcript
@@ -1448,6 +1518,11 @@ func (m Model) renderContent() string {
 		b.WriteString(picker)
 		b.WriteByte('\n')
 	}
+	// The /model chooser renders in the same slot while it is up.
+	if chooser := m.modelPicker.view(width); chooser != "" {
+		b.WriteString(chooser)
+		b.WriteByte('\n')
+	}
 	if menu := m.menu.view(width); menu != "" {
 		b.WriteString(menu)
 		b.WriteByte('\n')
@@ -1527,7 +1602,7 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.ask.rows(m.theme, m.width)
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.ask.rows(m.theme, m.width)
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the

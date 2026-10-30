@@ -236,6 +236,92 @@ func fetchModelCatalog(live *cli.LiveConfig, creds *provider.CredentialStore) st
 		len(ids), strings.TrimRight(baseURL, "/"), live.ProviderName, strings.Join(preview, "\n  "))
 }
 
+// ApplyModelSwitch implements the /model action for both front-ends: with an
+// empty argument it reports the current model; otherwise it resolves the given
+// id to a provider, mutates live so the next turn uses it, and returns a status
+// line. It is exported so an interactive picker (the TUI's model chooser) can
+// perform the exact same switch as typing "/model <id>", including the two
+// special cases below.
+func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
+	id := strings.TrimSpace(args)
+	if id == "" {
+		return fmt.Sprintf("model: %s (provider: %s)\nrun /models to see presets, or /model <id> to switch", live.Model, live.ProviderName)
+	}
+	// A bare provider name ("zai") selects that provider's default model
+	// (issue #564): carry the canonical id into live.Model so the wire request
+	// and status bar show a real model id.
+	// An id from the fetched online catalog (issue #566) stays on the gateway
+	// that served it: resolve with the live provider name explicit instead of
+	// the heuristic chain, which could route a gateway-specific id to OpenRouter.
+	if providerName := live.ProviderName; len(live.FetchedModels) > 0 && slices.Contains(live.FetchedModels, id) {
+		prov, name, err := provider.ResolveProvider(id, live.BaseURL, live.Protocol, providerName, os.Getenv)
+		if err != nil {
+			return fmt.Sprintf("model: cannot switch to %q: %v", id, err)
+		}
+		live.Model = id
+		live.ProviderName = name
+		live.Provider = prov
+		return fmt.Sprintf("model switched to %s (provider: %s, from fetched catalog)", id, name)
+	}
+	model := provider.CanonicalizeModel(id)
+	prov, providerName, err := provider.ResolveProvider(model, live.BaseURL, live.Protocol, "", os.Getenv)
+	if err != nil {
+		return fmt.Sprintf("model: cannot switch to %q: %v", id, err)
+	}
+	live.Model = model
+	live.ProviderName = providerName
+	live.Provider = prov
+	return fmt.Sprintf("model switched to %s (provider: %s)", model, providerName)
+}
+
+// ModelChoice is one selectable row of the interactive model picker: the id to
+// pass to ApplyModelSwitch, the provider that serves it, and the human label to
+// show. Front-ends render Label and switch to ID, so a picker can never drift
+// from the "/model <id>" path.
+type ModelChoice struct {
+	Provider string
+	ID       string
+	Label    string
+}
+
+// ModelChoices assembles the model catalog an interactive picker offers, from
+// the same sources "/models" lists: the models fetched from the live endpoint
+// (issue #566), then every preset provider's curated models in catalog order.
+// The fetched ids lead because they are the real catalog of the endpoint the
+// session is actually talking to; entries already present as presets are not
+// repeated. Custom providers registered from config are included automatically
+// because they append to the preset registry. Only provider names and model ids
+// are carried — never credentials.
+func ModelChoices(live *cli.LiveConfig) []ModelChoice {
+	var out []ModelChoice
+	seen := make(map[string]bool)
+	add := func(providerName, id, label string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		if label == "" {
+			label = id
+		}
+		out = append(out, ModelChoice{Provider: providerName, ID: id, Label: label})
+	}
+	if live != nil {
+		for _, id := range live.FetchedModels {
+			add(live.ProviderName, id, id+"  (fetched)")
+		}
+		for _, pv := range provider.PresetProvidersSnapshot() {
+			for _, m := range provider.PresetsByProvider(pv.Name) {
+				label := m.ID
+				if m.DisplayName != "" {
+					label = m.DisplayName + "  ·  " + m.ID
+				}
+				add(m.Provider, m.ID, label)
+			}
+		}
+	}
+	return out
+}
+
 func formatNotifications(notes []plugin.CommandNotification) string {
 	if len(notes) == 0 {
 		return ""
@@ -267,36 +353,7 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig, cred
 		Name:        "model",
 		Description: "view or switch the active model: /model [model-id] (see /models for presets)",
 		Action: func(args string) string {
-			id := strings.TrimSpace(args)
-			if id == "" {
-				return fmt.Sprintf("model: %s (provider: %s)\nrun /models to see presets, or /model <id> to switch", live.Model, live.ProviderName)
-			}
-			// A bare provider name ("zai") selects that provider's default
-			// model (issue #564): carry the canonical id into live.Model so
-			// the wire request and status bar show a real model id.
-			// An id from the fetched online catalog (issue #566) stays on the
-			// gateway that served it: resolve with the live provider name
-			// explicit instead of the heuristic chain, which could route a
-			// gateway-specific id to OpenRouter.
-			if providerName := live.ProviderName; len(live.FetchedModels) > 0 && slices.Contains(live.FetchedModels, id) {
-				prov, name, err := provider.ResolveProvider(id, live.BaseURL, live.Protocol, providerName, os.Getenv)
-				if err != nil {
-					return fmt.Sprintf("model: cannot switch to %q: %v", id, err)
-				}
-				live.Model = id
-				live.ProviderName = name
-				live.Provider = prov
-				return fmt.Sprintf("model switched to %s (provider: %s, from fetched catalog)", id, name)
-			}
-			model := provider.CanonicalizeModel(id)
-			prov, providerName, err := provider.ResolveProvider(model, live.BaseURL, live.Protocol, "", os.Getenv)
-			if err != nil {
-				return fmt.Sprintf("model: cannot switch to %q: %v", id, err)
-			}
-			live.Model = model
-			live.ProviderName = providerName
-			live.Provider = prov
-			return fmt.Sprintf("model switched to %s (provider: %s)", model, providerName)
+			return ApplyModelSwitch(live, args)
 		},
 	})
 	reg.AddBuiltin(runtime.SlashCommand{

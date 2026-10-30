@@ -282,6 +282,7 @@ func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr
 	m.subagents = subagentPanel{}
 	m.sel = selection{}
 	m.picker.close()
+	m.modelPicker.close()
 	m.menu.close()
 	m.running = false
 	m.runCh = nil

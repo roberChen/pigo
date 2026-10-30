@@ -39,6 +39,15 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **TUI: the `/model` picker is navigable from the keyboard**: a bare `/model`
+  (or `/models`) opens a filterable overlay instead of printing the catalog, and
+  the highlight now moves with `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`), wrapping at both
+  ends; `PgUp`/`PgDn` jump a screenful and clamp at the edges, `Home`/`End` jump to
+  the first/last row, and the mouse wheel walks the list too. The filter line
+  shows the position (`(12/95)`) so a long catalog does not hide where the cursor
+  is, typing resets the cursor to the first match, and `Enter` performs exactly the
+  `/model <id>` switch through `prompts.ApplyModelSwitch` (the status bar updates
+  immediately).
 - **TUI: reasoning, per-tool cards, card selection and input marking**: the TUI
   now shows a model's reasoning as a dim `✻ thinking` block capped at six lines, and
   a user turn carries a `▌ you` gutter with long input capped and counted, so the
