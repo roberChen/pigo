@@ -404,6 +404,14 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 
 REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
+### TUI 显示与工具卡
+
+- **用户输入有标记**：每条人类输入带 `▌ you` 侧栏，换行后每一行都保留侧栏，不会和模型输出混在一起；超长输入（例如粘贴整个文件）只显示前 12 行并提示 `… N more lines (see /export)`。
+- **思考内容**：推理模型的思考流以暗色 `✻ thinking` 块显示在回答上方，最多 6 行（后面用 `… N more lines` 收尾），不会挤占回答。
+- **工具卡按工具渲染**：`bash` 头部是命令、输出保留**开头与结尾**（中间省略，失败日志的结尾才是有用信息）；`read`/`write`/`edit` 头部是路径、只列 offset/limit 等额外参数、改动以彩色 diff 区块展示；`grep`/`find` 头部是 pattern；`webfetch`/`websearch` 是 url/query；`todo` 渲染成 `[x]/[~]/[ ]` 清单 + `1/3 completed`；**MCP 工具**只显示 `mcp server/tool`、单行参数摘要与结果预览，不再整段打印 JSON 与全文；未知/插件工具同样精简。
+- **长内容限行**：每个区块都有行数预算，超出时以 `… N more lines · Ctrl+O` 标注（展开后仍有上限，可用 `/export` 取全文）。
+- **手动选择与展开**：点击任意历史工具卡即可展开/收起（按住拖动仍是文本选择）；`Alt+↑` / `Alt+↓` 在工具卡之间移动选择（选中卡片边框高亮），`Ctrl+O` 展开/收起选中卡片（未选中时作用于最新一张）；点击空白处取消选择。
+
 在交互终端输入时，pigo 会用灰色文字提示最近匹配的输入或斜杠命令；
 输入 `/model ` 时还会从最近使用的模型和内置模型目录中匹配。按 `Tab`
 或右方向键接受当前提示；当有多个匹配时，按上/下方向键可在候选提示之间

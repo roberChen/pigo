@@ -277,6 +277,7 @@ func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr
 	m.transcript = newTranscript(m.theme)
 	m.transcript.addBanner(renderBanner(m.theme, m.opts, m.cwd))
 	m.toolCards = make(map[string]*toolCard)
+	m.selectedCardID = ""
 	m.lastToolCard = nil
 	m.subagents = subagentPanel{}
 	m.sel = selection{}
@@ -298,6 +299,7 @@ func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr
 	// Replay the conversation, tool cards included, and leave Ctrl+O pointing at
 	// the last replayed call as a live run would.
 	m.lastToolCard = seedTranscript(&m.transcript, history)
+	m.indexTranscriptCards()
 	m.relayout()
 	if saveErr != nil {
 		m.transcript.addSystem("warning: could not save the previous session: " + saveErr.Error())

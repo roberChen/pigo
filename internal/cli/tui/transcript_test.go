@@ -221,9 +221,9 @@ func TestTranscriptScrollbar(t *testing.T) {
 	tr := newTranscript(DefaultTheme())
 	tr.setSize(20, 4) // 4 visible rows
 
-	// Two short lines fit in 4 rows: no scrollbar at all — no thumb, no groove.
+	// One short turn (gutter label + one line) fits in 4 rows: no scrollbar at
+	// all — no thumb, no groove.
 	tr.addUser("one")
-	tr.addUser("two")
 	if tr.overflowing() {
 		t.Fatal("transcript should not overflow while content fits")
 	}
@@ -430,11 +430,13 @@ func TestToolCardExpandInvalidatesRender(t *testing.T) {
 	}
 	m = apply(t, m, toolEndMsg{id: "c1", ok: true, result: strings.Join(lines, "\n")})
 
-	if content := stripANSI(m.View().Content); !strings.Contains(content, "(Ctrl+O for more)") {
+	if content := stripANSI(m.View().Content); !strings.Contains(content, "Ctrl+O") {
 		t.Fatalf("collapsed card should advertise the expand hint; got:\n%s", content)
 	}
-	if content := stripANSI(m.View().Content); strings.Contains(content, "row-10") {
-		t.Fatal("collapsed card should cap its response lines")
+	// Collapsed command output keeps its head and its tail, so a row from the middle
+	// of the log is what disappears.
+	if content := stripANSI(m.View().Content); strings.Contains(content, "row-04") {
+		t.Fatal("collapsed card should cap the middle of a long response")
 	}
 
 	m = apply(t, m, tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})

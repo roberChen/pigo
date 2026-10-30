@@ -379,7 +379,7 @@ func TestResumeSeedsUnparsedToolArguments(t *testing.T) {
 		t.Errorf("state = %v, want warn (the call errored)", card.state)
 	}
 	out := card.render(DefaultTheme(), 60)
-	if !strings.Contains(out, "Input arguments (unparsed)") || !strings.Contains(out, badArgs) {
+	if !strings.Contains(out, "args (unparsed)") || !strings.Contains(out, badArgs) {
 		t.Errorf("restored card does not show the malformed payload:\n%s", out)
 	}
 }

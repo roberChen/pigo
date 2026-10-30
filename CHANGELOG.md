@@ -32,6 +32,18 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **TUI: reasoning, per-tool cards, card selection and input marking**: the TUI
+  now shows a model's reasoning as a dim `✻ thinking` block capped at six lines, and
+  a user turn carries a `▌ you` gutter with long input capped and counted, so the
+  human's words are never confused with model output. Tool cards render by tool
+  instead of dumping every argument and every result line: bash keeps its command in
+  the header and shows the head and tail of its output, read/write/edit show the path
+  plus a colored diff, grep/find show their pattern, todo renders a status checklist
+  with a progress line, and an MCP tool shows `mcp server/tool` with a one-line
+  argument summary and a short result preview instead of the full JSON and response.
+  Every section has a line budget and says how much it hides. Any card in the history
+  can be picked — click it, or walk the cards with Alt+↑/Alt+↓ — and Ctrl+O (or a
+  second click) expands or collapses that card, not just the newest one.
 - **`/new` starts a fresh empty session**: the interactive modes can now begin a
   new conversation without restarting pigo. It persists the outgoing session first,
   so nothing is lost and `/resume` (or `--resume`) brings it back, then mints a new

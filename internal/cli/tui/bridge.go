@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
 )
 
@@ -56,6 +57,16 @@ func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime
 				extra(ev)
 			}
 			switch e := ev.(type) {
+			case agentcore.MessageUpdateEvent:
+				// Only reasoning updates are interesting here: text already streams
+				// through OnText, and tool-call deltas are shown by the tool cards.
+				if _, ok := e.AssistantMessageEvent.(provider.StreamThinkingEvent); ok {
+					if partial, ok := e.Message.(agentcore.AssistantMessage); ok {
+						if text := agentcore.ThinkingText(partial.Content); text != "" {
+							ch <- thinkingDeltaMsg{text: text}
+						}
+					}
+				}
 			case agentcore.ToolExecutionStartEvent:
 				input := argsToMap(e.Args)
 				ch <- toolStartMsg{id: e.ToolCallID, name: e.ToolName, input: input, rawArgs: rawToolArgs(e.Args, input)}

@@ -533,6 +533,12 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 				t.activeAssistant = -1
 			}
 		case agentcore.AssistantMessage:
+			// Reasoning replays as its own (capped) block, above the answer it
+			// produced, so a resumed conversation shows what the model was thinking
+			// rather than dropping that content.
+			if thinking := agentcore.ThinkingText(msg.Content); thinking != "" {
+				t.blocks = append(t.blocks, transcriptBlock{role: roleThinking, text: thinking})
+			}
 			if text := agentcore.ContentToText(msg.Content); text != "" {
 				t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant, text: text})
 			}

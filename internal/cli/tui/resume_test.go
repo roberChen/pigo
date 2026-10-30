@@ -259,7 +259,7 @@ func TestResumeRendersToolCards(t *testing.T) {
 
 	m := resumeTestModel(t, store, id)
 	content := stripANSI(m.View().Content)
-	for _, want := range []string{"read(main.go)", "Input arguments", "package main", "✓"} {
+	for _, want := range []string{"read(main.go)", "inspect main.go", "package main", "✓"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("restored view is missing %q:\n%s", want, content)
 		}

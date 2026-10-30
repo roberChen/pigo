@@ -20,6 +20,19 @@ func ContentToText(list ContentList) string {
 	return b.String()
 }
 
+// ThinkingText returns the concatenated thinking blocks of list. Reasoning models
+// stream their chain of thought as ThinkingContent; this is how a front-end reads it
+// without reaching into the block types.
+func ThinkingText(list ContentList) string {
+	var b strings.Builder
+	for _, c := range list {
+		if tc, ok := c.(ThinkingContent); ok {
+			b.WriteString(tc.Thinking)
+		}
+	}
+	return b.String()
+}
+
 // LastAssistantOf returns a pointer to the last AssistantMessage in msgs, or nil.
 func LastAssistantOf(msgs []AgentMessage) *AssistantMessage {
 	for i := len(msgs) - 1; i >= 0; i-- {

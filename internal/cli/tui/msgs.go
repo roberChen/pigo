@@ -15,6 +15,11 @@ import "github.com/smallnest/pigo/internal/agentcore"
 // OnText contract).
 type textDeltaMsg struct{ delta string }
 
+// thinkingDeltaMsg carries the accumulated reasoning text of the current turn (the
+// provider sends the whole partial each time, not a delta), so the transcript can
+// replace the streaming thinking block instead of appending to it.
+type thinkingDeltaMsg struct{ text string }
+
 // turnEndMsg fires once per completed turn with the final assistant message and
 // the tool results produced during it.
 type turnEndMsg struct {

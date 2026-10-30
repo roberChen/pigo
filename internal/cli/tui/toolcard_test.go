@@ -56,7 +56,7 @@ func TestToolCardRender(t *testing.T) {
 				state:    tc.state,
 			}
 			out := card.render(theme, 60)
-			for _, want := range []string{"read_file", tc.icon, "Input arguments", "path: /tmp/x", "Response", "line one", "nested"} {
+			for _, want := range []string{"read_file", tc.icon, "path: /tmp/x", "line one", "nested"} {
 				if !strings.Contains(out, want) {
 					t.Errorf("render missing %q\n%s", want, out)
 				}
@@ -70,7 +70,7 @@ func TestToolCardRender(t *testing.T) {
 func TestToolCardExpandTruncation(t *testing.T) {
 	theme := DefaultTheme()
 	var b strings.Builder
-	for i := 0; i < collapsedResponseLines+3; i++ {
+	for i := 0; i < cardPreviewLines+3; i++ {
 		b.WriteString("resp-line-")
 		b.WriteByte(byte('a' + i))
 		b.WriteByte('\n')
@@ -78,18 +78,18 @@ func TestToolCardExpandTruncation(t *testing.T) {
 	card := toolCard{name: "grep", response: parseToolResult(b.String()), state: cardSuccess}
 
 	collapsed := card.render(theme, 60)
-	if !strings.Contains(collapsed, "(Ctrl+O for more)") {
+	if !strings.Contains(collapsed, "Ctrl+O") {
 		t.Errorf("collapsed card should show Ctrl+O hint\n%s", collapsed)
 	}
-	lastLine := "resp-line-" + string(byte('a'+collapsedResponseLines+2))
+	lastLine := "resp-line-" + string(byte('a'+cardPreviewLines+2))
 	if strings.Contains(collapsed, lastLine) {
 		t.Errorf("collapsed card should not show %q\n%s", lastLine, collapsed)
 	}
 
 	card.expanded = true
 	expanded := card.render(theme, 60)
-	if strings.Contains(expanded, "(Ctrl+O for more)") {
-		t.Errorf("expanded card should not show Ctrl+O hint\n%s", expanded)
+	if strings.Contains(expanded, "more lines") {
+		t.Errorf("expanded card should not show a truncation hint\n%s", expanded)
 	}
 	if !strings.Contains(expanded, lastLine) {
 		t.Errorf("expanded card should show %q\n%s", lastLine, expanded)
@@ -147,9 +147,8 @@ func TestToolCardDiffSection(t *testing.T) {
 
 	for _, want := range []string{
 		"edit(f.txt)",
-		"Response",
 		"Edited f.txt (1 replacement(s))",
-		"Diff",
+		"diff",
 		"--- a/f.txt",
 		"@@ -1,3 +1,3 @@",
 		"-beta",
@@ -191,7 +190,7 @@ func TestToolCardDiffCollapseExpand(t *testing.T) {
 	}
 
 	collapsed := card.render(theme, 60)
-	if !strings.Contains(collapsed, "(Ctrl+O for more)") {
+	if !strings.Contains(collapsed, "Ctrl+O") {
 		t.Errorf("collapsed card should show Ctrl+O hint\n%s", collapsed)
 	}
 	// The cap counts all diff lines, so the 2 header lines leave room for
@@ -202,8 +201,8 @@ func TestToolCardDiffCollapseExpand(t *testing.T) {
 
 	card.expanded = true
 	expanded := card.render(theme, 60)
-	if strings.Contains(expanded, "(Ctrl+O for more)") {
-		t.Errorf("expanded card should not show Ctrl+O hint\n%s", expanded)
+	if strings.Contains(expanded, "more lines") {
+		t.Errorf("expanded card should not show a truncation hint\n%s", expanded)
 	}
 	if got := strings.Count(expanded, "+line"); got != collapsedDiffLines+3 {
 		t.Errorf("expanded card shows %d additions, want %d\n%s", got, collapsedDiffLines+3, expanded)
@@ -283,7 +282,7 @@ func TestModelCtrlOTogglesExpanded(t *testing.T) {
 	mm := next.(Model)
 
 	var b strings.Builder
-	for i := 0; i < collapsedResponseLines+3; i++ {
+	for i := 0; i < cardPreviewLines+3; i++ {
 		b.WriteString("row")
 		b.WriteByte(byte('0' + i))
 		b.WriteByte('\n')
@@ -323,7 +322,7 @@ func TestToolCardRendersUnparsedArguments(t *testing.T) {
 		t.Fatal("rawArgs should keep the malformed payload")
 	}
 	out := card.render(theme, 60)
-	for _, want := range []string{"todo", "Input arguments (unparsed)", `{"todos": []{}}`} {
+	for _, want := range []string{"todo", "args (unparsed)", `{"todos": []{}}`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q\n%s", want, out)
 		}

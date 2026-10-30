@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
@@ -28,6 +29,7 @@ const (
 	roleAssistant
 	roleSystem
 	roleTool
+	roleThinking
 	// roleBanner is the startup logo + config splash. Its text is pre-rendered
 	// (already colored, already laid out) and emitted verbatim, so reflow neither
 	// wraps it nor overrides its colors with a role style.
@@ -82,6 +84,10 @@ type transcript struct {
 
 	blocks          []transcriptBlock
 	activeAssistant int
+	// activeThinking indexes the thinking block currently receiving streamed
+	// reasoning deltas, or -1 when none is streaming. The block keeps its text after
+	// the turn ends; only the live index is reset.
+	activeThinking int
 
 	// follow is the stick-to-bottom intent: while true, every reflow snaps the
 	// viewport to the newest line so streamed output stays visible. It is set
@@ -109,6 +115,7 @@ func newTranscript(theme Theme) transcript {
 		vp:              vp,
 		theme:           theme,
 		activeAssistant: -1,
+		activeThinking:  -1,
 	}
 }
 
@@ -157,8 +164,31 @@ func (t *transcript) invalidateRenders() {
 func (t *transcript) addUser(text string) {
 	t.blocks = append(t.blocks, transcriptBlock{role: roleUser, text: text})
 	t.activeAssistant = -1
+	t.activeThinking = -1
 	t.follow = true
 	t.reflow()
+}
+
+// setThinking writes the accumulated reasoning text of the current turn into the
+// streaming thinking block (creating it on the first delta). The provider sends the
+// whole partial each time, so the block is replaced rather than appended to; the
+// rendered view caps it (see renderBlock), so a long chain of thought cannot push
+// the answer off the screen.
+func (t *transcript) setThinking(text string) {
+	if t.activeThinking < 0 {
+		t.blocks = append(t.blocks, transcriptBlock{role: roleThinking, text: text})
+		t.activeThinking = len(t.blocks) - 1
+	} else {
+		t.blocks[t.activeThinking].text = text
+		t.blocks[t.activeThinking].renderOK = false
+	}
+	t.reflow()
+}
+
+// endThinking closes the streaming thinking block. The text stays in the
+// transcript (capped) so the reasoning remains readable after the turn.
+func (t *transcript) endThinking() {
+	t.activeThinking = -1
 }
 
 // addSystem appends a system / meta notice (used for run lifecycle and other
@@ -203,6 +233,7 @@ func (t *transcript) appendDelta(delta string) {
 // carries text it becomes the block's authoritative body (covering turns that
 // arrive without incremental deltas); otherwise the accumulated deltas stand.
 func (t *transcript) finalizeTurn(msg agentcore.AssistantMessage) {
+	t.endThinking()
 	text := agentcore.ContentToText(msg.Content)
 	if t.activeAssistant >= 0 {
 		if text != "" {
@@ -481,13 +512,23 @@ func (t *transcript) blockView(i int) string {
 	return out
 }
 
+// userPreviewLines / thinkingPreviewLines cap how much of a user turn and of a
+// thinking block the transcript shows. Both can be arbitrarily long (a pasted file,
+// a long chain of thought) and neither is the answer, so both are budgeted.
+const (
+	userPreviewLines     = 12
+	thinkingPreviewLines = 6
+)
+
 // renderBlock wraps a block's text to width and applies the role's theme style.
 // Wrapping happens on the raw text (measured in display columns via WrapToWidth)
 // before styling so ANSI escapes never confuse the width math and no double-width
 // rune is split. A finalized assistant block is rendered as Markdown (fix #3,
 // mirroring the REPL's turn-end render); the still-streaming block
 // (streaming==true) stays plain text because Markdown can only be laid out once
-// the whole block is known.
+// the whole block is known. A user turn carries a "▌ you" gutter so the human's
+// input is impossible to confuse with model output, and thinking blocks render dim,
+// labeled and capped.
 func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) string {
 	if blk.role == roleTool && blk.card != nil {
 		return blk.card.render(theme, width)
@@ -496,13 +537,145 @@ func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) st
 	case roleBanner:
 		return blk.text
 	case roleUser:
-		return theme.User.Render(WrapToWidth(blk.text, width))
+		return renderUserTurn(theme, blk.text, width)
 	case roleSystem:
 		return theme.System.Render(WrapToWidth(blk.text, width))
+	case roleThinking:
+		return renderThinking(theme, blk.text, width)
 	default:
 		if streaming {
 			return theme.Assistant.Render(WrapToWidth(blk.text, width))
 		}
 		return renderMarkdown(blk.text, width)
 	}
+}
+
+// renderUserTurn renders a human turn behind a "▌ you" gutter: the label on the
+// first row, then one bar-prefixed row per wrapped line, capped at userPreviewLines
+// with a count of what is hidden. The gutter is what visually separates the human's
+// words from the model's, which matters most in a transcript where both are plain
+// text and a pasted block can look like an answer.
+func renderUserTurn(theme Theme, text string, width int) string {
+	bar := theme.User.Render("▌")
+	inner := width - 2 // the gutter takes a bar plus a space
+	if inner < 1 {
+		inner = 1
+	}
+	var rows []string
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		for _, row := range strings.Split(WrapToWidth(line, inner), "\n") {
+			rows = append(rows, row)
+		}
+	}
+	shown, hidden := clampStrings(rows, userPreviewLines, false)
+
+	var b strings.Builder
+	b.WriteString(bar + " " + theme.Accent.Render("you"))
+	for _, row := range shown {
+		b.WriteString("\n" + bar + " " + theme.User.Render(row))
+	}
+	if hidden > 0 {
+		b.WriteString("\n" + bar + " " + theme.System.Render(fmt.Sprintf("… %d more lines (see /export)", hidden)))
+	}
+	return b.String()
+}
+
+// renderThinking renders a reasoning block: a dim label, the first
+// thinkingPreviewLines rows indented, and a count of the rows left out. The full
+// reasoning finishes in the session file; the transcript only needs enough to see
+// what the model is thinking about.
+func renderThinking(theme Theme, text string, width int) string {
+	inner := width - 2
+	if inner < 1 {
+		inner = 1
+	}
+	rows := strings.Split(strings.TrimRight(WrapToWidth(text, inner), "\n"), "\n")
+	shown, hidden := clampStrings(rows, thinkingPreviewLines, false)
+
+	var b strings.Builder
+	b.WriteString(theme.System.Render("✻ thinking"))
+	for _, row := range shown {
+		b.WriteString("\n" + theme.System.Render("  "+row))
+	}
+	if hidden > 0 {
+		b.WriteString("\n" + theme.System.Render(fmt.Sprintf("  … %d more lines", hidden)))
+	}
+	return b.String()
+}
+
+// blockAtRow maps a transcript content row (0-based, counting from the top of the
+// rendered log) to the block drawn there. It mirrors renderAll's separator rules, so
+// a mouse click can be attributed to the card under the cursor.
+func (t *transcript) blockAtRow(row int) (int, bool) {
+	if row < 0 {
+		return 0, false
+	}
+	for i := range t.blocks {
+		start := t.blockStartRow(i)
+		if row < start {
+			return 0, false
+		}
+		if row < start+t.blockHeight(i) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// blockStartRow returns the content row where block i begins, counting the blank
+// line(s) renderAll inserts between blocks.
+func (t *transcript) blockStartRow(i int) int {
+	at := 0
+	for j := 0; j < i && j < len(t.blocks); j++ {
+		at += t.blockHeight(j) + t.separatorRows(j+1)
+	}
+	return at
+}
+
+// blockHeight is the number of rows block i renders to.
+func (t *transcript) blockHeight(i int) int {
+	if i < 0 || i >= len(t.blocks) {
+		return 0
+	}
+	return strings.Count(t.blockView(i), "\n") + 1
+}
+
+// separatorRows is how many blank rows precede block i in the rendered log.
+func (t *transcript) separatorRows(i int) int {
+	if i <= 0 || i >= len(t.blocks) {
+		return 0
+	}
+	if t.blocks[i].role == roleUser {
+		return 2
+	}
+	return 1
+}
+
+// revealBlock scrolls the viewport the least amount needed to show block i
+// completely (or its first row when it is taller than the viewport), and pauses
+// follow so the transcript does not snap back to the bottom on the next reflow.
+func (t *transcript) revealBlock(i int) {
+	if i < 0 || i >= len(t.blocks) {
+		return
+	}
+	h := t.vp.Height()
+	if h <= 0 {
+		return
+	}
+	start := t.blockStartRow(i)
+	height := t.blockHeight(i)
+	offset := t.vp.YOffset()
+	switch {
+	case start < offset:
+		t.vp.SetYOffset(start)
+	case start+height > offset+h:
+		target := start + height - h
+		if target < start {
+			target = start // taller than the viewport: show its top
+		}
+		t.vp.SetYOffset(target)
+	default:
+		return
+	}
+	t.follow = false
 }

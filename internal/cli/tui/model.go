@@ -129,8 +129,14 @@ type Model struct {
 	// next reflow.
 	toolCards map[string]*toolCard
 	// lastToolCard points at the most recently started card; Ctrl+O toggles its
-	// expanded state and re-flows the transcript.
+	// expanded state and re-flows the transcript when no card is selected.
 	lastToolCard *toolCard
+	// selectedCardID is the tool card the user picked (a click or card navigation).
+	// It is the target of Ctrl+O and wears an accent border; "" means none.
+	selectedCardID string
+	// pressedCardID remembers the card under a left press so a click without a drag
+	// toggles it on release (a drag stays a text selection).
+	pressedCardID string
 
 	// draggingScrollbar is set while the left mouse button is held after pressing
 	// on the transcript scrollbar column, so subsequent motion events drag the
@@ -230,6 +236,9 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	// Point Ctrl+O at the last replayed tool card, the way a live run leaves it on
 	// the most recently started call.
 	m.lastToolCard = seedTranscript(&m.transcript, history)
+	// Make the replayed cards selectable: before this they existed only as transcript
+	// blocks, so clicking one (or Ctrl+O after selecting it) had nothing to toggle.
+	m.indexTranscriptCards()
 	return m
 }
 
@@ -290,6 +299,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcript.scrollToRow(msg.Y)
 				return m, nil
 			}
+			// Remember the card under the press: a click (press+release without a
+			// drag) toggles it, while a drag stays a text selection.
+			m.pressedCardID = m.cardIDAtScreenY(msg.Y)
 			m.sel = selection{active: true, anchor: point{msg.X, msg.Y}, cursor: point{msg.X, msg.Y}}
 			return m, nil
 		}
@@ -312,6 +324,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.draggingScrollbar = false
 		if m.sel.active {
 			m.sel.cursor = point{msg.X, msg.Y}
+		}
+		// A bare click (no drag) on a tool card selects it and flips its expansion, so
+		// any card in the history can be opened and closed — not just the newest one.
+		if pressed := m.pressedCardID; pressed != "" {
+			m.pressedCardID = ""
+			if m.sel.empty() && m.selectCard(pressed) {
+				m.toggleSelectedCard()
+				return m, nil
+			}
+		}
+		// A click on empty transcript space (no drag, no card) drops the card
+		// selection, which is how the keyboard targets are reset.
+		if m.sel.empty() && m.selectedCardID != "" {
+			m.clearCardSelection()
+			m.transcript.reflow()
 		}
 		return m, nil
 
@@ -376,6 +403,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.spinner.advance()
 		return m, m.tickSpinner()
+
+	case thinkingDeltaMsg:
+		// Reasoning streams as a dim, capped block above the answer. It is not
+		// echoed to a remote viewer: the client shows the answer, not the model's
+		// internal deliberation.
+		m.transcript.setThinking(msg.text)
+		return m, m.pumpNext()
 
 	case textDeltaMsg:
 		m.spinner.addTokens(msg.delta)
@@ -750,12 +784,23 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		return m.interruptOrQuit()
 	case "ctrl+o":
-		// Toggle the most-recent tool card between its capped preview and the full
-		// response tree, then re-flow so the change shows inline (#389).
+		// Toggle a tool card between its capped preview and the full content: the card
+		// the user selected if there is one, otherwise the most recent card (#389).
+		if m.selectedCardID != "" {
+			m.toggleSelectedCard()
+			return m, nil
+		}
 		if m.lastToolCard != nil {
 			m.lastToolCard.toggleExpanded()
 			m.transcript.reflow()
+			m.revealCard(m.lastToolCard.id)
 		}
+		return m, nil
+	case "alt+up", "alt+down":
+		// Move the tool-card selection through the transcript (Alt, because plain
+		// ↑/↓ belong to prompt history and the caret). Ctrl+O or a click then toggles
+		// the selected card.
+		m.handleCardKey(msg.String())
 		return m, nil
 	case "ctrl+d":
 		// Ctrl+D quits only when idle; mid-run it is ignored so a run is never
