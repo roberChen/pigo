@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 
 	"github.com/smallnest/pigo/internal/agenttool"
-	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/mcp"
 )
 
@@ -463,23 +463,20 @@ func (c toolCard) headerOnlyArgs() map[string]bool {
 	return nil
 }
 
-// mcpArgSummary collapses an MCP call's arguments into one compact line: the JSON
-// object while it is small, otherwise the first argument's value.
+// mcpArgSummary renders an MCP call's arguments as one compact JSON object. It is
+// clipped to the card width by the caller, so the card shows every field of the
+// call (a server's schema can be many keys) without spending a line per key, and
+// without picking one "most important" argument the way a hand-written summary
+// would have to guess.
 func (c toolCard) mcpArgSummary() string {
 	if len(c.input) == 0 {
 		return ""
 	}
-	if raw, err := json.Marshal(c.input); err == nil {
-		if s := string(raw); ui.Width(s) <= 100 {
-			return s
-		}
+	raw, err := json.Marshal(c.input)
+	if err != nil {
+		return fmt.Sprintf("%v", c.input)
 	}
-	for _, k := range sortedKeys(c.input) {
-		if v := strings.TrimSpace(fmt.Sprintf("%v", c.input[k])); v != "" {
-			return k + "=" + v
-		}
-	}
-	return ""
+	return string(raw)
 }
 
 // todoLines renders a todo call as a checklist with per-status styling and a
@@ -726,6 +723,10 @@ func maxInt(a, b int) int {
 // clipLine collapses s onto one line and truncates it to limit runes, backing up to a
 // word boundary when there is one near the cut so a header or argument summary does
 // not end mid-word.
+//
+// The search for that boundary walks the rune slice. Using a string offset here
+// would mix units: a byte index into a CJK (or emoji) string is several times the
+// rune count, so slicing the rune slice at it runs past the end and panics.
 func clipLine(s string, limit int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	runes := []rune(s)
@@ -733,8 +734,11 @@ func clipLine(s string, limit int) string {
 		return s
 	}
 	cut := limit
-	if sp := strings.LastIndex(string(runes[:cut]), " "); sp > cut/2 {
-		cut = sp
+	for i := cut - 1; i >= cut/2; i-- {
+		if unicode.IsSpace(runes[i]) {
+			cut = i
+			break
+		}
 	}
 	return string(runes[:cut]) + "…"
 }

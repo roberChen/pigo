@@ -174,3 +174,55 @@ func TestClampStrings(t *testing.T) {
 		t.Errorf("content under the cap should pass through unchanged: %v (%d hidden)", all, hidden)
 	}
 }
+
+// TestClipLineMultibyte verifies clipping is measured in runes, not bytes. The
+// panic this replaced was a byte offset from strings.LastIndex used as a rune
+// index: on CJK text the space sits far past the rune budget, so slicing the rune
+// slice at it ran out of range and took the whole TUI down while rendering a card.
+func TestClipLineMultibyte(t *testing.T) {
+	// 70 CJK runes, a space, then 58 more: the space is rune 70 but byte 210, and
+	// the budget is 128 runes — the exact shape that panicked.
+	long := strings.Repeat("中", 70) + " " + strings.Repeat("文", 58)
+	got := clipLine(long, 128)
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("clipLine(%d runes) = %q, want a clipped value", len([]rune(long)), got)
+	}
+	if runes := []rune(got); len(runes) > 129 {
+		t.Errorf("clipped value is %d runes, want the 128-rune budget plus the ellipsis", len(runes))
+	}
+	if !strings.HasPrefix(got, strings.Repeat("中", 70)+"…") {
+		t.Errorf("clipLine should back up to the word boundary, got %q", got)
+	}
+
+	// No boundary anywhere: it must still truncate instead of panicking.
+	dense := strings.Repeat("中文无空格", 40)
+	got = clipLine(dense, 40)
+	if runes := []rune(got); len(runes) != 41 || runes[40] != '…' {
+		t.Errorf("dense CJK clip = %d runes, want a 40-rune cut plus the ellipsis", len(runes))
+	}
+
+	// A short value passes through untouched.
+	if got := clipLine("短文本", 40); got != "短文本" {
+		t.Errorf("short value = %q, want it unchanged", got)
+	}
+}
+
+// TestToolCardRendersMultibyteArgs verifies rendering a card whose arguments are
+// long CJK text (an MCP call in a Chinese conversation) does not panic end to end,
+// including through the transcript's reflow.
+func TestToolCardRendersMultibyteArgs(t *testing.T) {
+	card := newToolCard("c1", "mcp__notes__write", map[string]any{
+		"text": strings.Repeat("会议纪要：这是一段很长的中文内容", 8),
+	})
+	card.complete(cardSuccess, parseToolResult(strings.Repeat("结果行\n", 30)), "")
+	if out := cardRender(card); !strings.Contains(out, "mcp notes/write") {
+		t.Errorf("card header missing:\n%s", out)
+	}
+
+	tr := newTranscript(DefaultTheme())
+	tr.setSize(70, 30)
+	tr.addToolCard(card)
+	if got := stripANSI(tr.vp.GetContent()); !strings.Contains(got, "会议纪要") {
+		t.Errorf("card content missing after reflow:\n%s", got)
+	}
+}

@@ -12,6 +12,13 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **Tool cards no longer crash the TUI on non-ASCII arguments**: the card's
+  line-clipping helper measured a word boundary in bytes and then sliced runes, so a
+  long CJK argument (or any multibyte text past the clip budget) ran off the end of
+  the slice and took the whole session down while rendering. Clipping now walks runes
+  and backs up to a whitespace boundary only within the rune budget. An MCP call also
+  shows its arguments as one compact JSON object again, instead of an arbitrary
+  single key=value.
 - **Resuming a session loads the conversation you were on**: a session is a tree,
   and branching (`/tree` leaf switch, `/rewind`, a continued fork) leaves sibling
   branches in the same file. Resume used to read every entry in file order, so it
