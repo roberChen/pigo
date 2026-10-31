@@ -278,6 +278,7 @@ func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr
 	m.transcript.addBanner(renderBanner(m.theme, m.opts, m.cwd))
 	m.toolCards = make(map[string]*toolCard)
 	m.selectedCardID = ""
+	m.pressedTarget = rowTarget{}
 	m.lastToolCard = nil
 	m.subagents = subagentPanel{}
 	m.sel = selection{}

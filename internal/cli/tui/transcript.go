@@ -49,16 +49,19 @@ const (
 // never rendered and is cleared whenever the block's text changes;
 // renderWidth/renderRev record what the cache is valid for — the content width
 // the text was wrapped to and, for a tool card, the card revision it was
-// rendered from.
+// rendered from (see renderRev). renderHeight is the cached row count of that
+// render, so the row arithmetic behind clicks and the paint map never has to
+// re-scan a long transcript.
 type transcriptBlock struct {
 	role blockRole
 	text string
 	card *toolCard
 
-	rendered    string
-	renderWidth int
-	renderRev   int
-	renderOK    bool
+	rendered     string
+	renderWidth  int
+	renderRev    int
+	renderHeight int
+	renderOK     bool
 }
 
 // transcript is the scrolling message log. It wraps a viewport.Model and keeps
@@ -105,6 +108,28 @@ type transcript struct {
 	// per-block render cache only pays off when the width is stable). reflow
 	// clears it once the content fits again.
 	narrowed bool
+
+	// paint is the click map of the most recently painted frame: the collapsible
+	// block (a tool card) drawn at each visible screen row. A click
+	// resolves against it rather than against the live layout, because the transcript
+	// keeps changing between two frames — while a run streams, text appended after a
+	// frame was drawn moves every row under the cursor, and reading the live layout on
+	// click would toggle the block that *now* sits at that row instead of the one the
+	// user clicked. It is a pointer so the copies Model.Update makes of the
+	// transcript share the one record View writes.
+	paint *paintRows
+}
+
+// paintRows is the row → clickable-block map of one painted frame: targets[y] is
+// the block drawn at visible transcript row y, or the zero value for a row that
+// toggles nothing.
+type paintRows struct{ targets []rowTarget }
+
+// rowTarget names the block a painted row belongs to. role records what kind of
+// block it is (only tool cards are clickable for now) and id names it.
+type rowTarget struct {
+	role blockRole
+	id   string
 }
 
 // newTranscript builds an empty transcript with the given theme. The viewport
@@ -116,6 +141,7 @@ func newTranscript(theme Theme) transcript {
 		theme:           theme,
 		activeAssistant: -1,
 		activeThinking:  -1,
+		paint:           &paintRows{},
 	}
 }
 
@@ -319,6 +345,7 @@ func (t transcript) overflowing() bool {
 // scroll, so no bar is drawn and the viewport uses the full width (relayout
 // releases the reserved column in that case).
 func (t transcript) view() string {
+	t.recordPaint()
 	if !t.overflowing() {
 		return t.vp.View()
 	}
@@ -363,6 +390,59 @@ func fitLine(line string, width int) string {
 		}
 	}
 	return line + "\x1b[0m" + strings.Repeat(" ", width-w)
+}
+
+// recordPaint captures which tool card, if any, the frame about to be drawn puts
+// on each visible row. Click resolution reads this map instead of re-deriving the
+// layout from live state (cardIDAtScreenY), because between two frames the
+// transcript can append streamed output and scroll: the live layout is then a few
+// rows ahead of what the user's pointer is pointing at, and a click would toggle a
+// neighbouring card. The map walks the blocks once, which the cached row counts
+// make cheap, and stops as soon as it passes the visible window.
+func (t transcript) recordPaint() {
+	if t.paint == nil {
+		return
+	}
+	h := t.vp.Height()
+	if h <= 0 {
+		t.paint.targets = nil
+		return
+	}
+	targets := t.paint.targets
+	if cap(targets) < h {
+		targets = make([]rowTarget, h)
+	} else {
+		targets = targets[:h]
+		clear(targets)
+	}
+
+	offset := t.vp.YOffset()
+	at := 0
+	for i := range t.blocks {
+		if i > 0 {
+			at += t.separatorRows(i)
+		}
+		if at-offset >= h {
+			break // the rest of the log is below the viewport
+		}
+		height := t.blockHeight(i)
+		if target := t.rowTarget(i); target.id != "" {
+			for y := max(at-offset, 0); y < at-offset+height && y < h; y++ {
+				targets[y] = target
+			}
+		}
+		at += height
+	}
+	t.paint.targets = targets
+}
+
+// rowTarget names the block at index i when it is one a click can toggle. A tool
+// card is the only clickable block; a row that holds anything else toggles nothing.
+func (t *transcript) rowTarget(i int) rowTarget {
+	if blk := &t.blocks[i]; blk.card != nil {
+		return rowTarget{role: roleTool, id: blk.card.id}
+	}
+	return rowTarget{}
 }
 
 // scrollbar renders the one-column vertical scrollbar the height of the
@@ -493,23 +573,45 @@ func (t *transcript) renderAll() string {
 // is never cached: it changes on every delta and renders as plain text, so a
 // cache there would only add bookkeeping.
 func (t *transcript) blockView(i int) string {
+	if i < 0 || i >= len(t.blocks) {
+		return ""
+	}
+	if t.renderCurrent(i) {
+		return t.blocks[i].rendered
+	}
 	blk := &t.blocks[i]
 	streaming := i == t.activeAssistant
-	rev := 0
-	if blk.card != nil {
-		rev = blk.card.rev
-	}
-	if blk.renderOK && !streaming && blk.renderWidth == t.width && blk.renderRev == rev {
-		return blk.rendered
-	}
 	out := renderBlock(t.theme, *blk, t.width, streaming)
-	if !streaming {
-		blk.rendered = out
-		blk.renderWidth = t.width
-		blk.renderRev = rev
-		blk.renderOK = true
-	}
+	blk.rendered = out
+	blk.renderWidth = t.width
+	blk.renderRev = t.renderRev(i)
+	blk.renderHeight = strings.Count(out, "\n") + 1
+	blk.renderOK = true
 	return out
+}
+
+// renderRev is the revision block i's render is keyed on beyond the content width:
+// the tool card's rev for a card, or -1 while the block is still streaming. A
+// streaming block renders as plain text and is re-styled as Markdown once it ends,
+// so the streaming state is part of the key — otherwise the plain render would
+// outlive the turn. Every text change clears renderOK, so the text itself needs no
+// revision number.
+func (t *transcript) renderRev(i int) int {
+	if i == t.activeAssistant {
+		return -1
+	}
+	if blk := &t.blocks[i]; blk.card != nil {
+		return blk.card.rev
+	}
+	return 0
+}
+
+// renderCurrent reports whether block i's cached render is valid for the current
+// width and revision, i.e. blockView would hand back the cached text.
+func (t *transcript) renderCurrent(i int) bool {
+	return t.blocks[i].renderOK &&
+		t.blocks[i].renderWidth == t.width &&
+		t.blocks[i].renderRev == t.renderRev(i)
 }
 
 // userPreviewLines / thinkingPreviewLines cap how much of a user turn and of a
@@ -623,7 +725,9 @@ func (t *transcript) blockAtRow(row int) (int, bool) {
 }
 
 // blockStartRow returns the content row where block i begins, counting the blank
-// line(s) renderAll inserts between blocks.
+// line(s) renderAll inserts between blocks. A block owns its own rows, and a row
+// break between two blocks costs no extra row, so only the *blank* separators add
+// to the offset.
 func (t *transcript) blockStartRow(i int) int {
 	at := 0
 	for j := 0; j < i && j < len(t.blocks); j++ {
@@ -632,23 +736,33 @@ func (t *transcript) blockStartRow(i int) int {
 	return at
 }
 
-// blockHeight is the number of rows block i renders to.
+// blockHeight is the number of rows block i renders to. The count is cached with
+// the block's render, so the row arithmetic behind clicks and the paint map does
+// not re-scan every block of a long transcript.
 func (t *transcript) blockHeight(i int) int {
 	if i < 0 || i >= len(t.blocks) {
 		return 0
+	}
+	if t.renderCurrent(i) {
+		return t.blocks[i].renderHeight
 	}
 	return strings.Count(t.blockView(i), "\n") + 1
 }
 
 // separatorRows is how many blank rows precede block i in the rendered log.
+// renderAll writes one newline before every block, which only terminates the
+// previous block's last row, plus a second newline before a user turn, which is the
+// one row that actually reads as blank. Counting the terminating newline as a blank
+// row (the original off-by-one) shifted every block after the first one row late per
+// separator, so clicks landed on a neighbouring card or nowhere at all.
 func (t *transcript) separatorRows(i int) int {
 	if i <= 0 || i >= len(t.blocks) {
 		return 0
 	}
 	if t.blocks[i].role == roleUser {
-		return 2
+		return 1
 	}
-	return 1
+	return 0
 }
 
 // revealBlock scrolls the viewport the least amount needed to show block i

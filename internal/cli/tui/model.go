@@ -140,9 +140,9 @@ type Model struct {
 	// selectedCardID is the tool card the user picked (a click or card navigation).
 	// It is the target of Ctrl+O and wears an accent border; "" means none.
 	selectedCardID string
-	// pressedCardID remembers the card under a left press so a click without a drag
-	// toggles it on release (a drag stays a text selection).
-	pressedCardID string
+	// pressedTarget remembers the block under a left press so a click without a
+	// drag toggles it on release (a drag stays a text selection).
+	pressedTarget rowTarget
 
 	// draggingScrollbar is set while the left mouse button is held after pressing
 	// on the transcript scrollbar column, so subsequent motion events drag the
@@ -317,47 +317,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcript.scrollToRow(msg.Y)
 				return m, nil
 			}
-			// Remember the card under the press: a click (press+release without a
-			// drag) toggles it, while a drag stays a text selection.
-			m.pressedCardID = m.cardIDAtScreenY(msg.Y)
-			m.sel = selection{active: true, anchor: point{msg.X, msg.Y}, cursor: point{msg.X, msg.Y}}
+			// Remember the block under the press: a click (press+release within a cell)
+			// toggles it, while a real drag stays a text selection.
+			m.pressedTarget = m.targetAtScreenY(msg.Y)
+			m.sel = selection{active: true, dragging: true, anchor: point{msg.X, msg.Y}, cursor: point{msg.X, msg.Y}}
 			return m, nil
 		}
 		return m, nil
 
 	case tea.MouseMotionMsg:
 		// While the thumb is grabbed, vertical motion drags it regardless of the
-		// cursor's column. Otherwise, motion after a left press extends the text
-		// selection to the current cell.
+		// cursor's column. Otherwise motion extends the text selection, but only
+		// while the button is still down: cell-motion mode reports hovering too, and
+		// letting a finished selection follow the pointer painted stray highlights
+		// (and turned a bare click into a selection on the next mouse move).
 		if m.draggingScrollbar {
 			m.transcript.scrollToRow(msg.Y)
 			return m, nil
 		}
-		if m.sel.active {
+		if m.sel.dragging {
 			m.sel.cursor = point{msg.X, msg.Y}
 		}
 		return m, nil
 
 	case tea.MouseReleaseMsg:
 		m.draggingScrollbar = false
-		if m.sel.active {
+		if m.sel.dragging {
 			m.sel.cursor = point{msg.X, msg.Y}
+			m.sel.dragging = false
 		}
-		// A bare click (no drag) on a tool card selects it and flips its expansion, so
-		// any card in the history can be opened and closed — not just the newest one.
-		if pressed := m.pressedCardID; pressed != "" {
-			m.pressedCardID = ""
-			if m.sel.empty() && m.selectCard(pressed) {
-				m.toggleSelectedCard()
-				return m, nil
+		// A click flips the block under the press, so anything in the history can be
+		// opened and closed — not just the newest card. The card is selected
+		// (highlighted) besides being toggled, so Ctrl+O keeps acting on it. The
+		// tolerance in clicked() keeps a jittery click from being mistaken for a drag.
+		if m.sel.clicked() {
+			pressed := m.pressedTarget
+			m.pressedTarget = rowTarget{}
+			m.sel = selection{}
+			switch pressed.role {
+			case roleTool:
+				if pressed.id != "" && m.selectCard(pressed.id) {
+					m.toggleSelectedCard()
+					return m, nil
+				}
 			}
+			// A click that hits nothing collapsible drops the card selection, which is
+			// how the keyboard target is reset.
+			if m.selectedCardID != "" {
+				m.clearCardSelection()
+				m.transcript.reflow()
+			}
+			return m, nil
 		}
-		// A click on empty transcript space (no drag, no card) drops the card
-		// selection, which is how the keyboard targets are reset.
-		if m.sel.empty() && m.selectedCardID != "" {
-			m.clearCardSelection()
-			m.transcript.reflow()
-		}
+		m.pressedTarget = rowTarget{}
 		return m, nil
 
 	case tea.PasteMsg:

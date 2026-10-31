@@ -52,6 +52,20 @@ interactive REPL/TUI.
   decoded from the payload's string delta, and the terminal message also reads the
   reasoning item's `content` parts (with `summary` empty), so the thinking block
   survives into the session and reappears on resume.
+- **Clicking a tool card in the transcript now always toggles that card**: two bugs
+  sat between the pointer and the click. The row arithmetic counted the newline that
+  *terminates* a card as a blank separator row, but the transcript only draws a blank
+  row before a user turn, so each separator shifted every later card one row late —
+  by the third card the header belonged to nobody and its top border selected the
+  previous card. And a click was only recognized when press and release landed on the
+  exact same cell, so the one-cell drift of an ordinary trackpad click was taken for
+  a drag and only drew a text selection. Row mapping now matches the renderer,
+  rows below the transcript (input line, status bar) no longer resolve against
+  scrolled content, motion only extends a selection while the button is held, and a
+  click tolerates a cell of jitter. A click is also resolved against the frame that
+  was actually painted: while a run streams, output appended after that frame moves
+  every row under the pointer, so the old lookup toggled whichever card had
+  scrolled into the clicked row instead of the one the user pointed at.
 - **Tool cards no longer crash the TUI on non-ASCII arguments**: the card's
   line-clipping helper measured a word boundary in bytes and then sliced runes, so a
   long CJK argument (or any multibyte text past the clip budget) ran off the end of

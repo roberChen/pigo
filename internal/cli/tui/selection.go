@@ -14,33 +14,62 @@ import (
 // status), a selection is expressed in screen cells (0-based, top-left origin)
 // and spans any region uniformly — dragging across transcript output or the
 // input line both work. The left mouse button starts a selection at the press
-// cell and extends it on drag; the selection persists after release so Ctrl+C
-// can copy it. A plain click (no drag) leaves an empty selection, which clears
-// any prior highlight and lets Ctrl+C fall back to its interrupt/quit role.
+// cell and extends it while the button is held; the selection persists after
+// release so Ctrl+C can copy it. A click (press and release within a cell, as
+// real pointers drift) leaves an empty selection, which clears any prior highlight
+// and lets the transcript toggle the card under the cursor.
 
 // maxCol is a sentinel column that reaches past the end of any rendered row, so
 // a multi-row selection's interior rows select through to their line end.
 const maxCol = 1 << 30
+
+// clickSlop is how far the pointer may drift between press and release, in cells
+// per axis, and still count as a click. A trackpad jitters a cell or two on almost
+// every click; demanding an exactly unchanged anchor turned those clicks into
+// one-cell "drags" that selected text instead of toggling the card.
+const clickSlop = 1
 
 // point is a screen cell: x is the column, y the row, both 0-based from the
 // top-left of the rendered shell.
 type point struct{ x, y int }
 
 // selection is an in-progress or completed text selection. anchor is where the
-// drag began and cursor is the latest drag point; active is set between the
-// initial press and the next fresh press. It is a plain value so the Model can
-// hold and copy it cheaply.
+// drag began and cursor is the latest drag point. active is set by a fresh press
+// and survives the release so Ctrl+C can still copy; dragging marks the narrower
+// window between press and release, and is the only state in which pointer motion
+// extends the selection. It is a plain value so the Model can hold and copy it
+// cheaply.
 type selection struct {
-	active bool
-	anchor point
-	cursor point
+	active   bool
+	dragging bool
+	anchor   point
+	cursor   point
 }
 
 // empty reports whether the selection covers no cells — either inactive or a
-// bare click where the cursor never moved off the anchor. Ctrl+C treats an empty
+// click where the cursor never moved off the anchor. Ctrl+C treats an empty
 // selection as "nothing to copy" and keeps its interrupt/quit behavior.
 func (s selection) empty() bool {
 	return !s.active || s.anchor == s.cursor
+}
+
+// clicked reports whether the gesture ended where it began, within clickSlop.
+// Unlike empty it tolerates the pointer jitter of a real click, so the caller can
+// treat a press/release pair as a click on the cell underneath rather than as a
+// (one-cell) text selection.
+func (s selection) clicked() bool {
+	if !s.active {
+		return false
+	}
+	return abs(s.anchor.x-s.cursor.x) <= clickSlop && abs(s.anchor.y-s.cursor.y) <= clickSlop
+}
+
+// abs is the magnitude of a coordinate delta.
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // ordered returns the selection endpoints in reading order (top-to-bottom, and

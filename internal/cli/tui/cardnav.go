@@ -10,22 +10,41 @@
 package tui
 
 // cardIDAtScreenY returns the tool card drawn at screen row y, or "" when the row
-// holds no card. The transcript is the first region the shell paints, so a screen
-// row maps to a content row by adding the viewport's scroll offset.
+// holds no card.
 func (m *Model) cardIDAtScreenY(y int) string {
-	if y < 0 {
-		return ""
+	if t := m.targetAtScreenY(y); t.role == roleTool {
+		return t.id
+	}
+	return ""
+}
+
+// targetAtScreenY returns the tool card drawn at screen row y, or the zero
+// rowTarget when the row holds nothing collapsible.
+// Resolution goes through the map of the frame that was actually painted
+// (transcript.paint): the pointer is over a drawn cell, and while a run streams the
+// live layout keeps moving under it, so re-deriving the mapping from the current
+// offset and block list would attribute the click to whichever block has scrolled
+// into that row since. Rows outside the transcript (the input line, the status bar,
+// an overlay) never belong to a block.
+//
+// The layout-derived fallback below only runs before the first frame is drawn,
+// when there is no paint map to consult.
+func (m *Model) targetAtScreenY(y int) rowTarget {
+	if y < 0 || y >= m.transcript.viewportHeight() {
+		return rowTarget{}
+	}
+	if p := m.transcript.paint; p != nil && y < len(p.targets) {
+		return p.targets[y]
 	}
 	row := m.transcript.vp.YOffset() + y
+	if row >= m.transcript.vp.TotalLineCount() {
+		return rowTarget{} // padding below the last block, not content
+	}
 	idx, ok := m.transcript.blockAtRow(row)
 	if !ok {
-		return ""
+		return rowTarget{}
 	}
-	card := m.transcript.blocks[idx].card
-	if m.transcript.blocks[idx].role != roleTool || card == nil {
-		return ""
-	}
-	return card.id
+	return m.transcript.rowTarget(idx)
 }
 
 // selectCard marks the card with the given id as selected, clearing any previous
