@@ -14,6 +14,29 @@ func cardRender(card *toolCard) string {
 	return stripANSI(card.render(DefaultTheme(), 70))
 }
 
+// cardBody returns a rendered card's rows with the rounded border stripped, so a
+// test can compare whole rows instead of matching across the frame characters.
+func cardBody(out string) []string {
+	lines := strings.Split(out, "\n")
+	body := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimPrefix(ln, "│")
+		ln = strings.TrimSuffix(ln, "│")
+		body = append(body, strings.TrimRight(ln, " "))
+	}
+	return body
+}
+
+// hasRow reports whether the rows hold want verbatim.
+func hasRow(rows []string, want string) bool {
+	for _, row := range rows {
+		if row == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestToolCardBashKeepsHeadAndTail verifies command output shows its beginning and
 // its end: a long log's failure is at the bottom, its setup at the top, and the
 // middle is what gets elided.
@@ -149,6 +172,130 @@ func TestToolCardExpandRevealsEverything(t *testing.T) {
 	card.expanded = true
 	if expanded := cardRender(card); !strings.Contains(expanded, "content-19") {
 		t.Errorf("expanded card should show every line:\n%s", expanded)
+	}
+}
+
+// TestToolCardExpandedShowsFullArguments verifies an expanded card shows the call
+// itself in full: the header's argument (which the header clips to one line) is
+// repeated as written, a multi-line script keeps its line breaks, and a value longer
+// than the collapsed column budget is no longer cut.
+func TestToolCardExpandedShowsFullArguments(t *testing.T) {
+	long := strings.Repeat("why this runs ", 20)
+	card := newToolCard("b2", "bash", map[string]any{
+		"command":     "set -e\ncd /tmp\necho one\necho two",
+		"description": long,
+		"timeout_ms":  300000,
+	})
+
+	collapsed := cardRender(card)
+	if strings.Contains(collapsed, "command:") {
+		t.Errorf("the collapsed body should leave the header's argument out:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, long) {
+		t.Errorf("the collapsed body should clip a long value:\n%s", collapsed)
+	}
+
+	card.expanded = true
+	expanded := cardRender(card)
+	for _, want := range []string{"command:", "set -e", "cd /tmp", "echo one", "echo two", "description:", long[:40]} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded card missing %q:\n%s", want, expanded)
+		}
+	}
+	// Every row of the script gets its own row rather than being flattened into the
+	// header's one-liner.
+	rows := cardBody(expanded)
+	for _, want := range []string{"    set -e", "    cd /tmp", "    echo one", "    echo two"} {
+		if !hasRow(rows, want) {
+			t.Errorf("expanded arguments missing the row %q:\n%s", want, expanded)
+		}
+	}
+}
+
+// TestToolCardExpandedKeepsIdentifierFirst verifies the argument the header
+// summarised (here the write path) leads the expanded list, so a body that hits the
+// row ceiling cannot push the identifier out of the card.
+func TestToolCardExpandedKeepsIdentifierFirst(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < cardExpandedLines+50; i++ {
+		fmt.Fprintf(&body, "line-%03d\n", i)
+	}
+	card := newToolCard("w3", "write", map[string]any{"path": "big.txt", "content": body.String()})
+	card.expanded = true
+
+	rows := cardBody(cardRender(card))
+	pathAt, contentAt := -1, -1
+	for i, row := range rows {
+		if row == "  path: big.txt" && pathAt < 0 {
+			pathAt = i
+		}
+		if row == "  content:" && contentAt < 0 {
+			contentAt = i
+		}
+	}
+	if pathAt < 0 {
+		t.Fatalf("expanded card lost the path row:\n%s", strings.Join(rows, "\n"))
+	}
+	if contentAt < 0 || pathAt > contentAt {
+		t.Errorf("path should lead the payload (path row %d, content row %d):\n%s", pathAt, contentAt, strings.Join(rows, "\n"))
+	}
+}
+
+// TestToolCardExpandedMCPListsEveryArgument verifies an expanded MCP card breaks the
+// one-line argument summary back out: one row per key, values exact.
+func TestToolCardExpandedMCPListsEveryArgument(t *testing.T) {
+	input := map[string]any{"owner": "smallnest", "repo": "pigo", "labels": []any{"bug", "tui"}}
+	card := newToolCard("m2", "mcp__github__list_issues", input)
+
+	collapsed := cardRender(card)
+	if !strings.Contains(collapsed, "args {") {
+		t.Errorf("a collapsed MCP card should keep the compact one-line summary:\n%s", collapsed)
+	}
+	card.expanded = true
+	expanded := cardRender(card)
+	for _, want := range []string{"owner: smallnest", "repo: pigo", `labels: ["bug","tui"]`} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded MCP card missing %q:\n%s", want, expanded)
+		}
+	}
+}
+
+// TestToolCardExpandedArgumentsStayBounded verifies a giant argument value is still
+// capped at cardExpandedLines and says where the rest is, so one write of a huge file
+// cannot make the frame unbounded.
+func TestToolCardExpandedArgumentsStayBounded(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < cardExpandedLines+50; i++ {
+		fmt.Fprintf(&body, "line-%03d\n", i)
+	}
+	card := newToolCard("w1", "write", map[string]any{"path": "big.txt", "content": body.String()})
+	card.expanded = true
+
+	out := cardRender(card)
+	if !strings.Contains(out, "line-000") {
+		t.Errorf("expanded arguments should start at the beginning of the value:\n%s", out)
+	}
+	if strings.Contains(out, fmt.Sprintf("line-%03d", cardExpandedLines+49)) {
+		t.Errorf("expanded arguments should stop at the ceiling:\n%s", out)
+	}
+	if !strings.Contains(out, "more argument lines (see /export)") {
+		t.Errorf("a bounded argument section should say where the rest is:\n%s", out)
+	}
+}
+
+// TestToolCardExpandedShowsColumnsOfWideValue verifies a value that the collapsed
+// card clipped at cardArgValueLimit is shown past that limit once expanded.
+func TestToolCardExpandedShowsColumnsOfWideValue(t *testing.T) {
+	tail := "TAIL-MARKER-XYZ"
+	value := strings.Repeat("abc ", cardArgValueLimit) + tail
+	card := newToolCard("w2", "write", map[string]any{"path": "x.txt", "content": value})
+
+	if collapsed := cardRender(card); strings.Contains(collapsed, tail) {
+		t.Errorf("collapsed value should be clipped at %d columns:\n%s", cardArgValueLimit, collapsed)
+	}
+	card.expanded = true
+	if expanded := cardRender(card); !strings.Contains(expanded, tail) {
+		t.Errorf("expanded value should run to its end:\n%s", expanded)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/smallnest/pigo/internal/agenttool"
+	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/mcp"
 )
 
@@ -24,7 +25,9 @@ import (
 // compact "server/tool" plus a one-line argument summary instead of the full JSON
 // object it used to dump. Every section is capped so one enormous result cannot
 // flood the transcript; a capped card says how much is hidden, and Ctrl+O (or a
-// click on the card) reveals the rest. All width math goes through ui.Width /
+// click on the card) reveals the rest — the response in full, and the call itself
+// argument by argument, values untruncated and multi-line ones broken out, because
+// the header only ever carries a clipped fragment of the salient argument. All width math goes through ui.Width /
 // WrapToWidth / TruncateToWidth so CJK and emoji (two columns) never split.
 
 // cardState is the lifecycle of a tool card: running while the tool executes,
@@ -72,7 +75,9 @@ type cardLine struct {
 }
 
 // Preview budgets. Each is the number of content lines a section shows while the
-// card is collapsed; expanding lifts it to cardExpandedLines.
+// card is collapsed; expanding lifts it to cardExpandedLines. cardArgValueLimit is
+// the column budget of one collapsed argument value — expanding drops it, so the
+// whole value (multi-line included) is shown.
 const (
 	cardPreviewLines   = 6   // generic / MCP / file / fetch output
 	cardBashLines      = 8   // command output (head + tail)
@@ -388,30 +393,26 @@ func (c toolCard) bodyLines(inner int) []cardLine {
 // argumentLines renders the call arguments the header does not already show. A
 // generic tool lists its first few keys; an MCP tool collapses all of them into one
 // compact line instead of one line per key (a server's schema is often many
-// fields, and the full dump crowded out the result).
+// fields, and the full dump crowded out the result). An expanded card shows the
+// call in full — see expandedArgLines.
 func (c toolCard) argumentLines(inner int) []cardLine {
 	if c.rawArgs != "" {
-		out := []cardLine{{text: "args (unparsed)", kind: lineDim}}
-		clamped, hidden := clampStrings([]string{"  " + c.rawArgs}, cardPreviewLines, false)
-		for _, ln := range clamped {
-			out = append(out, cardLine{text: ln, kind: lineBad})
-		}
-		if hidden > 0 {
-			out = append(out, cardLine{text: fmt.Sprintf("  … %d more chars · Ctrl+O", hidden), kind: lineDim})
-		}
-		return out
+		return c.rawArgLines(inner)
 	}
 	if len(c.input) == 0 {
 		return nil
 	}
-	switch c.toolFamily() {
-	case "mcp":
-		// One line regardless of how many fields the server's schema has: the card is
-		// a log entry, not a form.
-		return []cardLine{{text: "args " + clipLine(c.mcpArgSummary(), maxInt(inner-6, 20)), kind: lineDim}}
-	case "todo":
+	if c.toolFamily() == "todo" {
 		// The checklist below is the arguments; a raw key dump would repeat it.
 		return nil
+	}
+	if c.expanded {
+		return c.expandedArgLines(inner)
+	}
+	if c.toolFamily() == "mcp" {
+		// One line regardless of how many fields the server's schema has: the card is
+		// a log entry, not a form. Expanding it breaks the call out per key.
+		return []cardLine{{text: "args " + clipLine(c.mcpArgSummary(), maxInt(inner-6, 20)), kind: lineDim}}
 	}
 	hiddenKeys := c.headerOnlyArgs()
 	lines := make([]string, 0, len(c.input))
@@ -424,17 +425,118 @@ func (c toolCard) argumentLines(inner int) []cardLine {
 	if len(lines) == 0 {
 		return nil
 	}
-	limit := cardInputLines
-	if c.expanded {
-		limit = cardExpandedLines
-	}
-	clamped, hidden := clampStrings(lines, limit, false)
+	clamped, hidden := clampStrings(lines, cardInputLines, false)
 	out := make([]cardLine, 0, len(clamped)+1)
 	for _, ln := range clamped {
 		out = append(out, cardLine{text: ln, kind: lineDim})
 	}
 	if hidden > 0 {
 		out = append(out, cardLine{text: fmt.Sprintf("  … %d more args · Ctrl+O", hidden), kind: lineDim})
+	}
+	return out
+}
+
+// expandedArgLines renders the whole call for an expanded card: every argument, in
+// full. Expanding is how the user checks what the tool was actually passed, so the
+// column budget of the collapsed card no longer applies — a value is neither cut at
+// cardArgValueLimit nor flattened onto one line, and a multi-line script or file body
+// keeps its line breaks. The header's own argument is included rather than repeated
+// as a clipped fragment: the header shows a bash script's first 80 columns, and the
+// point of expanding is to see the rest of it. Only the row count stays bounded, by
+// cardExpandedLines, because a giant write body would otherwise stall the frame; the
+// note on a bounded section says where the rest is.
+func (c toolCard) expandedArgLines(inner int) []cardLine {
+	rows := make([]string, 0, len(c.input)*2)
+	for _, k := range c.expandedKeys() {
+		prefix := "  " + k + ": "
+		values := argValueRows(c.input[k], maxInt(inner-ui.Width(prefix), 20))
+		if len(values) <= 1 {
+			value := ""
+			if len(values) == 1 {
+				value = values[0]
+			}
+			rows = append(rows, prefix+value)
+			continue
+		}
+		rows = append(rows, "  "+k+":")
+		for _, v := range values {
+			rows = append(rows, "    "+v)
+		}
+	}
+	clamped, hidden := clampStrings(rows, cardExpandedLines, false)
+	out := make([]cardLine, 0, len(clamped)+1)
+	for _, row := range clamped {
+		out = append(out, cardLine{text: row, kind: lineDim})
+	}
+	if hidden > 0 {
+		out = append(out, cardLine{text: fmt.Sprintf("  … %d more argument lines (see /export)", hidden), kind: lineDim})
+	}
+	return out
+}
+
+// expandedKeys orders the arguments of an expanded card: the ones the header
+// summarised first (the path of a write, the command of a bash), then the rest. The
+// identifier is what makes a long payload readable, and with the row cap applied at
+// the end it must also never be the part that falls off a huge `content`.
+func (c toolCard) expandedKeys() []string {
+	hidden := c.headerOnlyArgs()
+	lead := make([]string, 0, len(hidden))
+	rest := make([]string, 0, len(c.input))
+	for _, k := range sortedKeys(c.input) {
+		if hidden[k] {
+			lead = append(lead, k)
+			continue
+		}
+		rest = append(rest, k)
+	}
+	return append(lead, rest...)
+}
+
+// argValueRows formats one argument value as wrapped rows, untruncated. A string is
+// shown verbatim so multi-line content keeps its shape; anything else (number, bool,
+// list, object) is rendered as JSON, which is exact and still reads as the value the
+// model sent — fmt's %v would print a map as `map[a:1]` and lose the braces. width is
+// the room left after the key, so a long single-line value wraps instead of running
+// under the card border.
+func argValueRows(v any, width int) []string {
+	var text string
+	if s, ok := v.(string); ok {
+		text = s
+	} else if raw, err := json.Marshal(v); err == nil {
+		text = string(raw)
+	} else {
+		text = fmt.Sprintf("%v", v)
+	}
+	if text == "" {
+		return []string{`""`}
+	}
+	return strings.Split(WrapToWidth(strings.TrimRight(text, "\n"), width), "\n")
+}
+
+// rawArgLines renders a call whose arguments did not decode to a JSON object. The
+// payload is all there is, so an expanded card shows all of it; collapsed it keeps
+// the first cardPreviewLines rows with a count of the rest.
+func (c toolCard) rawArgLines(inner int) []cardLine {
+	out := []cardLine{{text: "args (unparsed)", kind: lineDim}}
+	rows := strings.Split(strings.TrimRight(c.rawArgs, "\n"), "\n")
+	limit := cardPreviewLines
+	if c.expanded {
+		limit = cardExpandedLines
+		for i, row := range rows {
+			rows[i] = WrapToWidth(row, maxInt(inner-2, 20))
+		}
+		rows = strings.Split(strings.Join(rows, "\n"), "\n")
+	}
+	clamped, hidden := clampStrings(rows, limit, false)
+	for _, row := range clamped {
+		out = append(out, cardLine{text: "  " + row, kind: lineBad})
+	}
+	if hidden > 0 {
+		hint := "  … %d more lines · Ctrl+O"
+		if c.expanded {
+			hint = "  … %d more lines (see /export)"
+		}
+		out = append(out, cardLine{text: fmt.Sprintf(hint, hidden), kind: lineDim})
 	}
 	return out
 }

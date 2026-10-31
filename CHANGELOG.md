@@ -78,6 +78,14 @@ interactive REPL/TUI.
   line; a block that already fits the preview is not a click target. Clicks are
   resolved through the same painted-frame map as cards, and replayed reasoning from a
   resumed session is clickable too.
+- **Expanding a tool card now shows the call's arguments in full**: the card body
+  repeated only the arguments the header did not show, flattened every value onto one
+  line and cut it at 120 columns — even when expanded. A bash card therefore hid the
+  rest of a multi-line script behind the header's 80-column summary, and a `write`
+  card hid the body of the file it wrote. An expanded card now lists every argument,
+  including the header's, with line breaks preserved and no column budget (only the
+  400-row ceiling remains, which says where the rest is); an MCP card breaks its
+  one-line JSON summary out key by key. The collapsed card is unchanged.
 - **Tool cards no longer crash the TUI on non-ASCII arguments**: the card's
   line-clipping helper measured a word boundary in bytes and then sliced runes, so a
   long CJK argument (or any multibyte text past the clip budget) ran off the end of
