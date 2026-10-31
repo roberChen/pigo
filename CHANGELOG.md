@@ -12,6 +12,17 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **One malformed tool call no longer poisons the rest of the session**: a model
+  that streamed invalid JSON as a tool's arguments was answered with a
+  "not valid JSON" tool result and given another turn — but its broken call stayed
+  in history and was replayed verbatim on every later request. Upstreams validate
+  replayed arguments, so the next request was rejected with a 400 and the
+  conversation could never continue, from any front-end and after a resume. A
+  replayed call now carries `{}` when its arguments are not a JSON object, the same
+  policy the Anthropic wire already applied, while the in-memory message and the
+  session file keep the model's original bytes for diagnostics. Well-formed
+  arguments are replayed byte for byte, and Anthropic inputs keep integers exact
+  instead of re-encoding them as floats.
 - **Interleaved thinking no longer collapses into one block**: an Anthropic turn can
   alternate thinking and `tool_use` several times, and each thinking block must be
   echoed back adjacent to the tool call that follows it or the next request is

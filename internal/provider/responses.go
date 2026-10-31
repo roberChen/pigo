@@ -547,7 +547,7 @@ func encodeResponsesMessage(m agentcore.Message) []map[string]any {
 				"type":      "function_call",
 				"call_id":   call.ID,
 				"name":      call.Name,
-				"arguments": string(call.Arguments),
+				"arguments": replayToolArguments(call.Arguments),
 			})
 		}
 		return items

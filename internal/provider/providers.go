@@ -177,7 +177,7 @@ func encodeOpenAIMessage(m agentcore.Message) []map[string]any {
 					"type": "function",
 					"function": map[string]any{
 						"name":      tc.Name,
-						"arguments": string(tc.Arguments),
+						"arguments": replayToolArguments(tc.Arguments),
 					},
 				})
 			}
@@ -474,9 +474,43 @@ func encodeAnthropicMessage(m agentcore.Message) map[string]any {
 // degrade to an empty object instead of null or a bogus shape. Echoing them
 // as-is would make every later request in the conversation fail with a 400; the
 // model has already been told the arguments did not parse.
+// replayToolArguments returns the argument payload to send when re-playing a
+// tool call the model produced earlier in the conversation.
+//
+// A ToolCallContent deliberately keeps malformed arguments verbatim (see
+// agentcore.ToolCallContent.MarshalJSON): the executor reports "arguments are
+// not valid JSON" and the model gets another turn to re-issue the call. That
+// assistant message stays in history, and every later request re-plays it —
+// upstreams validate replayed arguments (OpenAI requires arguments to parse as a
+// JSON object, Anthropic requires a JSON object for tool_use.input) and answer a
+// 400 for the whole request. One bad call would then poison the session: the
+// recovery turn can never reach the model again.
+//
+// Unusable arguments are therefore replayed as "{}". The call still pairs with
+// the tool result already recorded for it, so the conversation stays valid, and
+// the in-memory message and the session file keep the original bytes for
+// diagnostics. Well-formed objects are returned unchanged, byte for byte, so a
+// gateway relying on a vendor extension in them sees what the model sent.
+func replayToolArguments(args json.RawMessage) string {
+	trimmed := bytes.TrimSpace(args)
+	// A JSON object only. This rejects truncated/duplicated-key payloads, `null`,
+	// arrays and bare scalars in one check; anything starting with '{' but
+	// unparseable fails json.Valid.
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+		return "{}"
+	}
+	return string(trimmed)
+}
+
 func anthropicToolInput(args json.RawMessage) map[string]any {
+	// Same sanitizing policy as the other wires (see replayToolArguments), then a
+	// second decode into a map because this wire wants an object, not a string.
+	// UseNumber keeps integers exact: decoding into any would turn a large number
+	// into a float64 and replay `1e+06` where the model wrote `1000000`.
+	dec := json.NewDecoder(bytes.NewReader([]byte(replayToolArguments(args))))
+	dec.UseNumber()
 	var input map[string]any
-	if err := json.Unmarshal(args, &input); err != nil || input == nil {
+	if err := dec.Decode(&input); err != nil || input == nil {
 		return map[string]any{}
 	}
 	return input
