@@ -191,7 +191,7 @@ func (d *OpenAIDecoder) finishDone() []StreamEvent {
 		return nil
 	}
 	d.done = true
-	return []StreamEvent{StreamDoneEvent{Message: d.turn.message()}}
+	return []StreamEvent{StreamDoneEvent{Message: d.turn.doneMessage()}}
 }
 
 // partial is the current snapshot; kept for callers that only need the message.

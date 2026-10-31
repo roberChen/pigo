@@ -26,7 +26,10 @@
 package provider
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
@@ -83,6 +86,9 @@ type assistantTurn struct {
 	// sawToolCall records a tool call regardless of protocol, so stop-reason
 	// inference (tool_use) does not depend on each decoder remembering to set it.
 	sawToolCall bool
+
+	// finalized guards the one-time id assignment done by finalize.
+	finalized bool
 }
 
 // newAssistantTurn starts an empty accumulator tagged with the wire API
@@ -287,6 +293,59 @@ func (t *assistantTurn) message() agentcore.AssistantMessage {
 		msg.StopReason = agentcore.StopReasonToolUse
 	}
 	return msg
+}
+
+// finalize gives every tool call an id a conversation can be replayed with, before
+// the turn leaves the decoder.
+//
+// An id is structural, not cosmetic: the tool result the loop produces is keyed by
+// it, the session persists both, and every later request pairs them by it. A model
+// that streams a call without an id (or two calls sharing one) would therefore
+// leave a history whose pairing is ambiguous or absent, and the next request would
+// be rejected no matter which wire it went out on. Because the message a decoder
+// emits is the thing the loop and the session store, the repair belongs here
+// rather than only at the wire — the recorded turn is self-consistent by itself.
+//
+// Ids are assigned once, so repeated message() calls (one per streamed partial)
+// stay stable. The random salt keeps two turns of one conversation — and two
+// processes resuming the same session — from minting the same id.
+func (t *assistantTurn) finalize() {
+	if t.finalized {
+		return
+	}
+	t.finalized = true
+	salt := toolIDRandomSuffix()
+	used := make(map[string]struct{}, len(t.blocks))
+	for _, b := range t.blocks {
+		if b.kind != turnBlockTool {
+			continue
+		}
+		id := sanitizeToolCallID(b.toolID)
+		if _, taken := used[id]; id == "" || taken {
+			id = "pigo_call_" + salt + "_" + strconv.Itoa(len(used)+1)
+		}
+		b.toolID = id
+		used[id] = struct{}{}
+	}
+}
+
+// toolIDRandomSuffix returns a short random hex string, or a counter-derived
+// fallback if the system entropy source is unavailable (it never is in practice;
+// crypto/rand.Read does not fail on supported platforms).
+func toolIDRandomSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "x"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// doneMessage finalizes tool-call ids and materializes the terminal message.
+// Every decoder emits its StreamDoneEvent through this, so a turn cannot leave a
+// decoder without its ids having been made replayable.
+func (t *assistantTurn) doneMessage() agentcore.AssistantMessage {
+	t.finalize()
+	return t.message()
 }
 
 // toolArguments normalizes accumulated argument fragments into a RawMessage.

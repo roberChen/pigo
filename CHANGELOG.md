@@ -23,6 +23,19 @@ interactive REPL/TUI.
   session file keep the model's original bytes for diagnostics. Well-formed
   arguments are replayed byte for byte, and Anthropic inputs keep integers exact
   instead of re-encoding them as floats.
+- **A tool call with no id, a reused id, or an unusable name no longer blocks the
+  session**: the same replay problem had three more shapes. A call streamed without
+  an id — or two calls sharing one — left the loop's tool result and the session's
+  copy of the call paired ambiguously, or not at all, and a name that was empty,
+  longer than 64 characters, or carried spaces or non-ASCII characters failed the
+  provider's name pattern before the model could be told the call had failed.
+  Decoders now mint a unique, replayable id per call as the turn is materialized, so
+  the tool result, the session file and every later request agree without a wire
+  rewriting anything. Replay also repairs what an older session (or an SDK caller)
+  still holds: ids are sanitized and de-duplicated, a name that cannot be replayed
+  becomes `invalid_tool_call`, a result with no call to pair with is dropped, and a
+  call no result answers gets an explanatory error result. The model's raw name stays
+  in the recorded message, so the error result it was given still quotes it.
 - **Interleaved thinking no longer collapses into one block**: an Anthropic turn can
   alternate thinking and `tool_use` several times, and each thinking block must be
   echoed back adjacent to the tool call that follows it or the next request is

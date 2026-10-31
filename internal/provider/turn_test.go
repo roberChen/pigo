@@ -655,3 +655,94 @@ data: {"type":"message_stop"}
 		t.Errorf("content kinds = %v, want [text] (no stray block for an unmodeled type)", got)
 	}
 }
+
+// TestDecoderMintsUsableCallIDs covers the producer half of the tool-call repair
+// (see history.go for the replay half): a model that streams a call without an
+// id, with an id carrying invalid characters, or two calls sharing an id must
+// still leave a turn whose pairing is unambiguous. The id is structural here —
+// the loop keys the tool result by it and the session persists both — so the
+// cleanup happens where the turn is materialized, not only at the wire.
+func TestDecoderMintsUsableCallIDs(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+		// wantKept lists ids that must survive unchanged, in order. A call whose
+		// id cannot be replayed appears as "" here and must be filled in.
+		wantKept []string
+	}{
+		{
+			name: "no id",
+			body: `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+`,
+			want:     1,
+			wantKept: []string{""},
+		},
+		{
+			name: "id with invalid characters",
+			body: `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call:1","function":{"name":"read","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+`,
+			want:     1,
+			wantKept: []string{"call1"},
+		},
+		{
+			name: "two calls sharing an id",
+			body: `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}},{"index":1,"id":"call_1","function":{"name":"grep","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+`,
+			want:     2,
+			wantKept: []string{"call_1", ""},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, msg := feedSSE(t, NewOpenAIDecoder(), tc.body)
+			calls := msg.ToolCalls()
+			if len(calls) != tc.want {
+				t.Fatalf("tool calls = %d, want %d", len(calls), tc.want)
+			}
+			seen := make(map[string]struct{}, len(calls))
+			for i, c := range calls {
+				if tc.wantKept[i] != "" && c.ID != tc.wantKept[i] {
+					t.Errorf("call %d id = %q, want %q", i, c.ID, tc.wantKept[i])
+				}
+				if !toolNamePattern.MatchString(c.ID) {
+					t.Errorf("call %d id = %q is not replayable", i, c.ID)
+				}
+				if _, dup := seen[c.ID]; dup {
+					t.Errorf("call %d reuses id %q", i, c.ID)
+				}
+				seen[c.ID] = struct{}{}
+			}
+		})
+	}
+}
+
+// TestDecoderKeepsRawToolName pins the deliberate split: the tool name is left as
+// the model emitted it so the transcript and the executor's error stay truthful
+// ("unknown tool \"read file\""), and only the wire substitutes a replayable
+// placeholder.
+func TestDecoderKeepsRawToolName(t *testing.T) {
+	body := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read file","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+`
+	_, msg := feedSSE(t, NewOpenAIDecoder(), body)
+	calls := msg.ToolCalls()
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(calls))
+	}
+	if got := calls[0].Name; got != "read file" {
+		t.Errorf("recorded name = %q, want the model's raw %q", got, "read file")
+	}
+}

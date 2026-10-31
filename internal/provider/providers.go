@@ -114,7 +114,7 @@ func encodeOpenAIRequest(req CompletionRequest) ([]byte, error) {
 	if sp := req.Context.SystemPrompt; sp != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": sp})
 	}
-	for _, m := range req.Context.Messages {
+	for _, m := range repairToolCallHistory(req.Context.Messages) {
 		msgs = append(msgs, encodeOpenAIMessage(m)...)
 	}
 	body := map[string]any{
@@ -324,7 +324,7 @@ func (d *anthropicCompatDriver) StreamCompletion(ctx context.Context, req Comple
 // field; tool results and tool calls follow the Messages content-block shape.
 func encodeAnthropicRequest(req CompletionRequest, models []Model) ([]byte, error) {
 	msgs := make([]map[string]any, 0, len(req.Context.Messages))
-	for _, m := range req.Context.Messages {
+	for _, m := range repairToolCallHistory(req.Context.Messages) {
 		if enc := encodeAnthropicMessage(m); enc != nil {
 			msgs = append(msgs, enc)
 		}

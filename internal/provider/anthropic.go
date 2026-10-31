@@ -343,7 +343,7 @@ func (d *AnthropicDecoder) finishDone() []StreamEvent {
 		return nil
 	}
 	d.done = true
-	return []StreamEvent{StreamDoneEvent{Message: d.turn.message()}}
+	return []StreamEvent{StreamDoneEvent{Message: d.turn.doneMessage()}}
 }
 
 // partial is the current snapshot of the accumulated turn.

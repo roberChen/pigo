@@ -273,13 +273,13 @@ func (d *ResponsesDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 	case "response.completed":
 		d.reconcileResponse(ev.Response)
 		d.done = true
-		return append(events, StreamDoneEvent{Message: d.turn.message()}), nil
+		return append(events, StreamDoneEvent{Message: d.turn.doneMessage()}), nil
 
 	case "response.incomplete":
 		d.reconcileResponse(ev.Response)
 		d.turn.setStopReason(agentcore.StopReasonLength)
 		d.done = true
-		return append(events, StreamDoneEvent{Message: d.turn.message()}), nil
+		return append(events, StreamDoneEvent{Message: d.turn.doneMessage()}), nil
 
 	case "response.failed":
 		return events, responsesFailure(ev.Response)
@@ -315,7 +315,7 @@ func (d *ResponsesDecoder) Finish() ([]StreamEvent, error) {
 		return nil, nil
 	}
 	d.done = true
-	return []StreamEvent{StreamDoneEvent{Message: d.turn.message()}}, nil
+	return []StreamEvent{StreamDoneEvent{Message: d.turn.doneMessage()}}, nil
 }
 
 // toolBlock returns the block for an output index, opening one when the wire
@@ -484,7 +484,7 @@ func encodeResponsesRequest(req CompletionRequest) ([]byte, error) {
 	}
 
 	items := make([]map[string]any, 0, len(req.Context.Messages))
-	for _, m := range req.Context.Messages {
+	for _, m := range repairToolCallHistory(req.Context.Messages) {
 		items = append(items, encodeResponsesMessage(m)...)
 	}
 	body["input"] = items
