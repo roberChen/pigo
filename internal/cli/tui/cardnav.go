@@ -1,5 +1,5 @@
-// This file implements picking a tool card in the transcript and expanding or
-// collapsing it.
+// This file implements picking a collapsible block in the transcript and
+// expanding or collapsing it: tool cards and thinking blocks.
 //
 // Until now only the most recent card could be toggled (Ctrl+O), so a long
 // transcript was effectively read-only: a huge bash log early in the conversation
@@ -7,6 +7,10 @@
 // walking the transcript with Alt+↑/Alt+↓ — and the same Ctrl+O (or a second click)
 // flips it. Selecting a card highlights its border, so it is obvious which card a
 // key press will affect.
+//
+// A thinking block is click-only: clicking anywhere on it flips between the
+// default tail view and the whole chain of thought. It has no border to highlight,
+// so it does not take part in the card selection.
 package tui
 
 // cardIDAtScreenY returns the tool card drawn at screen row y, or "" when the row
@@ -18,8 +22,8 @@ func (m *Model) cardIDAtScreenY(y int) string {
 	return ""
 }
 
-// targetAtScreenY returns the tool card drawn at screen row y, or the zero
-// rowTarget when the row holds nothing collapsible.
+// targetAtScreenY returns the collapsible block (tool card or thinking block)
+// drawn at screen row y, or the zero rowTarget when the row toggles nothing.
 // Resolution goes through the map of the frame that was actually painted
 // (transcript.paint): the pointer is over a drawn cell, and while a run streams the
 // live layout keeps moving under it, so re-deriving the mapping from the current
@@ -84,6 +88,38 @@ func (m *Model) toggleSelectedCard() {
 	card.toggleExpanded()
 	m.transcript.reflow()
 	m.revealCard(card.id)
+}
+
+// toggleThinking flips a thinking block between its default tail view and the full
+// chain of thought.
+//
+// Expanding keeps the viewport where it was instead of revealing the block: the
+// rows an expansion adds are inserted *above* the tail the reader is looking at, so
+// holding still makes the older reasoning fill in below the header, in reading
+// order, while the newest rows — the ones already read — slide off the bottom. That
+// is also why follow is paused: the reader chose to read back, and a streamed delta
+// snapping to the bottom would undo the expansion.
+//
+// Collapsing shrinks the block, so it only has to make sure the remains are on
+// screen.
+func (m *Model) toggleThinking(id string) {
+	for i := range m.transcript.blocks {
+		blk := m.transcript.blocks[i]
+		if blk.role != roleThinking || blk.id != id {
+			continue
+		}
+		expanding := !blk.expanded
+		offset := m.transcript.vp.YOffset()
+		m.transcript.setThinkingExpanded(id, expanding)
+		m.transcript.reflow()
+		if expanding {
+			m.transcript.vp.SetYOffset(offset)
+			m.transcript.follow = false
+		} else {
+			m.transcript.revealBlock(i)
+		}
+		return
+	}
 }
 
 // revealCard scrolls the transcript the least amount needed to show the card.

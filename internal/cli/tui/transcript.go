@@ -42,6 +42,11 @@ const (
 // points at the live tool card (#389); the pointer lets a later toolEndMsg /
 // Ctrl+O mutate the card in place and have it re-render on the next reflow.
 //
+// A roleThinking block carries a stable id and its own expanded flag: a click on
+// the block flips it, and the clicked row has to name the block rather than its
+// index, because the paint map outlives the frame that was drawn. expanded is read
+// by renderBlock, so it works for blocks replayed from a session too.
+//
 // rendered caches the block's rendered text so a reflow re-renders only what
 // changed. A finalized assistant turn goes through glamour (~1ms per turn), and
 // re-running every turn on each streamed delta or keystroke is what made the
@@ -53,9 +58,11 @@ const (
 // render, so the row arithmetic behind clicks and the paint map never has to
 // re-scan a long transcript.
 type transcriptBlock struct {
-	role blockRole
-	text string
-	card *toolCard
+	role     blockRole
+	text     string
+	card     *toolCard
+	id       string // roleThinking blocks only: the id a click targets
+	expanded bool   // roleThinking blocks only: show the whole chain of thought
 
 	rendered     string
 	renderWidth  int
@@ -110,7 +117,7 @@ type transcript struct {
 	narrowed bool
 
 	// paint is the click map of the most recently painted frame: the collapsible
-	// block (a tool card) drawn at each visible screen row. A click
+	// block (tool card or thinking block) drawn at each visible screen row. A click
 	// resolves against it rather than against the live layout, because the transcript
 	// keeps changing between two frames — while a run streams, text appended after a
 	// frame was drawn moves every row under the cursor, and reading the live layout on
@@ -118,6 +125,11 @@ type transcript struct {
 	// user clicked. It is a pointer so the copies Model.Update makes of the
 	// transcript share the one record View writes.
 	paint *paintRows
+
+	// thinkSeq numbers thinking blocks so each one has an id to be clicked by.
+	// Blocks are only ever appended, so an id stays unique and stable for the life
+	// of the transcript.
+	thinkSeq int
 }
 
 // paintRows is the row → clickable-block map of one painted frame: targets[y] is
@@ -125,8 +137,9 @@ type transcript struct {
 // toggles nothing.
 type paintRows struct{ targets []rowTarget }
 
-// rowTarget names the block a painted row belongs to. role records what kind of
-// block it is (only tool cards are clickable for now) and id names it.
+// rowTarget names the block a painted row belongs to. role separates a tool card
+// from a thinking block (nothing else is clickable) and id names the block within
+// that kind.
 type rowTarget struct {
 	role blockRole
 	id   string
@@ -195,6 +208,17 @@ func (t *transcript) addUser(text string) {
 	t.reflow()
 }
 
+// newThinking builds a thinking block with a fresh id, so a click can name the
+// block it toggles after the log has grown past the frame the user clicked.
+func (t *transcript) newThinking(text string) transcriptBlock {
+	t.thinkSeq++
+	return transcriptBlock{
+		role: roleThinking,
+		text: text,
+		id:   fmt.Sprintf("think-%d", t.thinkSeq),
+	}
+}
+
 // setThinking writes the accumulated reasoning text of the current turn into the
 // streaming thinking block (creating it on the first delta). The provider sends the
 // whole partial each time, so the block is replaced rather than appended to; the
@@ -202,13 +226,29 @@ func (t *transcript) addUser(text string) {
 // the answer off the screen.
 func (t *transcript) setThinking(text string) {
 	if t.activeThinking < 0 {
-		t.blocks = append(t.blocks, transcriptBlock{role: roleThinking, text: text})
+		t.blocks = append(t.blocks, t.newThinking(text))
 		t.activeThinking = len(t.blocks) - 1
 	} else {
 		t.blocks[t.activeThinking].text = text
 		t.blocks[t.activeThinking].renderOK = false
 	}
 	t.reflow()
+}
+
+// setThinkingExpanded sets the expanded state of the thinking block with the given
+// id and reports whether that block exists. The render cache is dropped because the
+// expanded flag is not part of the revision the cache is keyed on.
+func (t *transcript) setThinkingExpanded(id string, expanded bool) bool {
+	for i := range t.blocks {
+		blk := &t.blocks[i]
+		if blk.role != roleThinking || blk.id != id {
+			continue
+		}
+		blk.expanded = expanded
+		blk.renderOK = false
+		return true
+	}
+	return false
 }
 
 // endThinking closes the streaming thinking block. The text stays in the
@@ -436,13 +476,33 @@ func (t transcript) recordPaint() {
 	t.paint.targets = targets
 }
 
-// rowTarget names the block at index i when it is one a click can toggle. A tool
-// card is the only clickable block; a row that holds anything else toggles nothing.
+// rowTarget names the block at index i when it is one a click can toggle: a tool
+// card, or a thinking block that is actually collapsible. A thinking block whose
+// whole chain of thought already fits the preview is left out, so clicking it does
+// not flip a chevron that reveals nothing.
 func (t *transcript) rowTarget(i int) rowTarget {
-	if blk := &t.blocks[i]; blk.card != nil {
+	blk := &t.blocks[i]
+	switch {
+	case blk.card != nil:
 		return rowTarget{role: roleTool, id: blk.card.id}
+	case blk.role == roleThinking && blk.id != "" && t.thinkingCollapsible(i):
+		return rowTarget{role: roleThinking, id: blk.id}
 	}
 	return rowTarget{}
+}
+
+// thinkingCollapsible reports whether thinking block i has rows the default view
+// hides — that is, whether a click on it would change anything. It reads the same
+// row counts the paint map just computed, so the check costs nothing; a block that
+// is expanded always counts, so it can be collapsed again.
+func (t *transcript) thinkingCollapsible(i int) bool {
+	blk := &t.blocks[i]
+	if blk.expanded {
+		return true
+	}
+	// Collapsed, the block renders its header plus at most thinkingPreviewLines
+	// rows; the elision note adds exactly one row when rows were dropped.
+	return t.blockHeight(i) > thinkingPreviewLines+1
 }
 
 // scrollbar renders the one-column vertical scrollbar the height of the
@@ -620,6 +680,11 @@ func (t *transcript) renderCurrent(i int) bool {
 const (
 	userPreviewLines     = 12
 	thinkingPreviewLines = 6
+	// thinkingExpandedLines is the ceiling once a thinking block is opened. It
+	// matches a tool card's ceiling: reasoning can run to thousands of rows, and
+	// rendering all of it on a click would stall the frame for content the session
+	// file already holds in full.
+	thinkingExpandedLines = 400
 )
 
 // renderBlock wraps a block's text to width and applies the role's theme style.
@@ -643,7 +708,7 @@ func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) st
 	case roleSystem:
 		return theme.System.Render(WrapToWidth(blk.text, width))
 	case roleThinking:
-		return renderThinking(theme, blk.text, width)
+		return renderThinking(theme, blk, width)
 	default:
 		if streaming {
 			return theme.Assistant.Render(WrapToWidth(blk.text, width))
@@ -682,25 +747,48 @@ func renderUserTurn(theme Theme, text string, width int) string {
 	return b.String()
 }
 
-// renderThinking renders a reasoning block: a dim label, the first
-// thinkingPreviewLines rows indented, and a count of the rows left out. The full
-// reasoning finishes in the session file; the transcript only needs enough to see
-// what the model is thinking about.
-func renderThinking(theme Theme, text string, width int) string {
+// renderThinking renders a reasoning block: a dim header, the newest
+// thinkingPreviewLines wrapped rows, and — when rows are hidden — a marker saying
+// how many and that the block opens on click. The tail is what matters: a chain of
+// thought grows forward, so the last rows are what the model is reasoning about
+// right now, while the opening rows are the part it has already left behind. A
+// click expands the block to thinkingExpandedLines rows (still anchored on the
+// newest, since that is the row the reader is on) and a second click collapses it;
+// the session file keeps the reasoning in full.
+func renderThinking(theme Theme, blk transcriptBlock, width int) string {
 	inner := width - 2
 	if inner < 1 {
 		inner = 1
 	}
-	rows := strings.Split(strings.TrimRight(WrapToWidth(text, inner), "\n"), "\n")
-	shown, hidden := clampStrings(rows, thinkingPreviewLines, false)
+	rows := strings.Split(strings.TrimRight(WrapToWidth(blk.text, inner), "\n"), "\n")
+	limit := thinkingPreviewLines
+	if blk.expanded {
+		limit = thinkingExpandedLines
+	}
+	truncated := len(rows) > limit
+	header := "✻ thinking"
+	if truncated || blk.expanded {
+		header = "▸ thinking"
+		if blk.expanded {
+			header = "▾ thinking"
+		}
+	}
+	shown, hidden := rows, 0
+	if truncated {
+		shown, hidden = rows[len(rows)-limit:], len(rows)-limit
+	}
 
 	var b strings.Builder
-	b.WriteString(theme.System.Render("✻ thinking"))
+	b.WriteString(theme.System.Render(header))
+	if hidden > 0 {
+		note := fmt.Sprintf("  … %d earlier lines · click to expand", hidden)
+		if blk.expanded {
+			note = fmt.Sprintf("  … %d earlier lines not shown (see /export)", hidden)
+		}
+		b.WriteString("\n" + theme.System.Render(note))
+	}
 	for _, row := range shown {
 		b.WriteString("\n" + theme.System.Render("  "+row))
-	}
-	if hidden > 0 {
-		b.WriteString("\n" + theme.System.Render(fmt.Sprintf("  … %d more lines", hidden)))
 	}
 	return b.String()
 }

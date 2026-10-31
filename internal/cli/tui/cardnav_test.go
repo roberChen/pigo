@@ -335,6 +335,217 @@ func TestClickUsesThePaintedFrame(t *testing.T) {
 	}
 }
 
+// thinkingModel builds an idle model of the given window height holding a finished
+// thinking block of the given number of rows, followed by a bash card, so a click
+// can be checked against both.
+func thinkingModel(t *testing.T, height, lines int) Model {
+	t.Helper()
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 60, Height: height})
+	var b strings.Builder
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&b, "reason-%02d\n", i)
+	}
+	m = apply(t, m, thinkingDeltaMsg{text: b.String()})
+	m = apply(t, m, turnEndMsg{msg: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant}})
+	m = apply(t, m, toolStartMsg{id: "c1", name: "bash", input: map[string]any{"command": "echo done"}})
+	m = apply(t, m, toolEndMsg{id: "c1", ok: true, result: "done"})
+	if n := countBlocks(m.transcript, roleThinking); n != 1 {
+		t.Fatalf("thinking blocks = %d, want 1", n)
+	}
+	if m.transcript.blocks[0].id == "" {
+		t.Fatal("a thinking block needs an id to be clickable")
+	}
+	return m
+}
+
+// TestClickTogglesThinkingBlock verifies a thinking block opens on a click anywhere
+// on it — header or a body row — and closes on the next click, without touching the
+// tool card below it.
+func TestClickTogglesThinkingBlock(t *testing.T) {
+	m := thinkingModel(t, 40, thinkingPreviewLines+6)
+	blk := &m.transcript.blocks[0]
+	rows := strings.Split(stripANSI(m.View().Content), "\n")
+	header := screenRowOf(m, "thinking")
+	if header < 0 {
+		t.Fatalf("thinking header not on screen:\n%s", stripANSI(m.View().Content))
+	}
+	if strings.Contains(strings.Join(rows, "\n"), "reason-00") {
+		t.Fatal("a long thinking block should start collapsed to its newest rows")
+	}
+
+	for _, y := range []int{header, header + 2} { // header, then a reasoning row
+		if got := m.targetAtScreenY(y); got.role != roleThinking || got.id != blk.id {
+			t.Fatalf("row %d maps to %+v, want the thinking block %q", y, got, blk.id)
+		}
+	}
+
+	m = apply(t, m, tea.MouseClickMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	if !m.transcript.blocks[0].expanded {
+		t.Fatal("clicking the thinking block should expand it")
+	}
+	if out := stripANSI(m.View().Content); !strings.Contains(out, "reason-00") || !strings.Contains(out, "reason-11") {
+		t.Errorf("the expanded block should show the whole chain of thought:\n%s", out)
+	}
+	if m.toolCards["c1"].expanded {
+		t.Error("clicking the thinking block must not toggle the card below it")
+	}
+
+	// A second click, now on a body row, collapses it again. The header stays put
+	// (the block grows downward), so the row that was the tail is still a body row.
+	m = apply(t, m, tea.MouseClickMsg{X: 4, Y: header + 4, Button: tea.MouseLeft})
+	m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: header + 4, Button: tea.MouseLeft})
+	if m.transcript.blocks[0].expanded {
+		t.Fatal("a second click should collapse the thinking block")
+	}
+	if out := stripANSI(m.View().Content); strings.Contains(out, "reason-00") {
+		t.Errorf("a collapsed block should hide its oldest rows again:\n%s", out)
+	}
+}
+
+// thinkingRowsOnScreen returns the shell rows one rendered thinking block occupies.
+// They are found from the drawn frame (header, then the indented reasoning rows)
+// rather than from the transcript's row arithmetic, so the mapping tests compare two
+// independent computations.
+func thinkingRowsOnScreen(t *testing.T, m Model) (rows []int, ok bool) {
+	t.Helper()
+	lines := strings.Split(stripANSI(m.View().Content), "\n")
+	head := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "thinking") {
+			head = i
+			break
+		}
+	}
+	if head < 0 {
+		return nil, false
+	}
+	for y := head; y < len(lines); y++ {
+		ln := lines[y]
+		if y > head && !strings.HasPrefix(ln, "  ") {
+			break // the block's rows are indented under its header
+		}
+		rows = append(rows, y)
+	}
+	return rows, len(rows) > 1
+}
+
+// TestEveryThinkingRowMapsToTheBlock verifies the row arithmetic covers a thinking
+// block exactly as it draws it — header, the elision note and every reasoning row —
+// collapsed and expanded. Clicking any of them must toggle that block, which is only
+// true if each row resolves to it.
+func TestEveryThinkingRowMapsToTheBlock(t *testing.T) {
+	m := thinkingModel(t, 40, thinkingPreviewLines+6)
+	blk := &m.transcript.blocks[0]
+
+	for _, expanded := range []bool{false, true} {
+		if expanded {
+			rows, _ := thinkingRowsOnScreen(t, m)
+			m = apply(t, m, tea.MouseClickMsg{X: 4, Y: rows[0], Button: tea.MouseLeft})
+			m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: rows[0], Button: tea.MouseLeft})
+			if !m.transcript.blocks[0].expanded {
+				t.Fatal("the click should have expanded the block")
+			}
+		}
+		rows, ok := thinkingRowsOnScreen(t, m)
+		if !ok {
+			t.Fatalf("expanded=%v: the thinking block did not render", expanded)
+		}
+		if !expanded && len(rows) < thinkingPreviewLines+2 {
+			t.Errorf("collapsed block spans %d rows, want header + note + %d reasoning rows", len(rows), thinkingPreviewLines)
+		}
+		for _, y := range rows {
+			if got := m.targetAtScreenY(y); got.role != roleThinking || got.id != blk.id {
+				t.Errorf("expanded=%v: thinking row %d maps to %+v, want %q", expanded, y, got, blk.id)
+			}
+		}
+	}
+}
+
+// TestExpandingThinkingKeepsTheHeaderInPlace verifies the expansion is readable:
+// the viewport does not jump to the newest rows, so the rows a click reveals appear
+// below the header in reading order. Before the fix the re-flow stuck the view to the
+// bottom (follow was armed) and the header scrolled out of sight, leaving the reader
+// in the middle of the chain of thought.
+func TestExpandingThinkingKeepsTheHeaderInPlace(t *testing.T) {
+	// Enough rows that the expanded block is much taller than the viewport.
+	m := thinkingModel(t, 20, 30)
+	header := screenRowOf(m, "▸ thinking")
+	if header < 0 {
+		t.Fatalf("thinking header not on screen:\n%s", stripANSI(m.View().Content))
+	}
+	m = apply(t, m, tea.MouseClickMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	if !m.transcript.blocks[0].expanded {
+		t.Fatal("the click should have expanded the block")
+	}
+
+	screen := stripANSI(m.View().Content)
+	if got := screenRowOf(m, "▾ thinking"); got != header {
+		t.Errorf("the header moved from row %d to %d on expansion:\n%s", header, got, screen)
+	}
+	if !strings.Contains(screen, "reason-00") {
+		t.Errorf("expansion should reveal the oldest rows first:\n%s", screen)
+	}
+	if strings.Contains(screen, "reason-29") {
+		t.Errorf("expansion should not jump to the newest rows:\n%s", screen)
+	}
+	if m.transcript.follow {
+		t.Error("expanding a block is reading back; the viewport should stop following")
+	}
+}
+
+// TestShortThinkingBlockIsNotAClickTarget verifies a block whose whole chain of
+// thought already fits the preview is not clickable: flipping it would only change
+// the chevron and reveal nothing.
+func TestShortThinkingBlockIsNotAClickTarget(t *testing.T) {
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 60, Height: 30})
+	m = apply(t, m, thinkingDeltaMsg{text: "one thought\ntwo thoughts"})
+	m = apply(t, m, turnEndMsg{msg: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant}})
+
+	y := screenRowOf(m, "thinking")
+	if y < 0 {
+		t.Fatalf("thinking header not on screen:\n%s", stripANSI(m.View().Content))
+	}
+	if got := m.targetAtScreenY(y); got.id != "" {
+		t.Fatalf("a fully visible thinking block should not be a click target, got %+v", got)
+	}
+	m = apply(t, m, tea.MouseClickMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: y, Button: tea.MouseLeft})
+	if m.transcript.blocks[0].expanded {
+		t.Error("clicking a fully visible thinking block should not mark it expanded")
+	}
+}
+
+// TestThinkingBlocksAreClickableWhenReplayed verifies a resumed session's reasoning
+// is clickable too: replay seeds blocks directly, so it must mint ids as well.
+func TestThinkingBlocksAreClickableWhenReplayed(t *testing.T) {
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 60, Height: 40})
+	var b strings.Builder
+	for i := 0; i < thinkingPreviewLines+6; i++ {
+		fmt.Fprintf(&b, "reason-%02d\n", i)
+	}
+	m.transcript.addBanner("splash")
+	m.lastToolCard = seedTranscript(&m.transcript, []agentcore.Message{
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{
+			agentcore.NewThinkingContent(b.String()),
+			agentcore.NewTextContent("the answer"),
+		}},
+	})
+	m.indexTranscriptCards()
+	m.relayout()
+
+	header := screenRowOf(m, "▸ thinking")
+	if header < 0 {
+		t.Fatalf("replayed thinking header not on screen:\n%s", stripANSI(m.View().Content))
+	}
+	m = apply(t, m, tea.MouseClickMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	m = apply(t, m, tea.MouseReleaseMsg{X: 4, Y: header, Button: tea.MouseLeft})
+	if out := stripANSI(m.View().Content); !strings.Contains(out, "reason-00") {
+		t.Errorf("clicking a replayed thinking block should reveal its first rows:\n%s", out)
+	}
+}
+
 // scrolledCardModel builds a transcript taller than the viewport and pages it up,
 // so the viewport has a non-zero offset — the state in which a screen row and a
 // content row differ.

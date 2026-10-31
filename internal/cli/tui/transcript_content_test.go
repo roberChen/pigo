@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -62,7 +63,9 @@ func TestUserTurnCapsLongInput(t *testing.T) {
 }
 
 // TestThinkingRendersCapped verifies reasoning content is displayed as a labelled,
-// capped, styled block so a long chain of thought does not push the answer away.
+// capped, styled block so a long chain of thought does not push the answer away —
+// and that the cap keeps the *newest* rows, because that is what the model is
+// reasoning about while it streams.
 func TestThinkingRendersCapped(t *testing.T) {
 	tr := newTranscript(DefaultTheme())
 	tr.setSize(40, 40)
@@ -79,14 +82,53 @@ func TestThinkingRendersCapped(t *testing.T) {
 	if !strings.Contains(out, "thinking") {
 		t.Errorf("thinking block should be labelled:\n%s", out)
 	}
-	if !strings.Contains(out, "thought-a") {
-		t.Errorf("thinking block should show its first lines:\n%s", out)
+	if !strings.Contains(out, "thought-j") {
+		t.Errorf("thinking block should show its newest lines:\n%s", out)
 	}
-	if strings.Contains(out, "thought-j") {
-		t.Errorf("thinking block should cap its lines:\n%s", out)
+	if strings.Contains(out, "thought-a") {
+		t.Errorf("thinking block should hide its oldest lines:\n%s", out)
 	}
-	if !strings.Contains(out, "more lines") {
+	if !strings.Contains(out, "earlier lines") {
 		t.Errorf("capped thinking should report how many lines are hidden:\n%s", out)
+	}
+	if !strings.Contains(out, "click to expand") {
+		t.Errorf("capped thinking should advertise that it opens on click:\n%s", out)
+	}
+}
+
+// TestThinkingExpandedShowsWholeChain verifies a thinking block opens and closes:
+// expanded, the rows the default tail view hid — the opening of the chain of
+// thought — become visible; collapsed again, it is back to the newest rows.
+func TestThinkingExpandedShowsWholeChain(t *testing.T) {
+	tr := newTranscript(DefaultTheme())
+	tr.setSize(40, 40)
+	var b strings.Builder
+	for i := 0; i < thinkingPreviewLines+4; i++ {
+		fmt.Fprintf(&b, "thought-%c\n", rune('a'+i))
+	}
+	tr.setThinking(b.String())
+	tr.endThinking()
+	if n := countBlocks(tr, roleThinking); n != 1 {
+		t.Fatalf("thinking blocks = %d, want 1", n)
+	}
+	if out := stripANSI(tr.vp.GetContent()); strings.Contains(out, "thought-a") {
+		t.Fatalf("a collapsed thinking block should hide its oldest rows:\n%s", out)
+	}
+
+	tr.setThinkingExpanded(tr.blocks[0].id, true)
+	tr.reflow()
+	out := stripANSI(tr.vp.GetContent())
+	if !strings.Contains(out, "thought-a") || !strings.Contains(out, "thought-j") {
+		t.Errorf("an expanded thinking block should show the whole chain of thought:\n%s", out)
+	}
+	if strings.Contains(out, "click to expand") {
+		t.Errorf("an expanded thinking block should not offer to expand:\n%s", out)
+	}
+
+	tr.setThinkingExpanded(tr.blocks[0].id, false)
+	tr.reflow()
+	if out := stripANSI(tr.vp.GetContent()); strings.Contains(out, "thought-a") {
+		t.Errorf("collapsing should hide the oldest rows again:\n%s", out)
 	}
 }
 

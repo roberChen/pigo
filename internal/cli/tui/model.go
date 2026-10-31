@@ -140,8 +140,9 @@ type Model struct {
 	// selectedCardID is the tool card the user picked (a click or card navigation).
 	// It is the target of Ctrl+O and wears an accent border; "" means none.
 	selectedCardID string
-	// pressedTarget remembers the block under a left press so a click without a
-	// drag toggles it on release (a drag stays a text selection).
+	// pressedTarget remembers the collapsible block (tool card or thinking block)
+	// under a left press so a click without a drag toggles it on release (a drag
+	// stays a text selection).
 	pressedTarget rowTarget
 
 	// draggingScrollbar is set while the left mouse button is held after pressing
@@ -347,14 +348,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sel.dragging = false
 		}
 		// A click flips the block under the press, so anything in the history can be
-		// opened and closed — not just the newest card. The card is selected
-		// (highlighted) besides being toggled, so Ctrl+O keeps acting on it. The
-		// tolerance in clicked() keeps a jittery click from being mistaken for a drag.
+		// opened and closed — not just the newest card. A thinking block is a click
+		// target of its own; a tool card is selected (highlighted) besides being
+		// toggled, so Ctrl+O keeps acting on it. The tolerance in clicked() keeps a
+		// jittery click from being mistaken for a drag.
 		if m.sel.clicked() {
 			pressed := m.pressedTarget
 			m.pressedTarget = rowTarget{}
 			m.sel = selection{}
 			switch pressed.role {
+			case roleThinking:
+				if pressed.id != "" {
+					if m.selectedCardID != "" {
+						m.clearCardSelection()
+					}
+					m.toggleThinking(pressed.id)
+					return m, nil
+				}
 			case roleTool:
 				if pressed.id != "" && m.selectCard(pressed.id) {
 					m.toggleSelectedCard()

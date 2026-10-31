@@ -66,6 +66,18 @@ interactive REPL/TUI.
   was actually painted: while a run streams, output appended after that frame moves
   every row under the pointer, so the old lookup toggled whichever card had
   scrolled into the clicked row instead of the one the user pointed at.
+- **A thinking block now shows the newest reasoning and opens on click**: the
+  reasoning preview kept the *first* six lines, which is the part the model has
+  already moved past — while streaming, the interesting rows are the ones being
+  written right now. The preview now keeps the tail and labels the hidden rows above
+  it (`… N earlier lines · click to expand`). The block also became a click target,
+  like a tool card: clicking anywhere on it expands the whole chain of thought
+  (capped at 400 rows, with the rest in the session file) and clicking again
+  collapses it. The expansion keeps the header where it is and fills the older rows
+  in below it, so the chain reads in order instead of the view jumping to the newest
+  line; a block that already fits the preview is not a click target. Clicks are
+  resolved through the same painted-frame map as cards, and replayed reasoning from a
+  resumed session is clickable too.
 - **Tool cards no longer crash the TUI on non-ASCII arguments**: the card's
   line-clipping helper measured a word boundary in bytes and then sliced runes, so a
   long CJK argument (or any multibyte text past the clip budget) ran off the end of
