@@ -12,6 +12,19 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **The TUI's context-usage readout is now permanent and live**: the amber `◔`
+  block only appeared after a run's end-of-run telemetry and then froze until the
+  next run finished, so it was absent exactly when a long run made it interesting.
+  It is now always rendered (a `◔ --` placeholder until the first measurement) and
+  is driven by a context meter fed from the events the bridge already delivers:
+  the submitted prompt is counted on Enter, streamed assistant text grows the
+  estimate as it arrives, each settled turn corrects it with the provider's usage
+  block (or a character estimate when none is reported) and adds the turn's tool
+  results, a compaction collapses it to the loop's post-compaction count (now
+  carried on `compactionMsg`), and the run-end telemetry still reconciles it.
+  `/resume`, `/new` and `/rebuild` re-seed it from the conversation they switch to.
+  Every update uses copies carried by bridged messages, so the tea goroutine never
+  reads the context the pump goroutine is writing.
 - **One malformed tool call no longer poisons the rest of the session**: a model
   that streamed invalid JSON as a tool's arguments was answered with a
   "not valid JSON" tool result and given another turn — but its broken call stayed

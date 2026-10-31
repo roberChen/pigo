@@ -34,12 +34,13 @@ type statusBar struct {
 	git gitInfoMsg
 
 	// contextPct is the latest context-window utilization in percent [0,100],
-	// derived from telemetryMsg (ContextUtilization * 100). -1 means unknown, so
-	// the segment is hidden until the first telemetry arrives.
+	// derived from the live context meter (telemetryEventView.util * 100). -1
+	// means the window is not known yet; the segment is permanent, so it renders
+	// a placeholder rather than disappearing.
 	contextPct int
 
-	// tokens is the most recently observed context-token count (ContextTokens),
-	// shown alongside the percentage. 0 means unknown/not yet reported.
+	// tokens is the most recently observed context-token count, shown alongside
+	// the percentage. 0 means "not measured yet", rendered as "--".
 	tokens int
 
 	// task is the current activity text (e.g. the running tool or turn state).
@@ -68,10 +69,12 @@ func (s *statusBar) SetModel(model string) { s.model = model }
 // SetThinking updates the displayed reasoning-effort level after a /think switch.
 func (s *statusBar) SetThinking(level string) { s.thinking = level }
 
-// SetTelemetry updates the context-usage percentage from a telemetry event.
-// A zero/unknown window (ContextWindow == 0) leaves the segment hidden.
-func (s *statusBar) SetTelemetry(ev telemetryEventView) {
-	if ev.window <= 0 {
+// SetContext updates the context-usage readout from the live context meter.
+// The segment is permanent: an unknown window or an unmeasured conversation
+// renders a placeholder instead of hiding the block, so the readout has a fixed
+// home the eye can return to.
+func (s *statusBar) SetContext(ev telemetryEventView) {
+	if ev.window <= 0 || !ev.known {
 		s.contextPct = -1
 		s.tokens = 0
 		return
@@ -84,22 +87,26 @@ func (s *statusBar) SetTelemetry(ev telemetryEventView) {
 		pct = 100
 	}
 	s.contextPct = pct
-	if ev.tokens > 0 {
-		s.tokens = ev.tokens
-	}
+	s.tokens = ev.tokens
 }
 
 // SetTask records the current activity text shown at the far right / high
 // priority slot of the bar.
 func (s *statusBar) SetTask(task string) { s.task = task }
 
-// telemetryEventView is the minimal projection of agentcore.TelemetryEvent the
-// status bar needs, so the caller (model.go) adapts the event rather than this
-// file depending on agentcore directly for a two-field read.
+// telemetryEventView is the minimal projection of the context meter the status
+// bar needs, so the status bar itself does not depend on agentcore for a
+// three-field read.
 type telemetryEventView struct {
-	util   float64
+	// util is the used/window ratio in [0,1]; only meaningful with window > 0.
+	util float64
+	// window is the model's context-token budget (0 when unknown).
 	window int
+	// tokens is the current context-token estimate.
 	tokens int
+	// known reports whether a measurement exists at all: false renders the
+	// placeholder, distinguishing "nothing measured yet" from a real 0%.
+	known bool
 }
 
 // appName is the badge shown at the far left of the bar.
@@ -283,10 +290,10 @@ func (s statusBar) segments() []segment {
 	if s.cwd != "" {
 		segs = append(segs, segment{text: glyphCwd + " " + s.cwd, fg: sbCwdFg, bg: sbCwdBg, priority: prioCwd})
 	}
-	if s.contextPct >= 0 {
-		// The context readout is the highlighted amber block on the right.
-		segs = append(segs, segment{text: s.ctxText(), fg: sbCtxFg, bg: sbCtxBg, priority: prioToken})
-	}
+	// The context readout is permanent (the highlighted amber block on the
+	// right): before the first measurement it renders glyphCtx + "--" rather than
+	// vanishing, so its position never shifts under the user's eye.
+	segs = append(segs, segment{text: s.ctxText(), fg: sbCtxFg, bg: sbCtxBg, priority: prioToken})
 	if s.task != "" {
 		segs = append(segs, segment{text: glyphTask + " " + s.task, fg: sbTaskFg, bg: sbTaskBg, priority: prioTask})
 	}
@@ -308,8 +315,12 @@ func (s statusBar) gitText() string {
 }
 
 // ctxText formats the context segment, e.g. "◔ 90,866 (46%)" when the token
-// count is known, or "◔ 46%" before the first token count arrives.
+// count is known, "◔ 46%" when only the window is known, and "◔ --" before the
+// first measurement (the segment is permanent, so it never disappears).
 func (s statusBar) ctxText() string {
+	if s.contextPct < 0 {
+		return fmt.Sprintf("%s --", glyphCtx)
+	}
 	if s.tokens > 0 {
 		return fmt.Sprintf("%s %s (%d%%)", glyphCtx, humanizeInt(s.tokens), s.contextPct)
 	}

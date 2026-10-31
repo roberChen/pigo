@@ -295,9 +295,9 @@ func (m Model) swapToSession(s *runSession, history []agentcore.Message, saveErr
 	m.slash = s.slash
 	m.statusBar.SetModel(s.live.Model)
 	m.statusBar.SetThinking(string(s.live.ThinkingLevel))
-	// The context-usage readout belongs to the conversation being left, so hide it
-	// until the new session reports its own telemetry.
-	m.statusBar.SetTelemetry(telemetryEventView{})
+	// The context-usage readout belongs to the conversation being left, so re-seed
+	// it from the conversation being entered (the idled session's history).
+	m.seedContextMeter()
 	// Replay the conversation, tool cards included, and leave Ctrl+O pointing at
 	// the last replayed call as a live run would.
 	m.lastToolCard = seedTranscript(&m.transcript, history)

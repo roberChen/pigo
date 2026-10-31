@@ -321,6 +321,7 @@ func (m Model) submitModelPick() (tea.Model, tea.Cmd) {
 	m.transcript.addSystem(prompts.ApplyModelSwitch(m.live, choice.ID))
 	m.statusBar.SetModel(m.live.Model)
 	m.statusBar.SetThinking(string(m.live.ThinkingLevel))
+	m.syncContextWindow()
 	// Round-trip the prompt so the TUI does not fire image/clipboard reads for a
 	// selection; there is nothing to run.
 	return m, nil

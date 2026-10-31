@@ -20,7 +20,7 @@ func newTestStatusBar() statusBar {
 func TestStatusBarRendersAllFields(t *testing.T) {
 	s := newTestStatusBar()
 	s.SetGit(gitInfoMsg{branch: "master", dirty: 3, ahead: 4, ok: true})
-	s.SetTelemetry(telemetryEventView{util: 0.42, window: 200000})
+	s.SetContext(telemetryEventView{util: 0.42, window: 200000, tokens: 84000, known: true})
 	s.SetTask("running: Read")
 
 	const width = 200
@@ -57,21 +57,27 @@ func TestStatusBarHidesGitWhenNotRepo(t *testing.T) {
 	}
 }
 
-func TestStatusBarHidesContextWhenUnknown(t *testing.T) {
+// TestStatusBarContextSegmentIsPermanent checks the context readout is always
+// present, even before any measurement: the block renders a "--" placeholder
+// instead of disappearing (the segment must be a fixed landmark).
+func TestStatusBarContextSegmentIsPermanent(t *testing.T) {
 	s := newTestStatusBar()
-	// No telemetry set (window 0) → context segment hidden.
-	s.SetTelemetry(telemetryEventView{util: 0.5, window: 0})
+	// Nothing measured yet: no window and no known count.
+	s.SetContext(telemetryEventView{})
 
 	out := s.Render(120)
-	if strings.Contains(out, glyphCtx) {
-		t.Errorf("context segment should be hidden when window unknown; got %q", out)
+	if !strings.Contains(out, glyphCtx) {
+		t.Fatalf("context segment must always render, got %q", out)
+	}
+	if !strings.Contains(out, glyphCtx+" --") {
+		t.Errorf("unmeasured context should render the -- placeholder; got %q", out)
 	}
 }
 
 func TestStatusBarTruncationKeepsPriorityFields(t *testing.T) {
 	s := newTestStatusBar()
 	s.SetGit(gitInfoMsg{branch: "master", dirty: 3, ahead: 4, ok: true})
-	s.SetTelemetry(telemetryEventView{util: 0.42, window: 200000})
+	s.SetContext(telemetryEventView{util: 0.42, window: 200000, tokens: 84000, known: true})
 	s.SetTask("TASK")
 
 	// Narrow width: only the highest-priority fields (task > model > token)
@@ -114,7 +120,7 @@ func TestStatusBarZeroWidthEmpty(t *testing.T) {
 // comma-grouped token count with the percentage once telemetry reports tokens.
 func TestStatusBarContextTokenCount(t *testing.T) {
 	s := newTestStatusBar()
-	s.SetTelemetry(telemetryEventView{util: 0.46, window: 200000, tokens: 90866})
+	s.SetContext(telemetryEventView{util: 0.46, window: 200000, tokens: 90866, known: true})
 
 	out := s.Render(200)
 	for _, want := range []string{glyphCtx, "90,866", "46%"} {

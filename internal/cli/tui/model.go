@@ -91,9 +91,16 @@ type Model struct {
 	quitting bool
 
 	// statusBar renders the persistent bottom line (#386, US-003). It is fed the
-	// terminal width, telemetry-derived context usage, and the async git probe
+	// terminal width, the context meter's usage readout, and the async git probe
 	// result; View renders it just above the input line.
 	statusBar statusBar
+
+	// ctxMeter tracks context-token usage continuously from the bridged run
+	// events (contextmeter.go), so the status bar's context segment updates while
+	// a run is still streaming instead of only at run end. It never reads the
+	// session's AgentContext while a run is in flight — that belongs to the pump
+	// goroutine — so updates stay race-free.
+	ctxMeter contextMeter
 
 	// cwd is the launch directory, captured once at construction and reused for
 	// the git probe and the status bar's path display.
@@ -247,6 +254,9 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	// Make the replayed cards selectable: before this they existed only as transcript
 	// blocks, so clicking one (or Ctrl+O after selecting it) had nothing to toggle.
 	m.indexTranscriptCards()
+	// Seed the context readout from the resumed (or empty) conversation so the
+	// status bar shows its usage before the first turn.
+	m.seedContextMeter()
 	return m
 }
 
@@ -455,10 +465,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner.addTokens(msg.delta)
 		m.transcript.appendDelta(msg.delta)
 		m.remoteEcho(msg.delta)
+		// Grow the context readout as the answer streams, so the status bar moves
+		// during a long turn rather than only when it ends.
+		m.ctxMeter.addStream(msg.delta)
+		m.statusBar.SetContext(m.ctxMeter.view())
 		return m, m.pumpNext()
 
 	case turnEndMsg:
 		m.transcript.finalizeTurn(msg.msg)
+		// Fold the settled turn into the context readout: a provider usage block
+		// replaces the running estimate, otherwise the assistant text (plus the
+		// tool results) is estimated and added. This is the fine-grained update the
+		// bar was missing — it lands once per turn, not once per run.
+		m.ctxMeter.observeTurn(msg.msg, msg.results)
+		m.statusBar.SetContext(m.ctxMeter.view())
 		// Surface a failed or empty turn so a provider/API error is never silent.
 		// The loop delivers request failures (e.g. a 4xx from the endpoint) as a
 		// terminal assistant message with stopReason error/aborted via TurnEndEvent
@@ -553,14 +573,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.pumpNext()
 
 	case telemetryMsg:
-		// Feed the status bar's context-usage readout, and retain the event on the
-		// session's telemetry holder so /status can render the cumulative + last-run
-		// telemetry report (US-002, #292). Then keep the pump running.
-		m.statusBar.SetTelemetry(telemetryEventView{
-			util:   msg.ev.ContextUtilization,
-			window: msg.ev.ContextWindow,
-			tokens: msg.ev.ContextTokens,
-		})
+		// Adopt the run-end summary (authoritative: the loop computed it from the
+		// settled context after any compaction) into the context readout, and retain
+		// the event on the session's telemetry holder so /status can render the
+		// cumulative + last-run telemetry report (US-002, #292). Then keep the pump
+		// running.
+		m.ctxMeter.observeTelemetry(msg.ev)
+		m.statusBar.SetContext(m.ctxMeter.view())
 		if m.session != nil && m.session.telemetry != nil {
 			m.session.telemetry.Fold(msg.ev)
 		}
@@ -575,6 +594,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil {
 			m.session.compacted = true
 		}
+		// The context just shrank: reflect the loop's post-compaction count right
+		// away instead of waiting for the run-end telemetry.
+		m.ctxMeter.observeCompaction(msg.tokensAfter)
+		m.statusBar.SetContext(m.ctxMeter.view())
 		m.transcript.addSystem("(context compacted)")
 		return m, m.pumpNext()
 
@@ -612,6 +635,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.transcript.addSystem("rebuild failed: " + msg.err.Error() + " (context left unchanged)")
 		} else {
+			// The rebuild replaced the message list in place while no run was
+			// pumping, so re-seed the context readout from it (it shrank).
+			m.seedContextMeter()
 			m.transcript.addSystem(msg.summary)
 		}
 		m.relayout()
@@ -639,6 +665,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := m.session.persist(); err != nil {
 				m.transcript.addSystem("Session save failed: " + err.Error())
 			}
+			// Re-seed from the settled message list: the run goroutine is done, so
+			// reading the context here is safe and gives the most accurate figure
+			// (it also covers runs whose provider never reported usage).
+			m.seedContextMeter()
 		}
 		// The editor was blurred at submit; re-enable it so the next prompt can be
 		// typed, and re-probe git since a run may have changed the working tree.
@@ -1191,6 +1221,7 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 	if m.live != nil {
 		m.statusBar.SetModel(m.live.Model)
 		m.statusBar.SetThinking(string(m.live.ThinkingLevel))
+		m.syncContextWindow()
 	}
 	// An action command is complete once its status is shown; a hybrid with no
 	// prompt (notifications only) likewise starts no run.
@@ -1280,6 +1311,10 @@ func (m Model) startPrompt(prompt string) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.session.reloadCmd(prompt), m.tickSpinner())
 	}
 	m.input.Blur()
+	// Count the prompt as it enters the conversation so the readout moves on
+	// submit, before the first turn has been generated.
+	m.ctxMeter.addUserPrompt(prompt)
+	m.statusBar.SetContext(m.ctxMeter.view())
 	ch, cmd := m.startRunFn(prompt)
 	m.runCh = ch
 	m.running = true
