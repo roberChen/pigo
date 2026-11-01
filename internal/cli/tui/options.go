@@ -41,8 +41,8 @@ type Options struct {
 	// without per-call confirmation (mirrors pi's --approve/-a).
 	Approve bool
 	// Skills is the pre-loaded skill set (loaded once by run.SetupEnv, shared with
-	// prompt injection). Each is registered as a /skill-name command. Empty under
-	// --no-skills, so nothing is registered.
+	// prompt injection). The /skill picker lists it; skills are not registered as
+	// one slash command each. Empty under --no-skills.
 	Skills []*runtime.Skill
 
 	// Plugins holds the loaded plugin manager so the TUI can deliver lifecycle

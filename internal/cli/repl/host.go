@@ -30,6 +30,7 @@ func (d *replDeps) Live() *cli.LiveConfig                      { return d.live }
 func (d *replDeps) Registry() *agenttool.ToolRegistry          { return d.reg }
 func (d *replDeps) Reminders() *runtime.ReminderRegistry       { return d.reminders }
 func (d *replDeps) Slash() *runtime.SlashRegistry              { return d.slash }
+func (d *replDeps) Skills() []*runtime.Skill                   { return d.skills }
 func (d *replDeps) Creds() *provider.CredentialStore           { return d.creds }
 func (d *replDeps) Notifier() *plugin.EventNotifier            { return d.notifier }
 func (d *replDeps) NotifierHandle() func(agentcore.AgentEvent) { return d.notifierHandle() }

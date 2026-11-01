@@ -72,7 +72,10 @@ type replDeps struct {
 	// change.
 	mcp   *mcp.Manager
 	slash *runtime.SlashRegistry
-	creds *provider.CredentialStore
+	// skills is the pre-loaded skill set the slash registry was built from; a
+	// reload refreshes it together with the registry. /status and /skill read it.
+	skills []*runtime.Skill
+	creds  *provider.CredentialStore
 
 	// notifier delivers agent lifecycle events to subscribed plugins (US-017,
 	// #133). It is nil when no plugin subscribes; DrainStream's OnEvent stays
@@ -183,7 +186,7 @@ type replDeps struct {
 	// rebuildSlash rebuilds the slash registry after a reload so skills and prompt
 	// templates added or removed on disk appear without a restart. nil disables the
 	// rebuild (the old registry stays usable).
-	rebuildSlash func(skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry
+	rebuildSlash func(skills []*runtime.Skill, plugins *plugin.Manager, mcpMgr *mcp.Manager) *runtime.SlashRegistry
 }
 
 // replScanBufInit is the initial size of the shared input reader. A REPL user

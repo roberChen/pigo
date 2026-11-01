@@ -106,9 +106,18 @@ func (s *runSession) applyReload(res *run.ReloadResult) {
 	s.header.Provider = s.live.ProviderName
 
 	// Skills may have changed on disk: rebuild the slash registry from the same
-	// sources the launch used so /skill-name commands match the new skill set.
+	// sources the launch used so /skill sees the new skill set.
 	s.skills = env.Skills
-	if reg := newSlashRegistryFor(s.opts, s.live, s.skills, s.plugins); reg != nil {
+	// A reload replaces the MCP manager outright (its definitions come from the
+	// config; the reloader closes the old one), so rebind the new manager to the
+	// registry that was just rebuilt and rewrite agentCtx.Tools: the old manager's
+	// tools are now dead and must not be advertised. /mcp then keeps switching
+	// the new one.
+	if s.mcp != nil {
+		s.mcp.BindRegistry(s.reg)
+	}
+	s.syncMCPTools()
+	if reg := newSlashRegistryFor(s.opts, s.live, s.skills, s.plugins, s.mcp); reg != nil {
 		s.slash = reg
 	}
 }

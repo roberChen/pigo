@@ -80,21 +80,24 @@ func LoadPromptPaths(paths []string) []runtime.SlashCommand {
 
 // BuildSlashRegistry assembles the slash-command registry: compile-time
 // built-ins seeded by runtime.NewSlashRegistry, the live-state action commands
-// (/model, /help) bound to live, user declarative templates loaded from
-// ~/.pigo/commands (or $PIGO_HOME/commands), plugin-declared commands from the
-// loaded Manager, plus the pre-loaded skills — each surfaced as a "/skill-name"
-// command (mirrors Claude Code's /skill invocation). A missing directory is not an
-// error. Names that collide with a built-in are shadowed (the built-in wins) and
-// reported on stderr. The skills slice is loaded once by setupAgentEnv (empty
-// under --no-skills), so no /skill-name commands are registered when it is
-// empty. mgr may be nil (no plugins loaded). creds may be nil, which disables
-// "/models fetch" online discovery.
+// (/model, /help) bound to live, the /skill control command, user
+// declarative templates loaded from ~/.pigo/commands (or $PIGO_HOME/commands),
+// and plugin-declared commands from the loaded Manager. Skills are deliberately
+// NOT registered one command per skill any more: /skill is the single entry
+// point (a multi-select picker in the TUI, "/skill <name>" in the REPL), which
+// keeps the command surface and the autocomplete popup stable as the skill set
+// grows. A missing directory is not an error. Names that collide with a built-in
+// are shadowed (the built-in wins) and reported on stderr. mgr may be nil (no
+// plugins loaded); creds may be nil, which disables "/models fetch" online
+// discovery. /mcp is installed separately by RegisterMCPCommand, because only
+// the front-end's assembly knows the connected manager.
 func BuildSlashRegistry(live *cli.LiveConfig, creds *provider.CredentialStore, skills []*runtime.Skill, mgr *plugin.Manager, srcs PromptTemplateSources) (*runtime.SlashRegistry, error) {
 	reg := runtime.NewSlashRegistry()
 	RegisterLiveCommands(reg, live, creds)
 	RegisterPluginCommands(reg, mgr)
+	RegisterSkillCommands(reg, skills)
 	// --no-prompt-templates disables all prompt-template discovery (global,
-	// settings, CLI); built-in slash commands and skills are unaffected.
+	// settings, CLI); built-in slash commands are unaffected.
 	if !srcs.Disable {
 		dir := os.Getenv("PIGO_HOME")
 		if dir == "" {
@@ -140,14 +143,6 @@ func BuildSlashRegistry(live *cli.LiveConfig, creds *provider.CredentialStore, s
 				reg.AddProject(c)
 			}
 		}
-	}
-	// Register skills as /skill-name commands from the pre-loaded set (shared with
-	// prompt injection in setupAgentEnv, so the directory is read once). All
-	// skills — including disable-model-invocation ones — get a slash command; the
-	// prompt-injection side filters the disabled ones. Under --no-skills the set
-	// is empty, so nothing is registered.
-	for _, s := range skills {
-		reg.AddSkill(s.SlashCommand())
 	}
 	if sh := reg.Shadowed(); len(sh) > 0 {
 		parts := make([]string, len(sh))

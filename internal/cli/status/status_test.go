@@ -117,7 +117,7 @@ func TestRunStatusEnvAndCreds(t *testing.T) {
 	host.live.ProviderName = "test-provider"
 	host.live.BaseURL = "https://api.example.com"
 
-	host.slash.AddSkill(runtime.SlashCommand{Name: "my-skill", Expand: func(string) string { return "" }})
+	host.skills = []*runtime.Skill{{Frontmatter: runtime.SkillFrontmatter{Name: "my-skill", Description: "does things"}}}
 	host.slash.AddPlugin(runtime.SlashCommand{Name: "my-plugin", Run: func(string) (string, string) { return "", "" }})
 
 	host.creds.SetOverride("test-provider", "sk-secretkey-wxyz")

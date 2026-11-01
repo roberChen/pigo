@@ -189,6 +189,24 @@ func ApplyToolPolicy(tools []agentcore.AgentTool, policy ToolPolicy) []agentcore
 	return out
 }
 
+// Allows reports whether a single tool name passes the policy. It is the
+// per-name form of ApplyToolPolicy, used where tools appear after assembly: an
+// MCP server enabled at runtime must be held to the same boundary as the tools
+// that were filtered at launch.
+func (p ToolPolicy) Allows(name string) bool {
+	if p.IsZero() {
+		return true
+	}
+	n := normalizeToolName(name)
+	if len(p.Allow) > 0 {
+		if _, ok := nameSet(p.Allow)[n]; !ok {
+			return false
+		}
+	}
+	_, denied := nameSet(p.Deny)[n]
+	return !denied
+}
+
 // nameSet indexes already-normalized names for lookup.
 func nameSet(names []string) map[string]struct{} {
 	if len(names) == 0 {

@@ -150,11 +150,16 @@ func printEnvStatus(out io.Writer, color bool, host cli.Host) {
 	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "trust:"), trustStatus(host.Trust(), host.Cwd()))
 
 	var skills, plugins, userCmds []string
+	// Skill names come from the loaded skill set: skills are selected through
+	// /skill rather than registered as one slash command each.
+	for _, s := range host.Skills() {
+		if s != nil {
+			skills = append(skills, s.Frontmatter.Name)
+		}
+	}
 	if slash := host.Slash(); slash != nil {
 		for _, c := range slash.List() {
 			switch c.Source {
-			case runtime.SourceSkill:
-				skills = append(skills, c.Name)
 			case runtime.SourcePlugin:
 				plugins = append(plugins, c.Name)
 			case runtime.SourceUser:

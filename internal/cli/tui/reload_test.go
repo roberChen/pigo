@@ -4,11 +4,15 @@
 package tui
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
 
+	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/mcp"
 )
 
 // newReloadSession assembles a TUI session over the given settings plus a seeded
@@ -128,5 +132,41 @@ func TestReloadDoneMsgAppliesResult(t *testing.T) {
 	}
 	if got.live != got.session.live || got.slash != got.session.slash {
 		t.Error("the model should rebind the live config and slash registry after a reload")
+	}
+}
+
+// TestApplyReloadSwapsMCPManager verifies a reload adopts the freshly connected
+// manager, rewrites agentCtx.Tools (the old manager's server tools must not stay
+// advertised) and binds the new manager to the rebuilt registry, so /mcp keeps
+// switching the live instance.
+func TestApplyReloadSwapsMCPManager(t *testing.T) {
+	s, _ := newReloadSession(t, run.ReloadSettings{
+		Model:    "openrouter/free",
+		NoSkills: true,
+	})
+	mgr := mcp.Connect(context.Background(), nil, io.Discard)
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	stale := stubTool("mcp__old__run")
+	read := stubTool("read")
+	s.applyReload(&run.ReloadResult{Env: run.Env{
+		Tools:  []agentcore.AgentTool{stale, read},
+		MCP:    mgr,
+		Skills: s.skills,
+	}})
+
+	if s.mcp != mgr {
+		t.Fatal("applyReload should adopt the reloaded MCP manager")
+	}
+	for _, tool := range s.agentCtx.Tools {
+		if strings.HasPrefix(tool.Name(), "mcp__") {
+			t.Errorf("stale MCP tool %q is still advertised after the reload", tool.Name())
+		}
+	}
+	if _, ok := s.reg.Get("mcp__old__run"); ok {
+		t.Error("the reloaded registry still knows the old manager's tool")
+	}
+	if _, ok := s.reg.Get("read"); !ok {
+		t.Error("built-in tools must survive the reload")
 	}
 }

@@ -84,7 +84,8 @@ type cliOptions struct {
 	// tools (bash/write/edit) run without per-call confirmation for this run.
 	approve bool
 	// noSkills disables skill discovery (mirrors pi's --no-skills): skills under
-	// ~/.agents/skills are not loaded as /skill-name commands.
+	// ~/.agents/skills are not loaded, so /skill has nothing to select and the
+	// model sees no <available_skills>.
 	noSkills bool
 	// systemPrompt, when non-empty, replaces the default coding-assistant base
 	// instruction (mirrors pi's --system-prompt). The environment block and
@@ -193,7 +194,7 @@ func registerFlags(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVarP(&opts.resumeID, "resume", "r", "", "resume the interactive session with this id")
 	fs.BoolVarP(&opts.continueLast, "continue", "c", false, "resume the most recent interactive session")
 	fs.BoolVarP(&opts.approve, "approve", "a", false, "trust the working directory for this run: skip the first-launch trust prompt and run side-effect tools without per-call confirmation")
-	fs.BoolVar(&opts.noSkills, "no-skills", false, "disable skill discovery (do not load skills under ~/.agents/skills as /skill-name commands)")
+	fs.BoolVar(&opts.noSkills, "no-skills", false, "disable skill discovery (do not load skills under ~/.agents/skills; /skill has nothing to select and model auto-invocation is off)")
 	fs.BoolVar(&opts.noPromptTemplates, "no-prompt-templates", false, "disable prompt-template discovery (do not load ~/.pigo/{commands,prompts}, .pigo/prompts, config prompts, or --prompt-template); built-in slash commands are unaffected")
 	fs.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt to use instead of the default coding-assistant prompt (mirrors pi --system-prompt)")
 	fs.StringArrayVar(&opts.appendSystemPrompt, "append-system-prompt", nil, "append text or file contents to the system prompt; repeatable (mirrors pi --append-system-prompt)")

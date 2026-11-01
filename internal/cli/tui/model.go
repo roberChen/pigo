@@ -15,6 +15,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/memstatus"
+	"github.com/smallnest/pigo/internal/cli/prompts"
 	"github.com/smallnest/pigo/internal/cli/status"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/memory"
@@ -130,6 +131,23 @@ type Model struct {
 	// "/model <id>" command runs (prompts.ApplyModelSwitch).
 	modelPicker modelPicker
 
+	// skillPicker is the /skill overlay: a filterable multi-select list of the
+	// loaded skills. Enter hands its draft to skillArgForm, Esc discards it.
+	skillPicker skillPicker
+	// skillArgForm is the second stage of /skill: one field per template slot the
+	// selected skills declare, prefilled from the args the chips already carry.
+	// Enter commits the values onto selectedSkills, Esc returns to the picker.
+	skillArgForm skillArgForm
+	// selectedSkills is the ordered set of skills shown as chips above the input
+	// and injected into the next submitted message (one-shot), together with the
+	// argument tokens the form collected. Entering the picker seeds its draft
+	// from here, so reopening never loses the selection or its values.
+	selectedSkills []selectedSkill
+	// mcpPicker is the /mcp overlay: one row per configured MCP server. Space
+	// toggles a server immediately (connect/disconnect + tool-set rewiring), so it
+	// has no draft; Enter/Esc closes it.
+	mcpPicker mcpPicker
+
 	// ask is the pending question from the question tool (agentcore asker seam):
 	// the run is blocked on the operator's answer, the prompt is shown above the
 	// composer, and the composer becomes the answer field.
@@ -214,21 +232,24 @@ func NewModel(opts Options) Model {
 		ContextWindow: cli.DefaultContextWindow,
 	}
 	return Model{
-		opts:        opts,
-		theme:       theme,
-		transcript:  newTranscript(theme),
-		input:       newInput(),
-		cwd:         cwd,
-		statusBar:   newStatusBar(theme, opts, cwd),
-		toolCards:   make(map[string]*toolCard),
-		slash:       newSlashRegistry(opts, live),
-		live:        live,
-		menu:        newSlashMenu(theme),
-		picker:      newSessionPicker(theme),
-		modelPicker: newModelPicker(theme),
-		spinner:     newSpinner(theme),
-		pastes:      make(map[int]string),
-		images:      make(map[int]string),
+		opts:         opts,
+		theme:        theme,
+		transcript:   newTranscript(theme),
+		input:        newInput(),
+		cwd:          cwd,
+		statusBar:    newStatusBar(theme, opts, cwd),
+		toolCards:    make(map[string]*toolCard),
+		slash:        newSlashRegistry(opts, live),
+		live:         live,
+		menu:         newSlashMenu(theme),
+		picker:       newSessionPicker(theme),
+		modelPicker:  newModelPicker(theme),
+		skillPicker:  newSkillPicker(theme),
+		skillArgForm: newSkillArgForm(theme),
+		mcpPicker:    newMCPPicker(theme),
+		spinner:      newSpinner(theme),
+		pastes:       make(map[int]string),
+		images:       make(map[int]string),
 	}
 }
 
@@ -614,6 +635,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.session.applyReload(msg.res)
 			m.live = m.session.live
 			m.slash = m.session.slash
+			// Skills may have been added or removed by the reload: drop chips that
+			// no longer resolve (arguments included) so the next message never
+			// claims a skill that is gone.
+			if len(m.selectedSkills) > 0 {
+				kept := m.selectedSkills[:0]
+				for _, sel := range m.selectedSkills {
+					if prompts.FindSkill(m.session.skills, sel.Name) != nil {
+						kept = append(kept, sel)
+					}
+				}
+				m.selectedSkills = kept
+			}
 			for _, line := range msg.res.Summary {
 				m.transcript.addSystem(line)
 			}
@@ -623,6 +656,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.startPrompt(msg.startPrompt)
 		}
 		return m, nil
+
+	case mcpToggleDoneMsg:
+		// An MCP switch finished. Apply it to the live session first (re-advertise
+		// exactly the active servers' tools), then refresh the picker's rows and
+		// report the status. Both the picker's Space toggle and the textual
+		// "/mcp <server> on|off" form mark the model running for the duration, so
+		// ending the busy state here is always correct.
+		m.spinner.unpin()
+		m.spinner.stop()
+		m.running = false
+		if msg.name != "" {
+			delete(m.mcpPicker.pending, msg.name)
+		}
+		if m.session != nil {
+			m.session.syncMCPTools()
+		}
+		if m.mcpPicker.active {
+			m.mcpPicker.setStatuses(m.mcpStatuses())
+		}
+		if msg.message != "" {
+			m.transcript.addSystem(msg.message)
+		}
+		focus := m.input.Focus()
+		m.relayout()
+		return m, focus
 
 	case rebuildDoneMsg:
 		// A manual /rebuild finished: clear the pinned "Preparing conversation
@@ -754,6 +812,129 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Text != "" {
 			m.modelPicker.typeFilter(msg.Text)
+			m.relayout()
+		}
+		return m, nil
+	}
+
+	// The /skill argument form is the second stage of the picker and owns the
+	// keyboard while up: printable text edits the focused field, Tab/arrows move
+	// between fields, Enter commits the values onto the chips, Esc returns to the
+	// picker with the draft (and what was typed) intact.
+	if !m.running && m.skillArgForm.active {
+		switch msg.String() {
+		case "tab", "down", "ctrl+n":
+			m.skillArgForm.move(1)
+		case "shift+tab", "up", "ctrl+p":
+			m.skillArgForm.move(-1)
+		case "left", "ctrl+b":
+			m.skillArgForm.left()
+		case "right", "ctrl+f":
+			m.skillArgForm.right()
+		case "home", "ctrl+a":
+			m.skillArgForm.home()
+		case "end", "ctrl+e":
+			m.skillArgForm.end()
+		case "backspace":
+			m.skillArgForm.backspace()
+		case "delete", "ctrl+d":
+			m.skillArgForm.deleteForward()
+		case "enter":
+			return m.submitSkillArgs()
+		case "esc", "ctrl+c":
+			return m.cancelSkillArgs()
+		default:
+			if msg.Text != "" {
+				m.skillArgForm.insert(msg.Text)
+			}
+		}
+		m.relayout()
+		return m, nil
+	}
+
+	// The /skill picker is modal: arrows move, Space toggles the highlighted
+	// skill, Enter continues to the argument form, Esc discards the draft,
+	// printable characters filter. The /mcp picker is modal the same way but
+	// toggles immediately: Space switches the highlighted server on/off, Enter and
+	// Esc just close it.
+	if !m.running && m.skillPicker.active {
+		switch msg.String() {
+		case "up", "ctrl+p":
+			m.skillPicker.move(-1)
+			return m, nil
+		case "down", "ctrl+n":
+			m.skillPicker.move(1)
+			return m, nil
+		case "pgup":
+			m.skillPicker.page(-1)
+			return m, nil
+		case "pgdown":
+			m.skillPicker.page(1)
+			return m, nil
+		case "home":
+			m.skillPicker.selected = 0
+			return m, nil
+		case "end":
+			if n := len(m.skillPicker.filtered); n > 0 {
+				m.skillPicker.selected = n - 1
+			}
+			return m, nil
+		case "space":
+			m.skillPicker.toggle()
+			return m, nil
+		case "enter":
+			return m.submitSkillPick()
+		case "esc", "ctrl+c":
+			m.skillPicker.close()
+			m.relayout()
+			return m, nil
+		case "backspace":
+			m.skillPicker.backspaceFilter()
+			m.relayout()
+			return m, nil
+		}
+		if msg.Text != "" {
+			m.skillPicker.typeFilter(msg.Text)
+			m.relayout()
+		}
+		return m, nil
+	}
+
+	if !m.running && m.mcpPicker.active {
+		switch msg.String() {
+		case "up", "ctrl+p":
+			m.mcpPicker.move(-1)
+			return m, nil
+		case "down", "ctrl+n":
+			m.mcpPicker.move(1)
+			return m, nil
+		case "pgup":
+			m.mcpPicker.page(-1)
+			return m, nil
+		case "pgdown":
+			m.mcpPicker.page(1)
+			return m, nil
+		case "home":
+			m.mcpPicker.selected = 0
+			return m, nil
+		case "end":
+			if n := len(m.mcpPicker.filtered); n > 0 {
+				m.mcpPicker.selected = n - 1
+			}
+			return m, nil
+		case "space":
+			return m.toggleMCPAtCursor()
+		case "enter", "esc", "ctrl+c":
+			m.mcpPicker.close()
+			m.relayout()
+			return m, nil
+		case "backspace":
+			m.mcpPicker.backspaceFilter()
+			m.relayout()
+			return m, nil
+		}
+		if msg.Text != "" {
+			m.mcpPicker.typeFilter(msg.Text)
 			m.relayout()
 		}
 		return m, nil
@@ -1021,12 +1202,18 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(prompt, "/") {
 		return m.runSlash(prompt)
 	}
-	m.transcript.addUser(prompt)
-	m.remoteEcho("\n> " + prompt + "\n")
+	// Selected skills are injected into the message the model receives (the
+	// transcript keeps what the user actually typed). The selection is one-shot:
+	// it is cleared as the message is sent, so a later turn does not inherit it.
+	display := prompt
+	composed := m.composeWithSkills(prompt)
+	m.transcript.addUser(display)
+	m.remoteEcho("\n> " + display + "\n")
+	m.clearSelectedSkills()
 	m.input.Clear()
 	m.menu.close()
 	m.relayout()
-	return m.startPrompt(prompt)
+	return m.startPrompt(composed)
 }
 
 // completeSlash fills the buffer with the highlighted candidate's "/name " so the
@@ -1075,6 +1262,35 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 	// "/model <id>" and "/models fetch|<provider>" keep their command behavior.
 	if line == "/model" || line == "/models" {
 		return m.openModelPicker(line)
+	}
+	// /skill is intercepted before registry resolution: a bare invocation opens
+	// the multi-select skill picker, "/skill clear" drops the current chips, and
+	// "/skill <name> [args]" selects that skill and opens the argument form with
+	// the typed args prefilled instead of running it on the spot. The REPL, which
+	// has no picker, keeps the immediate registry behavior.
+	if line == "/skill" {
+		return m.openSkillPicker(line)
+	}
+	if line == "/skill clear" || line == "/skill none" || line == "/skill off" {
+		m.transcript.addUser(line)
+		m.input.Clear()
+		m.menu.close()
+		m.clearSelectedSkills()
+		m.transcript.addSystem("skill selection cleared")
+		m.relayout()
+		return m, nil
+	}
+	if strings.HasPrefix(line, "/skill ") {
+		return m.skillNamedArgs(line)
+	}
+	// /mcp is intercepted the same way: bare opens the server switch, and
+	// "/mcp <server> [on|off]" applies the switch off the tea loop (connecting a
+	// server can block) before falling back to the shared parser for the status.
+	if line == "/mcp" {
+		return m.openMCPPicker(line)
+	}
+	if strings.HasPrefix(line, "/mcp ") {
+		return m.runMCPCommand(line)
 	}
 	// /resume is intercepted before registry resolution (like /rebuild): it lists
 	// the stored sessions and loads one, swapping the whole session and transcript
@@ -1580,8 +1796,26 @@ func (m Model) renderContent() string {
 		b.WriteString(chooser)
 		b.WriteByte('\n')
 	}
+	if chooser := m.skillPicker.view(width); chooser != "" {
+		b.WriteString(chooser)
+		b.WriteByte('\n')
+	}
+	if form := m.skillArgForm.view(width); form != "" {
+		b.WriteString(form)
+		b.WriteByte('\n')
+	}
+	if chooser := m.mcpPicker.view(width); chooser != "" {
+		b.WriteString(chooser)
+		b.WriteByte('\n')
+	}
 	if menu := m.menu.view(width); menu != "" {
 		b.WriteString(menu)
+		b.WriteByte('\n')
+	}
+	// The selected-skills strip sits directly above the composer (relayout
+	// reserves its row), so the user sees what the next message will carry.
+	if chips := m.skillChips(width); chips != "" {
+		b.WriteString(chips)
 		b.WriteByte('\n')
 	}
 	b.WriteString(input)
@@ -1659,7 +1893,7 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.ask.rows(m.theme, m.width)
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.ask.rows(m.theme, m.width)
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the

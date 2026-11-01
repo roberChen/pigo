@@ -131,7 +131,9 @@ func (s *Skill) SlashCommand() SlashCommand {
 }
 ```
 
-两种挂法的区别是语义上的：子 Agent 版让技能带着独立上下文另跑一轮、只回结论；斜杠命令版让技能的指令**就地展开**进当前对话，参数经 `ExpandTemplate` 展开（`$1`/`$@`/`$ARGUMENTS` 位置参数、`${1:-default}` 默认值、`${@:N}`/`${@:N:L}` 切片）（没有占位符就把参数追加到末尾）。pigo 在 REPL 里选的是后者——`internal/cli/prompts` 的 `BuildSlashRegistry` 把每个技能都注册成一条 `/skill-name`。
+两种挂法的区别是语义上的：子 Agent 版让技能带着独立上下文另跑一轮、只回结论；斜杠命令版让技能的指令**就地展开**进当前对话，参数经 `ExpandTemplate` 展开（`$1`/`$@`/`$ARGUMENTS` 位置参数、`${1:-default}` 默认值、`${@:N}`/`${@:N:L}` 切片）（没有占位符就把参数追加到末尾）。pigo 选的是后者，但不再给每个技能注册一条 `/skill-name`：`internal/cli/prompts` 的 `RegisterSkillCommands` 只注册**一条** `/skill`——REPL 里 `/skill <name> [args]` 立即展开该技能，空参列出全部；TUI 则把两种形式都拦成有状态的流程：空参弹出多选列表，勾选后进入**参数表单**，确认后技能以 `⚡ skills: review(fix main)` 芯片的形式挂在输入框上方，下一条消息才以 `<skill name="…" args="…">` 块把它们一起注入。这样几十个技能也不会把命令列表和补全弹窗淹没。`Skill.SlashCommand()`（以及芯片路径用的 `ExpandArgs`）仍然是展开逻辑的载体，只是由 `/skill` 在运行时按名字调用。
+
+表单的字段不是猜的：`internal/runtime/skillparams.go` 的 `SkillParams` 用与 `ExpandTemplate` 完全相同的语法扫描正文，收集位置槽 `$1`…`$N`、整串槽 `$@`/`$ARGUMENTS`/`${@:N}` 以及默认值 `${1:-default}`，`Skill.ParamHint` 再把它们渲染成 `($1 $2)` 显示在清单和弹层行尾。`SkillParamArgs` 反向把表单值拼回 token 列表（位置槽按序、空位补空串、整串槽交给 `SplitArgs`），所以 `$1`、`${2:-main}` 在 TUI 和 REPL 里得到完全相同的结果。没有占位符的技能仍保留一个可选自由文本字段，其内容按老规矩追加到正文末尾。
 
 ### 斜杠命令注册表：内置优先，动作与提示分家
 
@@ -174,7 +176,7 @@ Constraints: One image explains only one core structure. Main subject 40%-60% of
 
 `ResolveOutcome` 是解析一行输入的统一入口。它区分三种结局：不是斜杠命令，原样返回让调用方直接运行；是已知的提示命令，返回展开后的提示文本；是已知的动作命令，**当场执行动作**并返回状态消息、不启动运行。未知的 `/name` 则报错。这三态被打包进 `SlashOutcome`，REPL 据此决定"跑一轮"还是"只显示一行"。
 
-装配这一切的是 `internal/cli/prompts` 的 `BuildSlashRegistry`（由 `internal/cli/repl` 的 `repl.Run` 调用）：先用 `NewSlashRegistry` 播种全部编译期内置命令，再挂上 `/model`、`/help` 这类需要捕获活状态的实例内置命令，然后从 `~/.pigo/prompts` 与 legacy `~/.pigo/commands`（或 `$PIGO_HOME` 下同名子目录）加载用户声明式模板（另有项目 `.pigo/prompts`、config `prompts`、`--prompt-template` 等来源，`--no-prompt-templates` 可整体关闭），最后——除非带了 `--no-skills`——从 `~/.agents/skills` 加载技能并各自注册成一条 `/skill-name`。技能加载遵循前面说的容错约定：加载成功的照常注册，出错的只在 stderr 上报一句警告。这条 `--no-skills` 开关，我们在第 1 章 `dispatch` 的标志里就见过它的名字，这里才落到实处。
+装配这一切的是 `internal/cli/prompts` 的 `BuildSlashRegistry`（由 `internal/cli/repl` 的 `repl.Run` 调用）：先用 `NewSlashRegistry` 播种全部编译期内置命令，再挂上 `/model`、`/help` 这类需要捕获活状态的实例内置命令，注册统一的 `/skill`（除非带了 `--no-skills`，此时技能集为空、`/skill` 只会报告清单为空），然后从 `~/.pigo/prompts` 与 legacy `~/.pigo/commands`（或 `$PIGO_HOME` 下同名子目录）加载用户声明式模板（另有项目 `.pigo/prompts`、config `prompts`、`--prompt-template` 等来源，`--no-prompt-templates` 可整体关闭）。技能来自 `~/.agents/skills`，遵循前面说的容错约定：加载成功的进清单，出错的只在 stderr 上报一句警告。`/mcp` 则由前端在拿到已连接的 manager 后单独注册（它需要活状态）。这条 `--no-skills` 开关，我们在第 1 章 `dispatch` 的标志里就见过它的名字，这里才落到实处。
 
 ## Plugin 系统：进程隔离的外部工具
 
@@ -379,7 +381,7 @@ type InstalledPackage struct {
 
 ## 实验 10-1 ★：把一个 Markdown 文件变成一条斜杠命令 {.unnumbered}
 
-**目标**：不写一行 Go、不联网、不装 npm 包，仅凭一个带 YAML 头的 Markdown 文件，就让 pigo 的 REPL 多出一条 `/name` 斜杠命令，亲手印证 `LoadSkillsDir` → `Skill.SlashCommand` → `SlashRegistry` 这条最轻量的挂载链。
+**目标**：不写一行 Go、不联网、不装 npm 包，仅凭一个带 YAML 头的 Markdown 文件，就能通过 `/skill changelog` 调到这项能力，亲手印证 `LoadSkillsDir` → `Skill.SlashCommand` → `/skill` 这条最轻量的挂载链。
 
 **前置**：在仓库根目录能 `go run ./cmd/pigo`。本实验用 `PIGO_SKILLS_DIR` 把技能目录指到一个临时位置，不碰你真实的 `~/.agents/skills`，也不需要任何 API Key（我们只验证命令被注册，不真正发起对话）。
 
@@ -399,17 +401,17 @@ $ARGUMENTS
 EOF
 ```
 
-注意正文里的 `$ARGUMENTS`：`Skill.SlashCommand` 的 `Expand` 会在调用时把它替换成 `/changelog ` 后面跟的参数。
+注意正文里的 `$ARGUMENTS`：`Skill.SlashCommand` 的 `Expand` 会在调用时把它替换成 `/skill changelog ` 后面跟的参数。
 
-**步骤 2**：让 pigo 从这个目录加载技能，并进入 REPL 列出可用命令。`/help` 是一条内置动作命令，会打印命令清单：
+**步骤 2**：让 pigo 从这个目录加载技能，并进入 REPL 打印技能清单。不带参数的 `/skill` 是内置命令，会列出全部技能：
 
 ```bash
 PIGO_SKILLS_DIR=/tmp/pigo-skills go run ./cmd/pigo --no-tools <<'EOF'
-/help
+/skill
 EOF
 ```
 
-**预期**：`/help` 输出的命令清单里出现一条 `/changelog`，其描述正是 frontmatter 里写的"把一段 git log 整理成面向用户的更新日志"。这说明 `BuildSlashRegistry` 已经通过 `LoadSkillsDir` 把这个 Markdown 解析成了技能，并经 `AddSkill` 注册成一条技能来源的斜杠命令。
+**预期**：`/skill` 的清单里出现 `changelog`，其描述正是 frontmatter 里写的"把一段 git log 整理成面向用户的更新日志"。这说明 `BuildSlashRegistry` 已经通过 `LoadSkillsDir` 把这个 Markdown 解析成了技能，并交给统一的 `/skill` 命令按名解析；`--no-tools` 只是去掉工具，不影响技能发现。
 
 **步骤 3**：验证容错。故意再放一个格式错误的技能（缺 `description`），看它是否**只影响自己**：
 
@@ -417,20 +419,20 @@ EOF
 mkdir -p /tmp/pigo-skills/broken
 printf -- '---\nname: broken\n---\nbody\n' > /tmp/pigo-skills/broken/SKILL.md
 PIGO_SKILLS_DIR=/tmp/pigo-skills go run ./cmd/pigo --no-tools <<'EOF'
-/help
+/skill
 EOF
 ```
 
-**预期**：stderr 上出现一句 `pigo: skills: some skills failed to load: ...`（缺 description 的报错），但 `/changelog` **依然在命令清单里**。这正印证了 `LoadSkillsDir` 那条"一个坏技能不能遮蔽其余技能"的容错约定——错误被累积上报，成功解析的照常注册。
+**预期**：stderr 上出现一句 `pigo: skills: some skills failed to load: ...`（缺 description 的报错），但 `changelog` **依然在技能清单里**。这正印证了 `LoadSkillsDir` 那条"一个坏技能不能遮蔽其余技能"的容错约定——错误被累积上报，成功解析的照常可用。
 
-**观察点**：把这条链和 `internal/cli/prompts` 的 `BuildSlashRegistry` 对照——技能走的是 `AddSkill`（与 `AddUser` 同一档位规则），所以一个和内置命令（如 `/model`、`/help`）撞名的技能会被 shadowed、内置的赢，`Shadowed()` 会在 stderr 上提示你改名。若把 `--no-tools` 换成 `--no-skills`，`/changelog` 就不再出现——技能发现被整体跳过，只有用户命令模板还会加载。
+**观察点**：把这条链和 `internal/cli/prompts` 的 `RegisterSkillCommands` 对照——技能不再是命令，而是 `/skill` 的数据源，所以技能名不会与 `/model`、`/help` 等内置命令冲突，命令列表也不会随技能数量膨胀；`/skill <name>` 的解析是大小写不敏感的精确名字匹配，未知名会在清单后报错。若把 `--no-tools` 换成 `--no-skills`，清单里就没有 `changelog` 了——技能发现被整体跳过，只有用户命令模板还会加载。
 
 ## 本章小结
 
 本章走到 pigo 的最外层，拆解了让它"可插拔生长"的三层扩展生态：
 
 - **三层由轻到重**：Skills/斜杠命令（声明式 Markdown，无进程）→ Plugin（独立进程，JSON-RPC）→ 包管理器（分发与版本化）。一条贯穿始终的线索是：pigo 不为扩展另造发现机制，而是让每种扩展落到一个它本来就会扫描的目录里。
-- **Skills 与斜杠命令**：`internal/runtime/skills.go` 把带 YAML 头的 Markdown 解析成 `Skill`，容错加载（`stringList` 兼容标量、`LoadSkillsDir` 跳过坏文件）；一个技能既能经 `SubAgentSpec` 变成子 Agent 工具（复用第 9 章抽象），也能经 `SlashCommand` 就地展开进对话。`slashcommand.go` 的注册表区分内置/用户来源（内置优先）与提示/动作命令（`Expand` vs `Action`），后者让 `/model` 这类控制命令能改动运行时状态。
+- **Skills 与斜杠命令**：`internal/runtime/skills.go` 把带 YAML 头的 Markdown 解析成 `Skill`，容错加载（`stringList` 兼容标量、`LoadSkillsDir` 跳过坏文件）；一个技能既能经 `SubAgentSpec` 变成子 Agent 工具（复用第 9 章抽象），也能经统一的 `/skill` 就地展开进对话（TUI 里空参变成多选弹层，勾选后按正文占位符填参数表单，多个技能连同各自参数拼进下一条消息）。`slashcommand.go` 的注册表区分内置/用户来源（内置优先）与提示/动作命令（`Expand` vs `Action`），后者让 `/model` 这类控制命令能改动运行时状态。
 - **Plugin 系统**：`internal/plugin` 把插件当作独立进程，用第 9 章那套 `internal/jsonrpc` 说 `initialize`/`tools/call`/`event`/`shutdown` 四方法协议。`Load` 握手取回 `Manifest`，`pluginTool` 把插件工具适配成 `AgentTool` 并把传输错误降级成错误结果（崩溃隔离）；`Manager.Discover` 容错发现；`EventNotifier` 把循环事件以"只给可观察字段、绝不外泄密钥"的载荷发后不理地推给订阅插件。
 - **包管理器**：`internal/pkgmgr` 用 `npm pack --ignore-scripts` 无副作用地拉取，`Classify` 按 pi 元数据加结构信号判定类型集合，`distribute` 把各类型摆进对应目录（`layout.go`），锁文件（`lockfile.go`）精确记账每个落盘文件以供 list/uninstall/update。CLI 外壳 `pkgcmd.go` 被 `main()` 在 flag 解析前剥离。
 

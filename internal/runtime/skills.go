@@ -267,25 +267,35 @@ func (s *Skill) SkillTool(tools []agentcore.AgentTool, newRunConfig func(tools [
 	return NewSubAgentTool(s.SubAgentSpec(tools, newRunConfig))
 }
 
-// SlashCommand exposes the skill as a "/name" slash command (mirrors Claude Code's
-// /skill-name invocation). Invoking it expands to the skill's instructions (its
-// markdown body) as the prompt, with any arguments appended, so the skill runs
-// in the current conversation. It is a prompt command (not an action): the
-// expanded text is fed to the agent loop as the next user turn.
+// ExpandArgs expands the skill body against already-tokenized arguments. It is
+// the path the TUI's skill chips use: the /skill form collects one value per
+// SkillParam and passes the tokens straight to the template engine.
+func (s *Skill) ExpandArgs(args []string) string {
+	return ExpandTemplate(s.Body, args)
+}
+
+// SlashCommand builds the prompt command for this skill: its instructions (the
+// markdown body) expanded with any arguments. /skill <name> uses it for the
+// REPL's immediate invocation, and the TUI's selected-skills chips expand the
+// body through ExpandArgs, so both paths produce the same text. It is a prompt
+// command (not an action): the expanded text is fed to the agent loop as the
+// next user turn.
 func (s *Skill) SlashCommand() SlashCommand {
-	body := s.Body
 	return SlashCommand{
 		Name:        s.Frontmatter.Name,
 		Description: s.Frontmatter.Description,
 		Source:      SourceUser,
 		Expand: func(args string) string {
-			if strings.Contains(body, "$ARGUMENTS") {
-				return strings.ReplaceAll(body, "$ARGUMENTS", args)
+			tokens, err := SplitArgs(args)
+			if err != nil {
+				// An unparseable argument string (e.g. an unterminated quote)
+				// stays usable as one literal token.
+				if strings.TrimSpace(args) == "" {
+					return s.ExpandArgs(nil)
+				}
+				tokens = []string{args}
 			}
-			if strings.TrimSpace(args) == "" {
-				return body
-			}
-			return body + "\n\n" + args
+			return s.ExpandArgs(tokens)
 		},
 	}
 }

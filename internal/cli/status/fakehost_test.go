@@ -23,18 +23,20 @@ type fakeHost struct {
 	cwd       string
 	trust     *trust.Manager
 	slash     *runtime.SlashRegistry
+	skills    []*runtime.Skill
 	creds     *provider.CredentialStore
 	telemetry *cli.TelemetryHolder
 }
 
-func (f *fakeHost) Live() *cli.LiveConfig            { return f.live }
-func (f *fakeHost) Header() session.SessionHeader    { return f.header }
+func (f *fakeHost) Live() *cli.LiveConfig             { return f.live }
+func (f *fakeHost) Header() session.SessionHeader     { return f.header }
 func (f *fakeHost) AgentCtx() *agentcore.AgentContext { return f.agentCtx }
-func (f *fakeHost) Cwd() string                      { return f.cwd }
-func (f *fakeHost) Trust() *trust.Manager            { return f.trust }
-func (f *fakeHost) Slash() *runtime.SlashRegistry    { return f.slash }
-func (f *fakeHost) Creds() *provider.CredentialStore { return f.creds }
-func (f *fakeHost) Telemetry() *cli.TelemetryHolder  { return f.telemetry }
+func (f *fakeHost) Cwd() string                       { return f.cwd }
+func (f *fakeHost) Trust() *trust.Manager             { return f.trust }
+func (f *fakeHost) Slash() *runtime.SlashRegistry     { return f.slash }
+func (f *fakeHost) Skills() []*runtime.Skill          { return f.skills }
+func (f *fakeHost) Creds() *provider.CredentialStore  { return f.creds }
+func (f *fakeHost) Telemetry() *cli.TelemetryHolder   { return f.telemetry }
 
 // newFakeHost builds a fakeHost with empty-but-non-nil live config, agent
 // context, slash registry and credential store, mirroring a fresh session.

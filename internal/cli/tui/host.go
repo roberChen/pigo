@@ -35,6 +35,7 @@ func (s *runSession) Live() *cli.LiveConfig                      { return s.live
 func (s *runSession) Registry() *agenttool.ToolRegistry          { return s.reg }
 func (s *runSession) Reminders() *runtime.ReminderRegistry       { return s.reminders }
 func (s *runSession) Slash() *runtime.SlashRegistry              { return s.slash }
+func (s *runSession) Skills() []*runtime.Skill                   { return s.skills }
 func (s *runSession) Creds() *provider.CredentialStore           { return s.creds }
 func (s *runSession) Notifier() *plugin.EventNotifier            { return nil }
 func (s *runSession) NotifierHandle() func(agentcore.AgentEvent) { return s.onEvent }

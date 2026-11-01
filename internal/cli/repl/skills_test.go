@@ -1,12 +1,14 @@
 package repl
 
-// Tests for default skill loading from ~/.agents/skills and its exposure as
-// /skill-name slash commands. skillsDir honors the PIGO_SKILLS_DIR override so
-// the loader can be pointed at a temp dir without touching the real home dir.
+// Tests for default skill loading from ~/.agents/skills and its exposure through
+// the shared /skill command (skills are no longer one slash command each).
+// skillsDir honors the PIGO_SKILLS_DIR override so the loader can be pointed at
+// a temp dir without touching the real home dir.
 
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/smallnest/pigo/internal/cli"
@@ -33,8 +35,8 @@ func findSkill(skills []*runtime.Skill, name string) *runtime.Skill {
 	return nil
 }
 
-// TestLoadSkillsFromDir verifies skills in PIGO_SKILLS_DIR are loaded and expose
-// a /skill-name slash command whose expansion is the skill body.
+// TestLoadSkillsFromDir verifies skills in PIGO_SKILLS_DIR are loaded and that
+// /skill expands the named skill's body.
 func TestLoadSkillsFromDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PIGO_SKILLS_DIR", dir)
@@ -87,8 +89,9 @@ func TestLoadSkillsNoSkills(t *testing.T) {
 	}
 }
 
-// TestBuildSlashRegistryIncludesSkills verifies buildSlashRegistry wires the
-// pre-loaded skills into the registry so /skill-name resolves.
+// TestBuildSlashRegistryIncludesSkills verifies BuildSlashRegistry wires the
+// pre-loaded skills into the single /skill command, which expands the named
+// skill (including $ARGUMENTS substitution) as the next turn.
 func TestBuildSlashRegistryIncludesSkills(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PIGO_SKILLS_DIR", dir)
@@ -104,12 +107,12 @@ func TestBuildSlashRegistryIncludesSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSlashRegistry: %v", err)
 	}
-	out, err := reg.ResolveOutcome("/summarize hello world")
+	out, err := reg.ResolveOutcome("/skill summarize hello world")
 	if err != nil {
 		t.Fatalf("ResolveOutcome: %v", err)
 	}
 	if !out.Handled {
-		t.Fatal("/summarize should be handled by the registry")
+		t.Fatal("/skill summarize should be handled by the registry")
 	}
 	if out.Kind != runtime.SlashPrompt {
 		t.Errorf("Kind = %v, want SlashPrompt", out.Kind)
@@ -117,11 +120,16 @@ func TestBuildSlashRegistryIncludesSkills(t *testing.T) {
 	if out.Prompt != "Summarize the following: hello world" {
 		t.Errorf("Prompt = %q, want $ARGUMENTS substituted", out.Prompt)
 	}
+	// Skills are no longer registered one command per skill: the bare spelling
+	// is unknown now, and /skill is the documented (and discoverable) entry point.
+	if _, err := reg.ResolveOutcome("/summarize hello world"); err == nil {
+		t.Error("/summarize must no longer be a command of its own")
+	}
 }
 
 // TestBuildSlashRegistryNoSkills verifies that when no skills are passed (as
-// under --no-skills, where loadSkills returns nil), a /skill-name command is not
-// registered even though a skill file exists on disk (mirrors pi's --no-skills).
+// under --no-skills, where loadSkills returns nil), /skill has nothing to run:
+// it reports the empty set instead of expanding a skill.
 func TestBuildSlashRegistryNoSkills(t *testing.T) {
 	t.Setenv("PIGO_HOME", t.TempDir())
 
@@ -129,8 +137,18 @@ func TestBuildSlashRegistryNoSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSlashRegistry: %v", err)
 	}
-	// With no skills registered, /summarize is an unknown command (an error)
-	// rather than a handled one.
+	// /skill is always available, but with an empty set it lists nothing and
+	// produces no prompt.
+	out, err := reg.ResolveOutcome("/skill summarize hello world")
+	if err != nil {
+		t.Fatalf("ResolveOutcome(/skill ...): %v", err)
+	}
+	if out.Prompt != "" {
+		t.Errorf("Prompt = %q, want no prompt when no skills are loaded", out.Prompt)
+	}
+	if !strings.Contains(out.Message, "unknown skill") {
+		t.Errorf("Message = %q, want an unknown-skill report", out.Message)
+	}
 	if _, err := reg.ResolveOutcome("/summarize hello world"); err == nil {
 		t.Error("/summarize must be unknown when no skills are registered")
 	}
@@ -138,7 +156,7 @@ func TestBuildSlashRegistryNoSkills(t *testing.T) {
 
 // TestLoadSkillsBootstrapsBuiltinSkills verifies that on a fresh
 // PIGO_SKILLS_DIR the built-in skills are installed and loaded (first-run
-// bootstrap), so e.g. /prd resolves without any manual install.
+// bootstrap), so e.g. /skill prd resolves without any manual install.
 func TestLoadSkillsBootstrapsBuiltinSkills(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PIGO_SKILLS_DIR", dir)
@@ -152,14 +170,14 @@ func TestLoadSkillsBootstrapsBuiltinSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSlashRegistry: %v", err)
 	}
-	for _, name := range []string{"/prd", "/refactor", "/architecture-diagram", "/weather"} {
-		out, err := reg.ResolveOutcome(name)
+	for _, name := range []string{"prd", "refactor", "architecture-diagram", "weather"} {
+		out, err := reg.ResolveOutcome("/skill " + name)
 		if err != nil {
-			t.Errorf("%s should be registered after bootstrap: %v", name, err)
+			t.Errorf("/skill %s should resolve after bootstrap: %v", name, err)
 			continue
 		}
-		if !out.Handled {
-			t.Errorf("%s should be handled by the registry after bootstrap", name)
+		if out.Prompt == "" {
+			t.Errorf("/skill %s should expand the skill body after bootstrap", name)
 		}
 	}
 }

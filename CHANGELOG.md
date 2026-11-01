@@ -126,6 +126,35 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **Skills are selected, not one slash command each**: every loaded skill used to
+  register its own `/name` command, so a machine with dozens of skills buried the
+  real built-ins under a wall of skill names and the invocation itself carried no
+  state. There is now a single `/skill` command (`/skill <name> [args]` expands
+  one skill, `bare /skill` lists them) and, in the TUI, a filterable multi-select
+  picker: `Space` checks rows, `Enter` opens an argument form, and the values are
+  committed as `⚡ skills: name(args)` chips above the composer; the next submitted
+  message carries every selected skill's instructions as `<skill name="…"
+  args="…">` blocks — so several skills can run together for one turn. The form
+  derives one field per template slot the body declares (`$1`, `$2`, `$@`,
+  `${1:-default}` prefills the default; a skill without placeholders gets one
+  optional free-text field), and the picker row shows the declared slots before
+  selection. `Tab`/arrows move in the form, `Enter` applies, `Esc` returns to the
+  picker with the draft intact. In the TUI `/skill <name> [args]` no longer runs
+  the skill on the spot: it selects it and opens the prefilled form; the REPL and
+  headless keep the immediate invocation. The selection is one-shot and cleared
+  on submit, `Esc` in the picker discards the draft without touching committed
+  chips, `/skill clear` drops them, and a config reload prunes skills that
+  disappeared. Both paths expand through the same template engine.
+- **TUI: `/mcp` servers can be switched at runtime**: a bare `/mcp` opens a
+  multi-select overlay listing every configured server with its state (`on · N
+  tools`, `off`, or the last connect error). `Space` connects or disconnects the
+  highlighted server immediately — enable dials it, registers its tools in the
+  live registry and the next turn advertises them; disable unregisters and closes
+  it — so a server that started with `disabled = true` no longer needs a pigo
+  restart. Switches run off the tea loop (a stdio spawn or HTTP handshake can
+  block), the row shows `switching…`, and failures are reported in the transcript
+  and in the next overlay render. `/mcp <server> [on|off]` keeps working in the
+  REPL and TUI, and `Manager.Refresh` tells the loop when the tool set changed.
 - **One assistant-turn model behind every wire protocol**: the OpenAI Chat,
   Anthropic and Responses drivers used to accumulate a response each in their own
   way — block ordering, empty-block suppression, usage and stop-reason mapping were

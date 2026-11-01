@@ -274,8 +274,8 @@ func TestBuildSystemPromptNoSkillsWithoutReadTool(t *testing.T) {
 }
 
 // TestDisableModelInvocationCoexistence verifies the #305 coexistence contract:
-// a skill with disable-model-invocation:true is STILL exposed as a /skill-name
-// slash command (body expansion + $ARGUMENTS), while being EXCLUDED from the
+// a skill with disable-model-invocation:true is STILL manually invocable through
+// /skill (body expansion + $ARGUMENTS), while being EXCLUDED from the
 // <available_skills> prompt injection. The two invocation paths are independent.
 func TestDisableModelInvocationCoexistence(t *testing.T) {
 	disabled := &Skill{
@@ -300,8 +300,8 @@ func TestDisableModelInvocationCoexistence(t *testing.T) {
 		t.Errorf("model-invocable skill must appear in <available_skills>, got:\n%s", block)
 	}
 
-	// 2. The disabled skill must still be invocable via its /skill-name command,
-	//    with $ARGUMENTS substitution intact (behavior identical to an enabled one).
+	// 2. The disabled skill must still be invocable through /skill (its
+	//    SlashCommand expansion), with $ARGUMENTS substitution intact.
 	cmd := disabled.SlashCommand()
 	if cmd.Name != "secret" {
 		t.Errorf("disabled skill slash name = %q, want secret", cmd.Name)

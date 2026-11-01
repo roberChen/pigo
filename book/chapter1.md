@@ -148,7 +148,7 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 3. **构建工具集**：调用 `BuiltinTools`，返回根植于 cwd 的默认文件/shell 工具集（`ReadTool`/`WriteTool`/`EditTool`/`GrepTool`/`FindTool`/`BashTool`/`BashOutputTool`/`BashKillTool`/`TodoTool`/`WebFetchTool`/`WebSearchTool`），`--no-tools` 时返回 nil。工具非空时还会追加两员：`memory_search`（持久记忆检索，memory 启用时）与通用 `task` 工具（子 Agent 编排，第 9 章）。
 4. **发现插件**：非 `--no-tools` 时调用 `plugin.Discover` 追加外部插件工具；插件加载是容错的，启动失败只记录并跳过。
 5. **应用工具策略**：对组装完毕的工具集校验并套用 `--allowed-tools`/`--disallowed-tools` 边界（第 5 章）。校验必须发生在插件与记忆工具就位之后——这些名字只在运行期存在；而过滤发生在注册层、先于确认闸门，被移除的工具根本不会被广播，`--approve` 也无法放宽这条边界。
-6. **加载技能**：`LoadSkills` 从 `~/.agents/skills`（或 `$PIGO_SKILLS_DIR`）一次性加载技能集，供系统提示注入与 `/skill-name` 斜杠命令共用；个别技能文件解析失败只警告不中断。
+6. **加载技能**：`LoadSkills` 从 `~/.agents/skills`（或 `$PIGO_SKILLS_DIR`）一次性加载技能集，供系统提示注入与 `/skill` 命令（TUI 多选、REPL 单次调用）共用；个别技能文件解析失败只警告不中断。
 
 关键在于它返回 `error` 而不是自己退出，把退出码映射的职责留给调用方——这是"入口只负责分派"原则的延续。
 

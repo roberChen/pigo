@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title data-en="Slash commands — pigo" data-zh="Slash 命令 — pigo">Slash commands — pigo</title>
-  <meta name="description" content="pigo slash commands reference: built-ins (/help /model /compact /fork /clone /tree /session /memory ...), skill commands /skill-name, and prompt templates with $1/$@/$ARGUMENTS. pigo 斜杠命令参考。">
+  <meta name="description" content="pigo slash commands reference: built-ins (/help /model /skill /mcp /compact /fork /clone /tree /session /memory ...), skill selection and MCP server switching, and prompt templates with $1/$@/$ARGUMENTS. pigo 斜杠命令参考。">
   <link rel="stylesheet" href="assets/site.css">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <script defer src="assets/i18n.js"></script>
@@ -54,6 +54,8 @@
           <tr><td><code>/help</code></td><td data-en="List available slash commands" data-zh="列出可用的斜杠命令"></td></tr>
           <tr><td><code>/model</code></td><td data-en="View or switch the active model: /model [model-id]" data-zh="查看或切换当前模型：/model [model-id]"></td></tr>
           <tr><td><code>/models</code></td><td data-en="List preset providers and models you can switch to" data-zh="列出可切换的预置 provider 与模型"></td></tr>
+          <tr><td><code>/skill</code></td><td data-en="Select skills to attach to the next message (TUI multi-select picker + argument form). A bare /skill lists them; /skill &lt;name&gt; [args] runs one immediately in the REPL and opens the prefilled form in the TUI." data-zh="选择附加到下一条消息的技能（TUI 多选弹层 + 参数表单）。/skill 空参列出全部；/skill &lt;name&gt; [args] 在 REPL 立即运行，在 TUI 则打开预填表单"></td></tr>
+          <tr><td><code>/mcp</code></td><td data-en="Switch MCP servers on/off for this session (TUI multi-select picker); /mcp &lt;server&gt; [on|off] in any front-end" data-zh="在本次会话中开关 MCP 服务器（TUI 多选弹层）；任何前端都可用 /mcp &lt;server&gt; [on|off]"></td></tr>
           <tr><td><code>/think</code></td><td data-en="View or set reasoning-effort level: [off|minimal|low|medium|high|xhigh]; takes effect next turn" data-zh="查看或设置推理强度：[off|minimal|low|medium|high|xhigh]，下一轮生效"></td></tr>
           <tr><td><code>/effect</code></td><td data-en="Alias of /think — view or set the reasoning-effort level" data-zh="/think 的别名 —— 查看或设置推理强度"></td></tr>
           <tr><td><code>/compact</code></td><td data-en="Summarize and compact the conversation context now" data-zh="立即总结并压缩对话上下文"></td></tr>
@@ -75,11 +77,13 @@
         </tbody>
       </table>
 
-      <h2 data-en="Skill commands" data-zh="技能命令"></h2>
-      <p data-en="Every installed skill is exposed as <code>/skill-name</code>. Typing it loads that skill's instructions into the run. Skills come from built-ins, your <code>~/.pigo</code> directory, plugins, and packages — <code>/help</code> lists whatever is currently available."
-         data-zh="每个已安装的 skill 都以 <code>/skill-name</code> 暴露。输入它即把该 skill 的指令载入本次运行。Skills 来自内置、你的 <code>~/.pigo</code> 目录、插件与 package —— <code>/help</code> 会列出当前可用的全部命令。"></p>
-      <pre><code>/review-it        # 运行某个已安装 skill
-/note-it</code></pre>
+      <h2 data-en="Skills" data-zh="技能"></h2>
+      <p data-en="Skills are reached through the single <code>/skill</code> command, so a large skill catalog never floods the command list. In the TUI a bare <code>/skill</code> opens a filterable multi-select picker: <code>Space</code> checks rows and <code>Enter</code> continues to the argument form, which derives one field per template slot the skill declares (<code>$1</code>, <code>$2</code>, <code>$@</code>, <code>${1:-default}</code>) and prefills declared defaults. <code>Tab</code>/arrows move, <code>Enter</code> commits the values as <code>⚡ skills: name(args)</code> chips, and the next message carries every selected skill as a <code>&lt;skill name=&quot;…&quot; args=&quot;…&quot;&gt;</code> block. In the REPL and headless, <code>/skill &lt;name&gt; [args]</code> still runs one skill immediately; in the TUI it selects that skill and opens the prefilled form. Skills come from built-ins, your <code>~/.agents/skills</code> directory, plugins, and packages."
+         data-zh="技能统一通过 <code>/skill</code> 命令访问，技能再多也不会淹没命令列表。TUI 里不带参数的 <code>/skill</code> 会打开可筛选的多选弹层：<code>Space</code> 勾选、<code>Enter</code> 进入参数表单；表单按技能正文声明的模板槽位（<code>$1</code>、<code>$2</code>、<code>$@</code>、<code>${1:-default}</code>）生成字段并预填默认值。<code>Tab</code>/方向键换字段，<code>Enter</code> 把值落成 <code>⚡ skills: name(args)</code> 芯片，下一条消息以 <code>&lt;skill name=&quot;…&quot; args=&quot;…&quot;&gt;</code> 块携带所有选中的技能。REPL 与无头模式下 <code>/skill &lt;name&gt; [args]</code> 仍立即运行单个技能；TUI 中则选中该技能并打开预填表单。技能来自内置、你的 <code>~/.agents/skills</code> 目录、插件与 package。"></p>
+      <pre><code>/skill                    # TUI: multi-select picker (REPL: list every skill)
+/skill review-it          # TUI: select it and fill the argument form
+/skill review-it main.go  # REPL: run now with $1 = "main.go"; TUI: prefills the form
+/skill clear              # TUI: drop the committed chips</code></pre>
 
       <h2 data-en="Prompt templates" data-zh="提示词模板"></h2>
       <p data-en="Drop a Markdown file into your commands/prompts directory and its name becomes a command: <code>/name</code>. The file body is a prompt template expanded at invoke time. Argument syntax:"

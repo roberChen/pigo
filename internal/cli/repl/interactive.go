@@ -60,8 +60,8 @@ type Options struct {
 	// without per-call confirmation (mirrors pi's --approve/-a).
 	Approve bool
 	// Skills is the pre-loaded skill set (loaded once by setupAgentEnv, shared
-	// with prompt injection). Each is registered as a /skill-name command. Empty
-	// under --no-skills, so nothing is registered.
+	// with prompt injection). /skill resolves names against it; skills are not
+	// registered as one slash command each. Empty under --no-skills.
 	Skills []*runtime.Skill
 
 	// Plugins holds the loaded plugin manager so the REPL can deliver lifecycle
@@ -210,6 +210,9 @@ func Run(opts Options) error {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 	}
+	// /mcp is installed here (not by BuildSlashRegistry) because it needs the
+	// connected manager the assembly just built.
+	prompts.RegisterMCPCommand(slash, opts.MCP)
 	trust.RegisterCommand(slash, mgr, cwd)
 
 	// --approve grants the launch directory session trust up front (mirrors pi's
@@ -261,9 +264,11 @@ func Run(opts Options) error {
 		goal:       agenttool.NewGoalState(),
 		telemetry:  cli.NewTelemetryHolder(),
 		reloader:   opts.Reloader,
-		// A reload re-reads skills and plugins, so the slash registry is rebuilt
-		// from the sources resolved at launch (same tiers, same precedence).
-		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry {
+		// A reload re-reads skills, plugins and MCP servers, so the slash
+		// registry is rebuilt from the sources resolved at launch (same tiers,
+		// same precedence).
+		skills: opts.Skills,
+		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager, mcpMgr *mcp.Manager) *runtime.SlashRegistry {
 			reg, err := prompts.BuildSlashRegistry(live, creds, skills, plugins, prompts.PromptTemplateSources{
 				Settings:       opts.ConfigPrompts,
 				CLI:            opts.CliPrompts,
@@ -274,6 +279,7 @@ func Run(opts Options) error {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 			}
+			prompts.RegisterMCPCommand(reg, mcpMgr)
 			return reg
 		},
 	})

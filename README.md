@@ -54,7 +54,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - **系统提示词分层组装**：base 指令 + 环境块 + `AGENTS.md`（general→specific）+ `--append-system-prompt`。
 - **项目信任**：副作用工具（bash/write/edit）在未信任目录需确认，`--approve` 一次性授权。
 - **工具级准入**：`--allowed-tools` / `--disallowed-tools` 划定工具边界（黑名单优先、子 Agent 继承、`--approve` 不可绕过）。
-- **技能与插件**：`~/.agents/skills` 下的 `/slash` 命令、`~/.pigo/plugins` 下的外部插件。
+- **技能与插件**：`~/.agents/skills` 的技能（`/skill` 选择、可多选注入下一轮）、`~/.pigo/plugins` 下的外部插件。
 - **提示词模板**：`~/.pigo/prompts`、项目 `.pigo/prompts`（受信任时）、config `prompts`、`--prompt-template` 下的可复用 `/name` 模板，支持 `$1`/`$@`/`${1:-default}`/`${@:N}` 等参数语法。
 - **上下文自动压缩**：接近上下文窗口上限时自动摘要，亦可 `/compact` 手动触发。
 - **包管理**：`pigo install npm:<pkg>` 安装 pi 生态的 extension / skill / prompt / theme。
@@ -171,7 +171,7 @@ pigo -m ollama/qwen2.5-coder -u http://localhost:11434/v1 -p "解释 main.go 做
 | `--resume` | `-r` | `""` | 续跑指定 id 的会话 |
 | `--continue` | `-c` | `false` | 续跑最近一次的会话 |
 | `--approve` | `-a` | `false` | 为本次运行信任工作目录：跳过首次信任提示，副作用工具免逐次确认 |
-| `--no-skills` | | `false` | 禁用技能发现（不加载 `~/.agents/skills` 为 `/skill-name` 命令） |
+| `--no-skills` | | `false` | 禁用技能发现（不加载 `~/.agents/skills`：`/skill` 无技能可选，模型也不再自动调用） |
 | `--no-prompt-templates` | | `false` | 禁用提示词模板发现（不加载 `~/.pigo/{commands,prompts}`、`.pigo/prompts`、config `prompts`、`--prompt-template`）；内置斜杠命令不受影响 |
 | `--prompt-template` | | `nil` | 从文件或目录（非递归）加载提示词模板；可重复（对标 pi `--prompt-template`） |
 | `--system-prompt` | | `""` | 用自定义系统提示词替换默认的 coding-assistant 提示词 |
@@ -402,7 +402,7 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 - webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
 - 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
-REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
 ### TUI 显示与工具卡
 
@@ -413,6 +413,8 @@ REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/reload`�
 - **长内容限行**：每个区块都有行数预算，超出时以 `… N more lines · Ctrl+O` 标注（展开后仍有上限，可用 `/export` 取全文）。
 - **展开即完整入参**：展开一张工具卡时，会把它收到的参数完整列出——每个键都在（包括头部那行已被截断/压平的 `command`、`path`、`prompt` 等），值不再按折叠时的列数截断，多行脚本与文件内容保留换行；MCP 卡也会从一行 JSON 摘要展开成逐键列出。参数超过 400 行时仍以 `… N more argument lines (see /export)` 收尾，避免一次写入巨型文件把整帧拖慢。
 - **手动选择与展开**：点击任意历史工具卡或思考块即可展开/收起（按住拖动仍是文本选择）；`Alt+↑` / `Alt+↓` 在工具卡之间移动选择（选中卡片边框高亮），`Ctrl+O` 展开/收起选中卡片（未选中时作用于最新一张）；点击空白处取消选择。
+- **`/skill` 弹层多选器 + 参数表单**：TUI 里输入不带参数的 `/skill` 会弹出可筛选的技能多选列表（最多 10 行、窗口内滚动，筛选行右侧显示 `(2/20)`；每行在描述后附带该技能正文声明的参数槽，如 `($1 $2)`）。按键：`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）移动、`PgUp`/`PgDn` 整屏跳转、`Home`/`End` 首末行、`Space` 勾选/取消当前行（草稿，不立即生效）、任意可打印字符筛选（按 name/description，不区分大小写）、`Backspace` 删除筛选字符、`Enter` 进入**参数表单**、`Esc` 丢弃草稿（已提交的芯片不变）。表单按每个选中技能正文里的模板占位符生成字段：`$1`/`$2`… 按位置、`$@`/`$ARGUMENTS` 为整串参数、`${1:-default}` 预填默认值；没有占位符的技能得到一个可选的自由文本字段（内容追加到正文末尾）。表单按键：`Tab`/`↑`/`↓` 换字段、`←`/`→`/`Home`/`End` 在字段内移动光标、`Backspace`/`Delete` 编辑、`Enter` 把值落到输入框上方的 `⚡ skills: review(fix main)` 芯片条、`Esc` 退回多选列表（勾选和已输入的值都保留）。再次打开会以当前芯片（含参数）作为草稿。提交消息时，所有选中技能的正文以 `<skill name="…" args="…">` 块拼在提问前面，参数经与 REPL 相同的 `ExpandTemplate` 展开，随后芯片清空——**选择是一次性的**，不会影响下一轮。TUI 里 `/skill <name> [args]` 不再立即执行，而是选中该技能并打开已预填的表单；REPL/无头没有芯片状态，仍直接 `/skill <name> [args]` 单次调用。`/skill` 空参打印技能清单（含参数槽），`/skill clear`（TUI）清空芯片。
+- **`/mcp` 弹层切换器**：TUI 里输入不带参数的 `/mcp` 会弹出服务器多选列表，每行显示 `on · N tools` / `off`（连接失败时附带错误摘要），排版与按键同 `/skill`。`Space` **立即**连接/断开该服务器：连接会拉起 stdio 子进程或完成 HTTP 握手，成功后其工具马上注册进执行器、下一轮即可调用；断开则注销并关闭连接，下一次工具列表只包含仍激活的服务器。切换在 tea loop 之外执行（连接可能阻塞），行上显示 `switching…`；`Enter`/`Esc` 关闭弹层。文本形式 `/mcp <server> [on|off]` 在 REPL 与 TUI 中都可用，`/mcp` 空参在 REPL 打印清单。
 - **`/model` 弹层选择器**：TUI 里直接输入 `/model`（或 `/models`）会弹出可筛选的模型选择器，而不是打印一长串文本列表——光标默认停在当前模型上（标 `(current)`），可见列表最多 10 行，更长的目录在窗口内滚动，筛选行右侧的 `(12/95)` 显示当前位置。按键：`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）逐行移动并在两端循环，`PgUp`/`PgDn` 整屏跳转（到边界即停），`Home`/`End` 跳到首行/末行，鼠标滚轮同样移动高亮；任意可打印字符追加为筛选词（按模型 id、provider、显示名匹配，不区分大小写），`Backspace` 删除筛选字符，`Enter` 切换到高亮模型，`Esc` / `Ctrl+C` 取消。选择走的是 `/model <id>` 完全相同的切换路径（`prompts.ApplyModelSwitch`），状态栏立即更新；`/model <id>`、`/models <provider>`、`/models fetch` 仍保持原有的文本行为。
 
 在交互终端输入时，pigo 会用灰色文字提示最近匹配的输入或斜杠命令；
@@ -622,7 +624,7 @@ PostToolUse() {
 
 ### 内置 pigorc skill（自动更新的配置参考）
 
-pigo 内置一个 `pigorc` 技能（首次启动自动装到 `~/.agents/skills/pigorc/`，也可用 `/pigorc` 调用或让模型自行查阅）：
+pigo 内置一个 `pigorc` 技能（首次启动自动装到 `~/.agents/skills/pigorc/`，也可用 `/skill pigorc` 调用或让模型自行查阅）：
 
 - `SKILL.md`：手写的配置指南与常用配方（模型/第三方 provider/自定义 agent/hook/记忆/信任/排错）；
 - `reference.md`：**机器生成的完整参考**，每次启动由当前二进制重写（原子写入），内容直接来自代码注册表——`option` 全量键表、`[[providers]]`/`agent` 字段、9 个 hook 事件、环境变量、以及本二进制注册的**全部 CLI flag**。
@@ -758,6 +760,7 @@ mcp remove github
 - **prompts**：声明 prompts 能力时提供 `mcp__<server>__list_prompts` / `get_prompt`（参数为字符串 map，返回渲染后的文本）；
 - **服务端主动消息**：应答 `ping`、`roots/list`（返回当前工作目录作为 root），明确拒绝 `sampling/createMessage` / `elicitation/create`（pigo 不会为服务端再跑一次模型调用）；
 - **热更新**：服务器发 `notifications/tools|resources|prompts/list_changed` 后，下一轮自动重新列举并替换工具集（无需重启），新工具同时注册进执行器；
+- **运行时开关**：TUI 里不带参数的 `/mcp` 打开服务器切换弹层，`Space` 立即连接/断开该服务器；REPL 用 `/mcp <server> [on|off]`。启动时标记 `disabled` 的服务器也可随时打开，连接成功后工具立刻可用，断开后立刻从工具集消失，无需重启；
 - **OAuth**：`oauth = true` 时对 401 端点执行 MCP 授权流程——protected-resource 元数据发现、授权服务器元数据、动态客户端注册、授权码 + PKCE（本地回环回调，自动打开浏览器并打印 URL）、令牌缓存与刷新（`$PIGO_HOME/mcp-oauth/<server>.json`，0600）；
 - 每请求超时默认 60s（`timeout_seconds` 可调）；工具与其他内置工具同权（`--allowed-tools` / `--disallowed-tools`、sub-agent 继承）。
 - 用内置工具 `pigo_config` 可随时查看每个服务器的配置项、传输方式、实际连接状态与工具数量（见[内置工具](#内置工具)）。
@@ -843,15 +846,16 @@ Review the PR at $1. Focus on:
 技能是带 YAML frontmatter（`name`、`description`，可选 `allowed-tools`、`model`、`disable-model-invocation`）的 Markdown 文件，位于 `~/.agents/skills`（可用 `PIGO_SKILLS_DIR` 覆盖）：
 
 - 支持扁平的 `*.md` 与嵌套的 `<name>/SKILL.md`。
-- 每个技能在 REPL 中暴露为 `/skill-name` 斜杠命令（展开正文为 prompt，支持 `$ARGUMENTS` 替换），也可作为子 Agent 工具运行。
-- `--no-skills` 禁用技能发现；格式错误的技能会被非致命地跳过。
+- 通过统一的 `/skill <name> [args]` 命令调用（展开正文为 prompt，支持 `$1`/`$@`/`$ARGUMENTS`、`${1:-default}`、`${@:N}` 等模板语法），也可作为子 Agent 工具运行。技能不再每个都注册成独立斜杠命令——名称和描述由 `/skill` 的清单/弹层统一呈现，避免几十个技能塞满命令列表。
+- TUI 的 `/skill` 弹层可多选：勾选后进入参数表单（按正文占位符生成字段并预填默认值），确认后显示为输入框上方的 `⚡ skills: name(args)` 芯片，并在**下一条**消息中一起注入（一次性）。`/skill clear` 清空芯片。
+- `--no-skills` 禁用技能发现（`/skill` 无技能可选、模型也不会自动调用）；格式错误的技能会被非致命地跳过。
 
 ### 模型自动调用（渐进式披露）
 
-除了手动的 `/skill-name` 调用，技能还可被模型**自动调用**。pigo 采用渐进式披露：仅将每个技能的 `name`、`description` 和文件路径（location）注入系统提示的 `<available_skills>` 块，模型在任务匹配某技能的描述时，用 `read` 工具按需加载 `SKILL.md` 正文，而非把所有技能正文常驻上下文。
+除了手动的 `/skill` 调用，技能还可被模型**自动调用**。pigo 采用渐进式披露：仅将每个技能的 `name`、`description` 和文件路径（location）注入系统提示的 `<available_skills>` 块，模型在任务匹配某技能的描述时，用 `read` 工具按需加载 `SKILL.md` 正文，而非把所有技能正文常驻上下文。
 
 - **仅当 `read` 工具可用时**自动调用才生效（`--no-tools` 或屏蔽 `read` 时不注入 `<available_skills>`），因为模型需要 `read` 才能加载技能正文。
-- 在 frontmatter 中设置 `disable-model-invocation: true` 可将某技能排除出 `<available_skills>`（模型不会自动调用它），但它仍可通过 `/skill-name` 斜杠命令显式调用。
+- 在 frontmatter 中设置 `disable-model-invocation: true` 可将某技能排除出 `<available_skills>`（模型不会自动调用它），但仍可显式调用：REPL 用 `/skill <name>`，TUI 从 `/skill` 弹层选中它并填参数。
 
 ---
 

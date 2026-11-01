@@ -63,6 +63,17 @@ func (r *ToolRegistry) Register(tool agentcore.AgentTool) error {
 	return nil
 }
 
+// Unregister removes the tool registered under name and forgets its compiled
+// schema. It is used when a live capability is switched off (an MCP server
+// deactivated via /mcp) so the executor can no longer dispatch to it. Removing
+// an unknown name is a no-op, which keeps callers' bookkeeping simple.
+func (r *ToolRegistry) Unregister(name string) {
+	r.mu.Lock()
+	delete(r.tools, name)
+	delete(r.compiled, name)
+	r.mu.Unlock()
+}
+
 // Get returns the tool registered under name and whether it was found.
 func (r *ToolRegistry) Get(name string) (agentcore.AgentTool, bool) {
 	r.mu.RLock()

@@ -1,6 +1,6 @@
 // This file holds the first-run bootstrap: on the first launch (per pigo home),
 // the built-in skill collections in Manifest are copied into the user's skills
-// directory so they load as /skill-name commands with no manual install.
+// directory so /skill lists them with no manual install.
 //
 // The flow is designed to be silent and non-blocking (a failed bootstrap must
 // never stop pigo from starting) and idempotent (skills already present are left

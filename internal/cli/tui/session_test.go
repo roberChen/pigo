@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/session"
 )
 
@@ -382,4 +384,54 @@ func TestResumeSeedsUnparsedToolArguments(t *testing.T) {
 	if !strings.Contains(out, "args (unparsed)") || !strings.Contains(out, badArgs) {
 		t.Errorf("restored card does not show the malformed payload:\n%s", out)
 	}
+}
+
+// stubTool is the minimal agentcore.AgentTool needed to exercise the live tool
+// set rewiring without a provider or a real MCP server.
+type stubTool string
+
+func (t stubTool) Name() string                               { return string(t) }
+func (t stubTool) Description() string                        { return "stub" }
+func (t stubTool) Schema() json.RawMessage                    { return nil }
+func (t stubTool) ExecutionMode() agentcore.ToolExecutionMode { return agentcore.ToolExecutionParallel }
+func (t stubTool) Execute(context.Context, string, json.RawMessage, agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+	return agentcore.AgentToolResult{}, nil
+}
+
+// TestSyncMCPToolsDropsInactiveTools verifies /mcp switching off a server
+// removes its tools from both the live list and the registry while leaving the
+// built-in tools untouched (the manager returns no tools here).
+func TestSyncMCPToolsDropsInactiveTools(t *testing.T) {
+	reg := agenttool.NewToolRegistry()
+	off := stubTool("mcp__off__run")
+	read := stubTool("read")
+	for _, tool := range []agentcore.AgentTool{off, read} {
+		if err := reg.Register(tool); err != nil {
+			t.Fatalf("register %s: %v", tool.Name(), err)
+		}
+	}
+	s := &runSession{
+		agentCtx: &agentcore.AgentContext{Tools: []agentcore.AgentTool{off, read}},
+		reg:      reg,
+	}
+	s.syncMCPTools()
+
+	if len(s.agentCtx.Tools) != 1 || s.agentCtx.Tools[0].Name() != "read" {
+		t.Fatalf("tools after sync = %v, want only read", toolNamesOf(s.agentCtx.Tools))
+	}
+	if _, ok := reg.Get("mcp__off__run"); ok {
+		t.Error("inactive MCP tool should be unregistered")
+	}
+	if _, ok := reg.Get("read"); !ok {
+		t.Error("built-in tool must stay registered")
+	}
+}
+
+// toolNamesOf lists the tool names for failure messages.
+func toolNamesOf(tools []agentcore.AgentTool) []string {
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, t.Name())
+	}
+	return out
 }

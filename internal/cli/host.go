@@ -44,6 +44,10 @@ type Host interface {
 	Registry() *agenttool.ToolRegistry
 	Reminders() *runtime.ReminderRegistry
 	Slash() *runtime.SlashRegistry
+	// Skills is the pre-loaded skill set the session was assembled with (the
+	// current set after a reload). Skills are not slash commands any more, so
+	// /status reports them from here and /skill resolves names against it.
+	Skills() []*runtime.Skill
 	Creds() *provider.CredentialStore
 	Notifier() *plugin.EventNotifier
 	// NotifierHandle returns the plugin event-delivery callback for this

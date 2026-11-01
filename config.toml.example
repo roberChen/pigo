@@ -49,7 +49,7 @@ no_tools = false
 # allowed_tools = ["read", "grep"]
 # disallowed_tools = ["bash", "bash_output", "kill_bash"]
 
-# Disable skill discovery (do not load skills under ~/.agents/skills as /skill-name commands).
+# Disable skill discovery (do not load skills under ~/.agents/skills; /skill has nothing to select and model auto-invocation is off).
 no_skills = false
 
 # Force wire protocol for a custom endpoint: openai | openai/resp_api | anthropic

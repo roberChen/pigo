@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -263,6 +264,13 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 	// registered here rather than in newSlashRegistry. A nil mgr is a no-op.
 	trust.RegisterCommand(s.slash, mgr, cwd)
 
+	// Bind the tool registry to the MCP manager so /mcp can register a server's
+	// tools the moment it connects (not just when a list_changed fires), and so
+	// Disable can unregister them.
+	if s.mcp != nil {
+		s.mcp.BindRegistry(s.reg)
+	}
+
 	// Wire hooks uniformly with every other driver (#425): resolve the trust-gated
 	// hook set, build the dispatcher, dispatch SessionStart once, and compose the
 	// SessionEnd/PreCompact observer with the plugin notifier. Trust is granted by
@@ -292,6 +300,65 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		s.onEvent = baseOnEvent
 	}
 	return s, history, nil
+}
+
+// syncMCPTools rewires the live tool set to exactly the tools of the currently
+// active MCP servers. It is called after a /mcp toggle: inactive servers' tools
+// are unregistered, newly connected servers' tools are registered, and
+// agentCtx.Tools is rebuilt in manager order so the next turn advertises the
+// change immediately (the manager's dirty flag also makes the loop re-advertise
+// on its own). The synthetic system prompt and the non-MCP tools are untouched.
+func (s *runSession) syncMCPTools() {
+	// A session under construction (or a UI-only test model) may have no context
+	// yet; there is nothing to rewire in that case.
+	if s.agentCtx == nil {
+		return
+	}
+	var mcpTools []agentcore.AgentTool
+	if s.mcp != nil {
+		mcpTools = s.mcp.Tools()
+	}
+	// keep tracks the tools still active; entries are consumed as they are carried
+	// over, so a second pass adds only the ones not already in the list.
+	keep := make(map[string]bool, len(mcpTools))
+	for _, t := range mcpTools {
+		keep[t.Name()] = true
+	}
+	kept := make([]agentcore.AgentTool, 0, len(s.agentCtx.Tools)+len(mcpTools))
+	present := make(map[string]bool, cap(kept))
+	for _, t := range s.agentCtx.Tools {
+		present[t.Name()] = true
+		if strings.HasPrefix(t.Name(), mcp.ToolNamePrefix) {
+			if keep[t.Name()] {
+				delete(keep, t.Name())
+				kept = append(kept, t)
+			} else {
+				delete(present, t.Name())
+				if s.reg != nil {
+					s.reg.Unregister(t.Name())
+				}
+			}
+			continue
+		}
+		kept = append(kept, t)
+	}
+	for _, t := range mcpTools {
+		if !keep[t.Name()] {
+			continue
+		}
+		delete(keep, t.Name())
+		if present[t.Name()] {
+			continue // a retained tool already claims this name
+		}
+		if s.reg != nil {
+			if _, ok := s.reg.Get(t.Name()); !ok {
+				_ = s.reg.Register(t)
+			}
+		}
+		kept = append(kept, t)
+		present[t.Name()] = true
+	}
+	s.agentCtx.Tools = kept
 }
 
 // sessionStartSource maps the resolved run options to the SessionStart source

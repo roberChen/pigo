@@ -386,64 +386,248 @@ func (c *Client) Close() error {
 	return c.tr.Close()
 }
 
-// Manager owns every connected MCP server and the tools they expose. It is safe
-// for concurrent use: a server can notify a list change while a turn is reading
-// the tool set.
+// Manager owns every connected MCP server and the tools they expose, plus the
+// full set of configured servers (connected or not) so a session can switch an
+// individual server on and off at runtime (/mcp). It is safe for concurrent
+// use: a server can notify a list change while a turn is reading the tool set,
+// and a front-end can toggle a server while a turn is being prepared.
 type Manager struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// toggleMu serializes Enable/Disable so two switches cannot dial the same
+	// server twice (the second client would leak) or race a close.
+	toggleMu    sync.Mutex
+	configs     []ServerConfig
+	configIndex map[string]int
 	clients     []*Client
 	order       []string
 	serverTools map[string][]agentcore.AgentTool
-	registry    *agenttool.ToolRegistry
-	logw        io.Writer
+	lastError   map[string]error
+	// dirty reports that the active server set changed through Enable/Disable,
+	// so the next Refresh tells the loop to re-advertise its tool set even when
+	// no server sent a list_changed notification.
+	dirty bool
+	// toolFilter, when set, decides which server tools are exposed at all. The
+	// run assembly installs the --allowed-tools/--disallowed-tools predicate here
+	// so a server enabled at runtime (/mcp) cannot bypass the tool boundary that
+	// filtered the launch-time set.
+	toolFilter func(name string) bool
+	registry   *agenttool.ToolRegistry
+	logw       io.Writer
 }
 
 // Connect dials every enabled server in cfg (best-effort: a server that fails to
 // start, initialize or list its capabilities is reported to logw and skipped),
 // and wraps each capability it advertises. A nil/empty config returns an empty
-// manager.
+// manager. The disabled definitions are remembered too so /mcp can activate
+// them later, and a failed server keeps its error for the same listing.
 func Connect(ctx context.Context, cfg []ServerConfig, logw io.Writer) *Manager {
 	if logw == nil {
 		logw = io.Discard
 	}
-	m := &Manager{serverTools: make(map[string][]agentcore.AgentTool), logw: logw}
+	m := &Manager{
+		serverTools: make(map[string][]agentcore.AgentTool),
+		lastError:   make(map[string]error),
+		configIndex: make(map[string]int, len(cfg)),
+		logw:        logw,
+	}
 	seen := make(map[string]bool, len(cfg))
 	for _, sc := range cfg {
-		if sc.Disabled {
-			continue
-		}
-		if err := sc.validate(); err != nil {
-			fmt.Fprintf(logw, "pigo: mcp server %q skipped: %v\n", sc.Name, err)
-			continue
-		}
 		if seen[sc.Name] {
 			fmt.Fprintf(logw, "pigo: mcp server %q skipped: duplicate name\n", sc.Name)
 			continue
 		}
 		seen[sc.Name] = true
-
-		tr, err := newTransport(sc, logw)
-		if err != nil {
-			fmt.Fprintf(logw, "pigo: mcp server %q skipped: %v\n", sc.Name, err)
+		m.configs = append(m.configs, sc)
+		m.configIndex[sc.Name] = len(m.configs) - 1
+		if sc.Disabled {
 			continue
 		}
-		client, err := NewClient(ctx, sc, tr)
-		if err != nil {
+		if err := sc.validate(); err != nil {
 			fmt.Fprintf(logw, "pigo: mcp server %q skipped: %v\n", sc.Name, err)
-			_ = tr.Close()
+			m.lastError[sc.Name] = err
 			continue
 		}
-		tools, err := m.buildTools(client)
-		if err != nil {
+		if err := m.connectServer(ctx, sc); err != nil {
 			fmt.Fprintf(logw, "pigo: mcp server %q skipped: %v\n", sc.Name, err)
-			_ = client.Close()
-			continue
+			m.lastError[sc.Name] = err
 		}
-		m.clients = append(m.clients, client)
-		m.order = append(m.order, sc.Name)
-		m.serverTools[sc.Name] = tools
 	}
+	// The initial dial is not a runtime change: there is nothing to re-advertise
+	// yet, so the first turn starts from a clean slate.
+	m.dirty = false
 	return m
+}
+
+// connectServer performs one server's handshake, lists its capabilities and
+// publishes the resulting tools under the manager lock. It is the single place
+// Connect and Enable share.
+func (m *Manager) connectServer(ctx context.Context, sc ServerConfig) error {
+	tr, err := newTransport(sc, m.logw)
+	if err != nil {
+		return err
+	}
+	client, err := NewClient(ctx, sc, tr)
+	if err != nil {
+		_ = tr.Close()
+		return err
+	}
+	tools, err := m.buildTools(client)
+	if err != nil {
+		_ = client.Close()
+		return err
+	}
+	m.mu.Lock()
+	tools = m.filterToolsLocked(tools)
+	m.clients = append(m.clients, client)
+	m.order = append(m.order, sc.Name)
+	m.serverTools[sc.Name] = tools
+	if i, ok := m.configIndex[sc.Name]; ok {
+		m.configs[i].Disabled = false
+	}
+	delete(m.lastError, sc.Name)
+	reg := m.registry
+	m.dirty = true
+	m.mu.Unlock()
+	if reg != nil {
+		for _, t := range tools {
+			_ = reg.Register(t)
+		}
+	}
+	return nil
+}
+
+// ServerStatus is one row of a configured MCP server's runtime state, used by
+// the /mcp command and its picker. Active means the server is connected and its
+// tools are advertised; Error carries the last connect failure, if any.
+type ServerStatus struct {
+	Name   string
+	Active bool
+	Tools  int
+	Error  string
+}
+
+// Statuses lists every configured server in configuration order, connected or
+// not, so a front-end can show what /mcp can switch.
+func (m *Manager) Statuses() []ServerStatus {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]ServerStatus, 0, len(m.configs))
+	for _, sc := range m.configs {
+		st := ServerStatus{Name: sc.Name}
+		st.Tools = len(m.filterToolsLocked(m.serverTools[sc.Name]))
+		st.Active = m.connectedLocked(sc.Name)
+		if err := m.lastError[sc.Name]; err != nil {
+			st.Error = err.Error()
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// connectedLocked reports whether name has a live client. Caller holds m.mu.
+func (m *Manager) connectedLocked(name string) bool {
+	for _, n := range m.order {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Active reports whether the named server is currently connected.
+func (m *Manager) Active(name string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connectedLocked(name)
+}
+
+// Enable connects a configured server that is currently off (disabled in
+// configuration, or skipped because its first connect failed) and registers its
+// tools. It is a no-op when the server is already connected. The next Refresh
+// reports a change so the loop re-advertises the tool set.
+func (m *Manager) Enable(ctx context.Context, name string) error {
+	if m == nil {
+		return fmt.Errorf("mcp: no manager")
+	}
+	m.toggleMu.Lock()
+	defer m.toggleMu.Unlock()
+	m.mu.Lock()
+	i, ok := m.configIndex[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("mcp: unknown server %q", name)
+	}
+	if m.connectedLocked(name) {
+		m.mu.Unlock()
+		return nil
+	}
+	sc := m.configs[i]
+	m.mu.Unlock()
+
+	if err := sc.validate(); err != nil {
+		m.mu.Lock()
+		m.lastError[name] = err
+		m.mu.Unlock()
+		return err
+	}
+	if err := m.connectServer(ctx, sc); err != nil {
+		m.mu.Lock()
+		m.lastError[name] = err
+		m.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// Disable disconnects a connected server, unregisters its tools from the bound
+// registry and marks the tool set dirty so the next Refresh re-advertises it.
+// Disabling a server that is already off is a no-op.
+func (m *Manager) Disable(name string) error {
+	if m == nil {
+		return fmt.Errorf("mcp: no manager")
+	}
+	m.toggleMu.Lock()
+	defer m.toggleMu.Unlock()
+	m.mu.Lock()
+	var client *Client
+	for i, n := range m.order {
+		if n == name {
+			client = m.clients[i]
+			m.clients = append(m.clients[:i], m.clients[i+1:]...)
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
+	removed := m.serverTools[name]
+	delete(m.serverTools, name)
+	reg := m.registry
+	// Only a real disconnect is a state change. A server that was already off
+	// keeps whatever reason its last connect failed with, so /mcp still explains
+	// why it is not running.
+	if client != nil {
+		delete(m.lastError, name)
+		m.dirty = true
+	}
+	m.mu.Unlock()
+
+	if client == nil {
+		return nil
+	}
+	if reg != nil {
+		for _, t := range removed {
+			reg.Unregister(t.Name())
+		}
+	}
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("mcp server %q: close: %w", name, err)
+	}
+	return nil
 }
 
 // buildTools lists a server's capabilities and wraps each one. A tools-only server
@@ -495,6 +679,34 @@ func (m *Manager) BindRegistry(reg *agenttool.ToolRegistry) {
 	}
 }
 
+// SetToolFilter installs the predicate that decides which server tools are
+// exposed. The run assembly passes the --allowed-tools/--disallowed-tools policy
+// so a server switched on at runtime (/mcp) is held to the same boundary as the
+// launch-time set: a filtered-out tool is neither advertised nor registered, and
+// therefore not dispatchable. A nil filter exposes everything.
+func (m *Manager) SetToolFilter(keep func(name string) bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.toolFilter = keep
+	m.mu.Unlock()
+}
+
+// filterToolsLocked applies the tool boundary. Caller holds m.mu.
+func (m *Manager) filterToolsLocked(tools []agentcore.AgentTool) []agentcore.AgentTool {
+	if m.toolFilter == nil {
+		return tools
+	}
+	out := make([]agentcore.AgentTool, 0, len(tools))
+	for _, t := range tools {
+		if m.toolFilter(t.Name()) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // Tools returns the agent tools exposed by every connected server, in connection
 // order.
 func (m *Manager) Tools() []agentcore.AgentTool {
@@ -505,7 +717,7 @@ func (m *Manager) Tools() []agentcore.AgentTool {
 	defer m.mu.Unlock()
 	out := make([]agentcore.AgentTool, 0, len(m.serverTools))
 	for _, name := range m.order {
-		out = append(out, m.serverTools[name]...)
+		out = append(out, m.filterToolsLocked(m.serverTools[name])...)
 	}
 	return out
 }
@@ -532,9 +744,10 @@ func (m *Manager) Refresh(ctx context.Context) bool {
 	}
 	m.mu.Lock()
 	clients := append([]*Client(nil), m.clients...)
+	changed := m.dirty
+	m.dirty = false
 	m.mu.Unlock()
 
-	changed := false
 	for _, client := range clients {
 		dt, dr, dp := client.takeDirty()
 		if !dt && !dr && !dp {
@@ -546,6 +759,7 @@ func (m *Manager) Refresh(ctx context.Context) bool {
 			continue
 		}
 		m.mu.Lock()
+		tools = m.filterToolsLocked(tools)
 		m.serverTools[client.Name()] = tools
 		reg := m.registry
 		m.mu.Unlock()

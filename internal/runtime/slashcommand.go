@@ -37,10 +37,6 @@ const (
 	// SourceUser is a declarative markdown command template loaded from disk
 	// (e.g. ~/.pigo/commands/*.md).
 	SourceUser
-	// SourceSkill is a skill loaded from ~/.agents/skills and surfaced as a
-	// /skill-name command. It behaves like SourceUser for the built-in-wins
-	// conflict rule; the finer tag is for display only (e.g. /status).
-	SourceSkill
 	// SourcePlugin is a command declared by a loaded plugin. It behaves like
 	// SourceUser for the built-in-wins conflict rule; the finer tag is for
 	// display only.
@@ -51,8 +47,6 @@ func (s SlashCommandSource) String() string {
 	switch s {
 	case SourceBuiltin:
 		return "builtin"
-	case SourceSkill:
-		return "skill"
 	case SourcePlugin:
 		return "plugin"
 	default:
@@ -63,8 +57,8 @@ func (s SlashCommandSource) String() string {
 // Tier is the priority tier of a command, used to resolve same-name conflicts
 // across sources (mirrors pi prompt-templates discovery priority). Higher tiers
 // win; the loser is recorded in Shadowed. Within the same tier the last-added
-// command wins (a re-load overrides). Skills and plugins are treated as
-// Global-tier for priority - their finer Source label is for display only.
+// command wins (a re-load overrides). Plugins are treated as Global-tier for
+// priority - their finer Source label is for display only.
 type Tier int
 
 const (
@@ -269,15 +263,6 @@ func (r *SlashRegistry) AddBuiltin(cmd SlashCommand) {
 // project-tier command wins; same-tier (global) adds override silently.
 func (r *SlashRegistry) AddUser(cmd SlashCommand) {
 	cmd.Source = SourceUser
-	cmd.Tier = TierGlobal
-	r.add(cmd)
-}
-
-// AddSkill installs a skill command (loaded from ~/.agents/skills) at TierGlobal.
-// It follows the same tier rule as AddUser - a built-in or project-tier command
-// wins - only the source tag differs, so /status can report skills separately.
-func (r *SlashRegistry) AddSkill(cmd SlashCommand) {
-	cmd.Source = SourceSkill
 	cmd.Tier = TierGlobal
 	r.add(cmd)
 }

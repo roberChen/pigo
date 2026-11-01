@@ -3,7 +3,7 @@
 // slash handling (internal/cli/repl/repl.go): both front-ends consult the SAME
 // shared registry assembled by internal/cli/prompts.BuildSlashRegistry (#383),
 // so /model, /help, user-declared templates (~/.pigo/{commands,prompts}),
-// config/CLI prompt templates, plugin commands and ~/.agents/skills /skill-name
+// config/CLI prompt templates, plugin commands and the /skill and /mcp control
 // commands are identical across the two surfaces.
 //
 // tui deliberately imports prompts/runtime/cli (the shared lower layers), never
@@ -13,7 +13,8 @@
 // "/name" being typed (a leading "/" with no whitespace yet). It filters the
 // registry by the typed prefix, is navigated with the arrow keys, completed with
 // Tab, and run with Enter — the model intercepts those keys before delegating to
-// the textarea (see model.handleKey).
+// the textarea (see model.handleKey). Skills are no longer one row each: /skill
+// and /mcp are control commands whose interactive pickers open on invocation.
 package tui
 
 import (
@@ -23,6 +24,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/prompts"
+	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -40,13 +42,14 @@ const maxMenuRows = 8
 // error is non-fatal — BuildSlashRegistry still returns a registry with the
 // built-ins, so the TUI stays usable and the failure is surfaced on stderr.
 func newSlashRegistry(opts Options, live *cli.LiveConfig) *runtime.SlashRegistry {
-	return newSlashRegistryFor(opts, live, opts.Skills, opts.Plugins)
+	return newSlashRegistryFor(opts, live, opts.Skills, opts.Plugins, opts.MCP)
 }
 
-// newSlashRegistryFor is newSlashRegistry with an explicit skill/plugin set, so a
-// config reload can rebuild the registry against the skills it just discovered
-// while keeping every other source (templates, project dir, tiers) identical.
-func newSlashRegistryFor(opts Options, live *cli.LiveConfig, skills []*runtime.Skill, plugins *plugin.Manager) *runtime.SlashRegistry {
+// newSlashRegistryFor is newSlashRegistry with an explicit skill/plugin/MCP set,
+// so a config reload can rebuild the registry against the sources it just
+// discovered while keeping every other source (templates, project dir, tiers)
+// identical.
+func newSlashRegistryFor(opts Options, live *cli.LiveConfig, skills []*runtime.Skill, plugins *plugin.Manager, mcpMgr *mcp.Manager) *runtime.SlashRegistry {
 	// A credentials store resolved from the same flags the run uses, so
 	// "/models fetch" (issue #566) can authenticate against the live endpoint.
 	creds := provider.NewCredentialStore(nil)
@@ -59,6 +62,7 @@ func newSlashRegistryFor(opts Options, live *cli.LiveConfig, skills []*runtime.S
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 	}
+	prompts.RegisterMCPCommand(reg, mcpMgr)
 	return reg
 }
 

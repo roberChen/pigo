@@ -98,8 +98,9 @@ func applyReload(deps *replDeps, res *run.ReloadResult) {
 	deps.header.Model = deps.live.Model
 	deps.header.Provider = deps.live.ProviderName
 
+	deps.skills = env.Skills
 	if deps.rebuildSlash != nil {
-		if reg := deps.rebuildSlash(env.Skills, env.Plugins); reg != nil {
+		if reg := deps.rebuildSlash(env.Skills, env.Plugins, env.MCP); reg != nil {
 			deps.slash = reg
 		}
 	}

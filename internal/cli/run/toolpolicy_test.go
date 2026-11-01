@@ -174,3 +174,31 @@ func TestValidateToolPolicySkipsEmptyToolSet(t *testing.T) {
 		t.Errorf("ValidateToolPolicy(nil tools) = %v, want nil", err)
 	}
 }
+
+// TestToolPolicyAllows verifies the single-name form used for tools that appear
+// after assembly (MCP servers enabled at runtime) matches ApplyToolPolicy.
+func TestToolPolicyAllows(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy ToolPolicy
+		tool   string
+		want   bool
+	}{
+		{"zero allows everything", ToolPolicy{}, "bash", true},
+		{"allow list admits member case-insensitively", ToolPolicy{Allow: []string{"read", "mcp__gh__list"}}, "MCP__GH__LIST", true},
+		{"allow list rejects outsider", ToolPolicy{Allow: []string{"read"}}, "bash", false},
+		{"deny wins over allow", ToolPolicy{Allow: []string{"read"}, Deny: []string{"read"}}, "read", false},
+		{"deny alone", ToolPolicy{Deny: []string{"bash"}}, "bash", false},
+		{"deny unrelated", ToolPolicy{Deny: []string{"bash"}}, "read", true},
+	}
+	for _, tc := range cases {
+		if got := tc.policy.Allows(tc.tool); got != tc.want {
+			t.Errorf("%s: Allows(%q) = %v, want %v", tc.name, tc.tool, got, tc.want)
+		}
+		tools := []agentcore.AgentTool{policyTool{tc.tool}}
+		filtered := ApplyToolPolicy(tools, tc.policy)
+		if (len(filtered) == 1) != tc.want {
+			t.Errorf("%s: ApplyToolPolicy disagrees with Allows for %q", tc.name, tc.tool)
+		}
+	}
+}

@@ -38,9 +38,8 @@ type Env struct {
 	SysPrompt    string
 
 	// Skills is the discovered skill set (loaded once here, empty under
-	// --no-skills). It is threaded into the REPL so each skill is registered as a
-	// /skill-name command, and the model-invocable subset is already injected into
-	// SysPrompt.
+	// --no-skills). It is threaded into the front-ends so /skill can list and
+	// expand it, and the model-invocable subset is already injected into SysPrompt.
 	Skills []*runtime.Skill
 
 	// Plugins holds any loaded external plugins so the caller can Close them when
@@ -242,6 +241,10 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	var mcpMgr *mcp.Manager
 	if !noTools {
 		mcpMgr = connectMCP(context.Background(), config.CurrentMCP(), os.Stderr)
+		// The policy must also govern servers switched on later with /mcp, or the
+		// boundary could be widened at runtime by enabling a server whose tools it
+		// had excluded.
+		mcpMgr.SetToolFilter(policy.Allows)
 		tools = append(tools, mcpMgr.Tools()...)
 	}
 	// The self-description tool: it reports what this run actually assembled (files
@@ -292,8 +295,8 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	if noTools && !policy.IsZero() {
 		fmt.Fprintln(os.Stderr, "pigo: warning: --no-tools disables all tools; --allowed-tools/--disallowed-tools are ignored (and unvalidated)")
 	}
-	// Load skills once (shared between prompt injection and /skill-name
-	// registration). A partial parse error still yields the skills that DID load,
+	// Load skills once (shared between prompt injection and /skill). A partial
+	// parse error still yields the skills that DID load,
 	// so one malformed file is a non-fatal warning rather than a hard failure.
 	skills, err := LoadSkills(noSkills)
 	if err != nil {
@@ -584,7 +587,7 @@ func SkillsDir() string {
 }
 
 // LoadSkills discovers skills from SkillsDir() once, for both prompt injection
-// and /skill-name registration. Under --no-skills it is a no-op. Built-in skills
+// and /skill. Under --no-skills it is a no-op. Built-in skills
 // are bootstrapped into the skills dir first, then the directory is loaded.
 func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 	if noSkills {
