@@ -417,6 +417,31 @@ REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`
 - **`/mcp` 弹层切换器**：TUI 里输入不带参数的 `/mcp` 会弹出服务器多选列表，每行显示 `on · N tools` / `off`（连接失败时附带错误摘要），排版与按键同 `/skill`。`Space` **立即**连接/断开该服务器：连接会拉起 stdio 子进程或完成 HTTP 握手，成功后其工具马上注册进执行器、下一轮即可调用；断开则注销并关闭连接，下一次工具列表只包含仍激活的服务器。切换在 tea loop 之外执行（连接可能阻塞），行上显示 `switching…`；`Enter`/`Esc` 关闭弹层。文本形式 `/mcp <server> [on|off]` 在 REPL 与 TUI 中都可用，`/mcp` 空参在 REPL 打印清单。
 - **`/model` 弹层选择器**：TUI 里直接输入 `/model`（或 `/models`）会弹出可筛选的模型选择器，而不是打印一长串文本列表——光标默认停在当前模型上（标 `(current)`），可见列表最多 10 行，更长的目录在窗口内滚动，筛选行右侧的 `(12/95)` 显示当前位置。按键：`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）逐行移动并在两端循环，`PgUp`/`PgDn` 整屏跳转（到边界即停），`Home`/`End` 跳到首行/末行，鼠标滚轮同样移动高亮；任意可打印字符追加为筛选词（按模型 id、provider、显示名匹配，不区分大小写），`Backspace` 删除筛选字符，`Enter` 切换到高亮模型，`Esc` / `Ctrl+C` 取消。选择走的是 `/model <id>` 完全相同的切换路径（`prompts.ApplyModelSwitch`），状态栏立即更新；`/model <id>`、`/models <provider>`、`/models fetch` 仍保持原有的文本行为。
 
+### 全屏编辑（`Ctrl+E`，vim 模态）
+
+输入框默认是普通的多行编辑器（`Enter` 发送、`Shift+Enter` 换行）。按 `Ctrl+E` 进入**全屏编辑**：编辑器占满状态栏以上的整个终端，适合写长 prompt、粘贴整篇文档、反复修改段落。全屏编辑**永远是 vim 模态**——这不是开关，也没有 `--vim` 参数；内联输入框则保持原有的普通编辑方式，不会让不熟悉 vim 的人误入 normal 模式。再按 `Ctrl+E` 退出并回到原来的内联布局，草稿与光标位置都不丢。
+
+全屏编辑器底部常驻**快捷键提示条**（随模式变化，窄终端自动缩成一行），所以不需要记命令：
+
+```
+-- INSERT --  esc normal mode · ctrl+e leave full screen
+enter send · shift+enter newline · ctrl+v paste image
+-- NORMAL --  i a o insert · u undo · ctrl+e leave full screen
+h j k l w b e move · 0 ^ $ gg G jump · dd cc yy lines · x X del · p P paste · f t find
+```
+
+（这里的 `ctrl+v` 是输入框自身的粘贴图片键；提示条按当前宽度裁剪，放不下的部分以 `…` 结尾。）
+
+- **INSERT（进入全屏时的默认模式）**：输入、粘贴与平时一致；`Esc` 进入 NORMAL，不会发送也不会退出。全屏时斜杠命令的自动补全弹层不显示（命令本身仍可正常输入并执行），把整屏留给正文。
+- **NORMAL**：可打印字符不会插入正文，`Enter` 不提交（先 `i`/`a`/`o` 回到 INSERT），`↑`/`↓` 是 `k`/`j` 而不是历史。
+- **移动**：`h j k l`、`w b e`、`0 ^ $`、`gg G`、`f/t/F/T{char}`，均支持 `{count}` 前缀（`3w`、`2j`、`2G`）。
+- **修改**：`x X`、`dd D`、`dw de d$ d0 dj dG dgg df/dt`、`cc C s S`、`r{char}`、`~`、`J`；`y` 系列同理，`p`/`P` 粘贴。
+- **回到 INSERT**：`i a I A o O`、`c` 系列、`s`/`S`。
+- **撤销**：`u`；一次 INSERT 会话（进入 INSERT 到 `Esc`）整体一步撤销。
+- **退出全屏**：`Ctrl+E`（任何模式下都可用）。提交消息后自动退出全屏。
+- **安全性**：NORMAL 下未映射的键被吞掉，不会破坏正文；中文/emoji 按 rune 移动。暂不支持可视模式（`v`）、宏（`q`）、寄存器前缀（`"a`）和 `/` 搜索（`/` 仍归斜杠菜单）。
+- 只影响全屏 TUI；REPL（`--no-tui`）和无头模式没有这个概念。
+
 在交互终端输入时，pigo 会用灰色文字提示最近匹配的输入或斜杠命令；
 输入 `/model ` 时还会从最近使用的模型和内置模型目录中匹配。按 `Tab`
 或右方向键接受当前提示；当有多个匹配时，按上/下方向键可在候选提示之间

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -202,4 +203,110 @@ func blockTexts(t transcript) []string {
 		out[i] = b.text
 	}
 	return out
+}
+
+// TestInputGrowsPastMaxRowsKeepsNewlines guards the composer-growth regression:
+// once the buffer reached maxInputRows logical lines, textarea's legacy
+// content guard (atContentLimit keyed on MaxHeight) silently refused every
+// further newline, so each new line was appended to the last row and the
+// composer rendered "line 5line 6line 7" on a single row. The buffer must keep
+// growing while the *visible* height stays capped.
+func TestInputGrowsPastMaxRowsKeepsNewlines(t *testing.T) {
+	in := newInput()
+	in.SetWidth(78)
+
+	const lines = 12
+	for i := 0; i < lines; i++ {
+		for _, r := range fmt.Sprintf("line %d", i) {
+			in, _ = in.Update(runeKey(r))
+		}
+		in, _ = in.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	}
+
+	if got := in.LineCount(); got != lines+1 {
+		t.Fatalf("LineCount() = %d, want %d (newlines dropped past maxInputRows)", got, lines+1)
+	}
+	for i := 0; i < lines; i++ {
+		want := fmt.Sprintf("line %d", i)
+		if i == lines-1 {
+			want += "\n"
+		}
+		if !strings.Contains(in.Value(), want+"\n") && !strings.HasSuffix(in.Value(), want) {
+			t.Fatalf("line %d missing its own row in Value() = %q", i, in.Value())
+		}
+	}
+	// Every line owns its row: no line may be glued to its predecessor.
+	if strings.Contains(in.Value(), "line 5line 6") || strings.Contains(in.Value(), "line 11line 12") {
+		t.Fatalf("rows merged in Value() = %q", in.Value())
+	}
+	// The shell's row accounting stays bounded: only maxInputRows visible rows.
+	if got, want := in.Height(), maxInputRows+2; got != want {
+		t.Errorf("Height() = %d, want %d (visible height must stay capped)", got, want)
+	}
+}
+
+// TestInputFullscreenKeepsNewlinesPastVisibleRows is the full-screen variant:
+// the text area there is sized to the terminal, so the same content cap fired
+// after only a couple of dozen lines. A long draft must stay editable.
+func TestInputFullscreenKeepsNewlinesPastVisibleRows(t *testing.T) {
+	in := newInput()
+	in.SetWidth(78)
+	in.SetFullscreen(true, 22)
+
+	want := in.ta.MaxHeight + 5 // more lines than the full-screen viewport shows
+	for i := 0; i < want; i++ {
+		for _, r := range fmt.Sprintf("l%d", i) {
+			in, _ = in.Update(runeKey(r))
+		}
+		in, _ = in.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	}
+	if got := in.LineCount(); got != want+1 {
+		t.Fatalf("LineCount() = %d, want %d (full-screen draft stopped accepting newlines)", got, want+1)
+	}
+}
+
+// TestInputLeaveFullscreenResizesToVisualRows covers returning from Ctrl+E with
+// a draft whose logical lines soft-wrap: the inline height must follow the
+// wrapped (visual) row count, not the logical line count. The old
+// SetHeight(LineCount) path undercounted and could leave the composer clipped.
+func TestInputLeaveFullscreenResizesToVisualRows(t *testing.T) {
+	in := newInput()
+	in.SetWidth(20)
+	in.SetFullscreen(true, 22)
+	in.SetValue(strings.Repeat("x", 3*18)) // three soft-wrapped visual rows at this width
+	in.SetFullscreen(false, 0)
+
+	// LineCount is 1, but the wrapped content needs more rows than one.
+	if got := in.ta.LineCount(); got != 1 {
+		t.Fatalf("LineCount() = %d, want 1 (single logical line)", got)
+	}
+	if got := in.ta.Height(); got < 2 {
+		t.Errorf("inline height = %d, want >= 2 (must follow wrapped rows, not line count)", got)
+	}
+	if got := in.ta.Height(); got > maxInputRows {
+		t.Errorf("inline height = %d, want <= %d", got, maxInputRows)
+	}
+}
+
+// TestInputInlineEditableAfterFullscreenRoundTrip is the end-to-end shape of the
+// regression: run the Ctrl+E round trip, then keep typing newlines inline and
+// assert they are still accepted.
+func TestInputInlineEditableAfterFullscreenRoundTrip(t *testing.T) {
+	in := newInput()
+	in.SetWidth(78)
+	in.SetFullscreen(true, 22)
+	in.SetFullscreen(false, 0)
+
+	for i := 0; i < 10; i++ {
+		for _, r := range fmt.Sprintf("line %d", i) {
+			in, _ = in.Update(runeKey(r))
+		}
+		in, _ = in.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	}
+	if got := in.LineCount(); got != 11 {
+		t.Fatalf("LineCount() = %d, want 11 after round trip", got)
+	}
+	if strings.Contains(in.Value(), "line 5line 6") {
+		t.Fatalf("rows merged after round trip: %q", in.Value())
+	}
 }

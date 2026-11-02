@@ -299,6 +299,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.input.Fullscreen() {
+			// Width first: the hint bar's row count (and therefore the text area
+			// height) depends on how wide the terminal is.
+			m.input.SetWidth(msg.Width)
+			m.input.SetFullHeight(m.fullscreenRows())
+		}
 		m.relayout()
 		return m, nil
 
@@ -1077,6 +1083,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		// In the full-screen composer Esc belongs to the editor: insert → normal,
+		// and in normal mode it cancels a pending count/operator. It must not
+		// quit, or a vim user's habitual Esc would kill the program. While a run
+		// is in flight the composer is blurred and Esc keeps its interrupt role.
+		if !m.running && m.input.Fullscreen() {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			m.menu.close()
+			m.relayout()
+			return m, cmd
+		}
 		return m.interruptOrQuit()
 	case "ctrl+o":
 		// Toggle a tool card between its capped preview and the full content: the card
@@ -1106,12 +1123,39 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	case "ctrl+e":
+		// Toggle the full-screen composer: the long-form editing layout where the
+		// editor takes over the terminal, modal (vim) editing is always on, and a
+		// hint bar lists the commands. Ignored mid-run, when the composer is blurred
+		// and its rows belong to the transcript.
+		if m.running {
+			return m, nil
+		}
+		if m.input.Fullscreen() {
+			m.input.SetFullscreen(false, 0)
+			m.menu.close()
+		} else {
+			if ask := m.ask; ask != nil {
+				// The question tool owns the composer as its answer field; a
+				// full-screen vim layout there would swallow the typed answer.
+				return m, nil
+			}
+			m.menu.close()
+			m.input.SetFullscreen(true, m.fullscreenRows())
+		}
+		m.relayout()
+		return m, nil
 	case "enter":
 		// Enter submits the composed buffer (FR-13). Shift+Enter inserts a newline
 		// (rebound in newInput) so the editor is a true multi-line composer; when
 		// the slash menu is open, Enter runs the highlighted command (handled
-		// above), so this branch is only reached with the menu closed.
+		// above), so this branch is only reached with the menu closed. In vim
+		// normal mode Enter is a command-mode key, not a submit: the operator must
+		// get back to insert mode (i/a/o …) before sending.
 		if !m.running {
+			if m.input.Fullscreen() && m.input.Mode() == vimNormal {
+				return m, nil
+			}
 			return m.submit()
 		}
 		return m, nil
@@ -1163,16 +1207,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if !m.running {
 		// ↑/↓ walk the submitted-prompt history when the caret is at the top / bottom
 		// edge of the composer; otherwise they move the caret within a multi-line
-		// draft (handled by the textarea below).
-		switch msg.String() {
-		case "up":
-			return m.historyPrev(msg)
-		case "down":
-			return m.historyNext(msg)
+		// draft (handled by the textarea below). In vim normal mode they are the
+		// k/j motions instead: normal mode owns every editing key.
+		if !(m.input.Fullscreen() && m.input.Mode() == vimNormal) {
+			switch msg.String() {
+			case "up":
+				return m.historyPrev(msg)
+			case "down":
+				return m.historyNext(msg)
+			}
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
-		m.menu.refresh(m.input.Value(), m.slash)
+		m.refreshMenu()
 		m.relayout()
 		return m, cmd
 	}
@@ -1222,7 +1269,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 func (m Model) completeSlash() Model {
 	if c, ok := m.menu.current(); ok {
 		m.input.SetValue("/" + c.Name + " ")
-		m.menu.refresh(m.input.Value(), m.slash)
+		m.refreshMenu()
 	}
 	return m
 }
@@ -1468,7 +1515,7 @@ func (m Model) historyPrev(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if len(m.history) == 0 || m.input.Line() != 0 {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
-		m.menu.refresh(m.input.Value(), m.slash)
+		m.refreshMenu()
 		m.relayout()
 		return m, cmd
 	}
@@ -1479,7 +1526,7 @@ func (m Model) historyPrev(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.histIdx--
 	}
 	m.input.SetValue(m.history[m.histIdx])
-	m.menu.refresh(m.input.Value(), m.slash)
+	m.refreshMenu()
 	m.relayout()
 	return m, nil
 }
@@ -1492,7 +1539,7 @@ func (m Model) historyNext(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.histIdx >= len(m.history) || m.input.Line() != m.input.LineCount()-1 {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
-		m.menu.refresh(m.input.Value(), m.slash)
+		m.refreshMenu()
 		m.relayout()
 		return m, cmd
 	}
@@ -1502,7 +1549,7 @@ func (m Model) historyNext(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	} else {
 		m.input.SetValue(m.history[m.histIdx])
 	}
-	m.menu.refresh(m.input.Value(), m.slash)
+	m.refreshMenu()
 	m.relayout()
 	return m, nil
 }
@@ -1601,7 +1648,7 @@ func (m Model) shutdownRemote() {
 func (m Model) feedInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	m.menu.refresh(m.input.Value(), m.slash)
+	m.refreshMenu()
 	m.relayout()
 	return m, cmd
 }
@@ -1745,6 +1792,13 @@ func (m Model) renderContent() string {
 
 	status := m.statusBar.Render(width)
 
+	// In the full-screen layout the composer owns every row above the status bar;
+	// the transcript, spinner, sub-agents and overlays step aside so the draft has
+	// the whole terminal and the hint bar is always visible.
+	if m.input.Fullscreen() {
+		return m.input.View() + "\n" + status
+	}
+
 	// The input editor renders its own prompt column and cursor across as many
 	// rows as the buffer currently spans (up to maxInputRows).
 	input := m.input.View()
@@ -1879,6 +1933,27 @@ func (m Model) selectedText() string {
 		wrote = true
 	}
 	return b.String()
+}
+
+// refreshMenu re-derives the slash autocomplete popup from the buffer. The
+// full-screen composer has no popup — its bottom rows belong to the hint bar —
+// so a full-screen buffer never opens one. That also keeps normal-mode Enter
+// from being routed to a hidden selection instead of the vim core.
+func (m *Model) refreshMenu() {
+	if m.input.Fullscreen() {
+		return
+	}
+	m.menu.refresh(m.input.Value(), m.slash)
+}
+
+// fullscreenRows is the number of terminal rows the full-screen composer may
+// occupy: everything above the status bar, which stays visible so the model,
+// context usage and cwd never disappear while editing.
+func (m Model) fullscreenRows() int {
+	if m.height <= 0 {
+		return 0
+	}
+	return max(m.height-1, fullscreenMinRows)
 }
 
 // relayout re-sizes the transcript to the rows left after reserving the status

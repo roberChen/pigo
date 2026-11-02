@@ -12,6 +12,18 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **The TUI composer no longer collapses lines once it fills the screen**: past
+  six lines (and past the terminal height in full screen) the editor silently
+  stopped accepting newlines, so every further line was appended to the last row
+  and the draft rendered as `line 5line 6line 7` on a single line — the reported
+  "cannot wrap after the buffer gets long or something is pasted". The cause was
+  not the renderer: `bubbles/v2/textarea` reuses `MaxHeight` as a *content* cap
+  (`atContentLimit` refuses `InsertNewline` at that many logical lines), so the
+  viewport limit pigo set for layout also froze the buffer. The composer now
+  pins `MaxContentHeight` far past any draft while `MaxHeight` keeps capping the
+  visible rows, in both the inline and the full-screen editor. Returning from
+  full screen also re-measures by *visual* rows through `SetWidth` instead of
+  sizing by logical line count, so a wrapped draft is no longer clipped.
 - **The TUI's context-usage readout is now permanent and live**: the amber `◔`
   block only appeared after a run's end-of-run telemetry and then froze until the
   next run finished, so it was absent exactly when a long run made it interesting.
@@ -126,6 +138,22 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **Full-screen composer with always-on vim editing (`Ctrl+E`)**: long prompts
+  had to be revised in a composer capped at six rows, with arrow keys and
+  backspaces. `Ctrl+E` now expands the editor to the whole terminal above the
+  status bar and back, preserving the draft and caret, and submitting returns to
+  the normal layout automatically. That layout is *always* modal — vim is not an
+  option, so there is no `--vim` flag or config key — while the inline composer
+  keeps the plain emacs-style editing it always had, so typing a prompt cannot
+  trap anyone in normal mode. In full screen the editor starts in INSERT; Esc
+  enters NORMAL (`hjkl`, `w/b/e`, `0 ^ $`, `gg/G`, `f/t`, `dd/cc/yy`, `x X`,
+  `r`, `~`, `J`, `p/P`, `u`, all with `{count}` prefixes) and `i/a/I/A/o/O`
+  returns. Normal mode owns every editing key: letters cannot leak into the
+  buffer, Enter does not submit and ↑/↓ are `k`/`j` rather than history, and Esc
+  never quits. A mode-aware hint bar under the editor lists the keys — including
+  `Ctrl+E` to leave — and collapses to one line on narrow terminals, so the
+  commands are discoverable without documentation. Visual mode, macros, registers
+  and search remain out of scope.
 - **Skills are selected, not one slash command each**: every loaded skill used to
   register its own `/name` command, so a machine with dozens of skills buried the
   real built-ins under a wall of skill names and the invocation itself carried no
