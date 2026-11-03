@@ -93,8 +93,10 @@ results are appended and the inner loop repeats until no tool calls, then
   `internal/trust/manager_test.go`).
 - External-tool tests (`internal/pihost/host_e2e_test.go`, requires `node` and
   the pi SDK) skip cleanly instead of failing; keep that pattern for anything
-  needing network, credentials or an optional binary. There are no `//go:build`
-  tags anywhere and no network-dependent tests in the suite.
+  needing network, credentials or an optional binary. The only `//go:build`
+  tags are the `process_unix.go` / `process_windows.go` pair in
+  `internal/agenttool` (process-group kill), and there are no network-dependent
+  tests in the suite.
 - Hook tests execute real shell commands in temp dirs; keep hook tests hermetic
   the same way.
 

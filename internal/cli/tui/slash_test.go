@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/runtime"
 )
 
@@ -212,5 +213,19 @@ func TestSlashExitQuits(t *testing.T) {
 		if _, isQuit := teaCmd().(tea.QuitMsg); !isQuit {
 			t.Errorf("%s: cmd should be tea.Quit", cmd)
 		}
+	}
+}
+
+// The TUI registry must expose the same live-registry commands the REPL does:
+// /jobs is registered by the driver, not by BuildSlashRegistry, so a front-end
+// that forgets it silently loses the command.
+func TestSlashRegistryRegistersJobs(t *testing.T) {
+	live := &cli.LiveConfig{Model: "test", ProviderName: "test", ContextWindow: cli.DefaultContextWindow}
+	reg := newSlashRegistryFor(Options{}, live, nil, nil, nil)
+	if reg == nil {
+		t.Fatal("registry is nil")
+	}
+	if _, ok := reg.Lookup("jobs"); !ok {
+		t.Fatal("/jobs is not registered in the TUI slash registry")
 	}
 }

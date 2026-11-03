@@ -345,6 +345,11 @@ func (c toolCard) summaryArg() string {
 		return clipLine(argText(c.input, "command"), 80)
 	case "bash_output", "kill_bash":
 		return clipLine(argText(c.input, "job_id", "id"), 40)
+	case "bash_jobs":
+		if on, _ := c.input["running_only"].(bool); on {
+			return "running only"
+		}
+		return ""
 	case "read", "view_image", "write", "edit", "multiedit":
 		return clipLine(argText(c.input, "path", "file_path"), 90)
 	case "grep", "find":
@@ -549,6 +554,8 @@ func (c toolCard) headerOnlyArgs() map[string]bool {
 		return map[string]bool{"command": true, "description": true}
 	case "bash_output", "kill_bash":
 		return map[string]bool{"job_id": true, "id": true}
+	case "bash_jobs":
+		return map[string]bool{"running_only": true}
 	case "read", "view_image", "write", "edit", "multiedit":
 		return map[string]bool{"path": true, "file_path": true}
 	case "grep", "find":
@@ -667,7 +674,7 @@ func (c toolCard) hiddenHint(hidden int) string {
 // result, because that is where the answer usually is.
 func (c toolCard) previewBudget() int {
 	switch c.toolFamily() {
-	case "bash", "bash_output":
+	case "bash", "bash_output", "bash_jobs":
 		return cardBashLines
 	case "task", "task_output":
 		return cardTaskLines

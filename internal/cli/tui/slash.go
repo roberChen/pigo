@@ -24,6 +24,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/prompts"
+	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -63,6 +64,10 @@ func newSlashRegistryFor(opts Options, live *cli.LiveConfig, skills []*runtime.S
 		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 	}
 	prompts.RegisterMCPCommand(reg, mcpMgr)
+	// /jobs closes over the background registries. A reload rebuilds the tool set
+	// but the assembly carries these registries over (rebindStatefulTools), so the
+	// launch tool set still resolves the live stores.
+	prompts.RegisterJobsCommand(reg, run.BashJobStoreFromTools(opts.Tools), runtime.SubAgentJobsFromTools(opts.Tools))
 	return reg
 }
 

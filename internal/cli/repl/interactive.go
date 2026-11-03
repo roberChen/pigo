@@ -216,8 +216,10 @@ func Run(opts Options) error {
 		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 	}
 	// /mcp is installed here (not by BuildSlashRegistry) because it needs the
-	// connected manager the assembly just built.
+	// connected manager the assembly just built. /jobs is the same shape: it closes
+	// over the live background registries the tool assembly owns.
 	prompts.RegisterMCPCommand(slash, opts.MCP)
+	prompts.RegisterJobsCommand(slash, run.BashJobStoreFromTools(opts.Tools), runtime.SubAgentJobsFromTools(opts.Tools))
 	trust.RegisterCommand(slash, mgr, cwd)
 
 	// --approve grants the launch directory session trust up front (mirrors pi's
@@ -288,6 +290,9 @@ func Run(opts Options) error {
 				fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
 			}
 			prompts.RegisterMCPCommand(reg, mcpMgr)
+			// A reload keeps the same background registries (the assembly rebinds
+			// them), so /jobs must be re-installed against the launch tool set.
+			prompts.RegisterJobsCommand(reg, run.BashJobStoreFromTools(opts.Tools), runtime.SubAgentJobsFromTools(opts.Tools))
 			return reg
 		},
 	})

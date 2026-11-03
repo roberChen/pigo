@@ -48,7 +48,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 
 - **两种模式**：无头 `-p` 一次性执行（适合脚本 / CI），或直接进入交互式 REPL。
 - **多 Provider**：OpenRouter（默认）、本地 Ollama、NVIDIA NIM、Anthropic、任意 OpenAI 兼容端点。
-- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash`）/ `todo` / `question`（toolcall 提问）/ `webfetch` / `pigo_config`（回显当前生效配置）。
+- **内置工具集**：`read` / `write` / `edit` / `grep` / `find` / `bash`（支持 `run_in_background` 后台执行，配套 `bash_output` / `kill_bash` / `bash_jobs`）/ `todo` / `question`（toolcall 提问）/ `webfetch` / `pigo_config`（回显当前生效配置）。
 - **会话续跑**：`--list-sessions` / `--resume` / `--continue`，无头与 REPL 均可续跑。
 - **stream-json 输出**：逐行 JSON 事件，首个事件携带 `session_id`，便于调用方关联。
 - **系统提示词分层组装**：base 指令 + 环境块 + `AGENTS.md`（general→specific）+ `--append-system-prompt`。
@@ -322,9 +322,10 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `edit` | 精确字符串替换（`old_string` 需唯一，除非 `replace_all`），返回 diff |
 | `grep` | 正则检索文件内容，支持 glob 过滤，跳过 `.gitignore` 路径 |
 | `find` | 按文件名 glob 查找文件，跳过 `.gitignore` 路径 |
-| `bash` | 执行 shell 命令，流式 stdout/stderr，支持超时与取消；`run_in_background` 可转入后台 |
-| `bash_output` | 读取后台 bash 任务的增量输出 |
-| `kill_bash` | 终止后台 bash 任务 |
+| `bash` | 执行 shell 命令，流式 stdout/stderr；`run_in_background` 直接创建后台任务；前台命令超时（默认 2 分钟）后自动转入后台，结果里会明确提示"超时转后台"并给出 `bash_id` 与后续 `bash_output` / `kill_bash` 调用示例；Ctrl-C 会终止前台命令的整个进程组 |
+| `bash_output` | 读取后台 bash 任务的增量输出；`wait_ms` 可短暂等待新输出，`wait_for_exit` 等到任务结束（默认最多 30s） |
+| `kill_bash` | 终止后台 bash 任务（连同其子进程） |
+| `bash_jobs` | 列出本会话的后台 bash 任务：`bash_id`、运行中/已退出、耗时、退出码、未读输出字节数与命令行；`running_only` 只看仍在运行的。用于找回已滑出上下文的 `bash_id` 后再 `bash_output` / `kill_bash` |
 | `todo` | 记录/更新结构化任务清单，每次提交整份列表（pending/in_progress/completed） |
 | `question` | 通过 toolcall 向用户提问并等待回答（可带若干候选选项，用户也可自由作答）。TUI 在输入框上方弹出提问（数字键选选项、直接输入后回车作答、Esc 取消本轮），REPL 在终端打印问题并读取一行；无交互输入的场景（`-p` 无头运行、子 Agent）会返回可执行的错误结果，提示模型按合理假设继续 |
 | `webfetch` | 抓取 URL 并转为精简 Markdown 正文，HTTP 自动升级 HTTPS |
@@ -344,7 +345,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 pigo --allowed-tools read,grep -p "这个仓库的架构是什么"
 
 # 什么都行，就是别碰 shell：黑名单
-pigo --disallowed-tools bash,bash_output,kill_bash -p "帮我改下 README"
+pigo --disallowed-tools bash,bash_output,kill_bash,bash_jobs -p "帮我改下 README"
 
 # 大小写不敏感，Claude Code 的写法直接可用
 pigo --allowed-tools Read,Grep -p "..."
@@ -404,7 +405,7 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 - webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
 - 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
-REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/jobs`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。`/jobs [running]` 一次列出当前所有后台工作（`bash` 后台命令与后台 sub-agent）：id、状态、耗时、命令行/任务描述，并给出读取与终止的调用示例（`bash_output` / `kill_bash` / `task_output`）；带 `running` 时只显示仍在运行的条目。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
 ### TUI 显示与工具卡
 
