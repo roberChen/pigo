@@ -1,18 +1,19 @@
 // This file implements the bash tool (US-018): run a shell command, streaming
 // stdout/stderr back as tool_execution_update partials, honoring a timeout and
-// context cancellation (which kills the child process group). A non-zero exit
-// is surfaced as an error (isError) whose message carries the captured output.
+// context cancellation (which kills the child's process group). A command that
+// exceeds its timeout is moved to the background by the job store rather than
+// killed. A non-zero exit is surfaced as an error (isError) whose message
+// carries the captured output.
 package agenttool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
-	"sync"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -102,7 +103,9 @@ func (t *BashTool) Description() string {
 		"and cancellation. A non-zero exit code is reported as an error. " +
 		"Set run_in_background=true for long-running commands (dev servers, " +
 		"watchers): it returns immediately with a bash_id you drain with " +
-		"bash_output and stop with kill_bash. " +
+		"bash_output and stop with kill_bash. A foreground command that exceeds " +
+		"its timeout is automatically moved to the background instead of killed, " +
+		"so you can keep draining its output and decide whether to stop it. " +
 		"On Windows the command runs under bash if available (Git Bash/WSL), " +
 		"else PowerShell, else cmd — prefer portable commands."
 }
@@ -113,7 +116,7 @@ func (t *BashTool) Schema() json.RawMessage {
   "type": "object",
   "properties": {
     "command":    {"type": "string", "description": "Shell command line to run."},
-    "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (capped at 10 minutes). Ignored in background unless set.", "minimum": 0},
+    "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (capped at 10 minutes). A foreground command that reaches it is moved to the background; a background command is killed at it.", "minimum": 0},
     "run_in_background": {"type": "boolean", "description": "Run detached and return immediately with a bash_id; drain output with bash_output, stop with kill_bash."}
   },
   "required": ["command"],
@@ -155,29 +158,16 @@ func resolveShell(explicit, goos string, lookPath func(string) (string, error)) 
 	return "bash", "-c"
 }
 
-// streamWriter forwards each written chunk to onUpdate as a growing partial
-// result while accumulating the full output. It is safe for concurrent use so
-// stdout and stderr can share the same combined buffer.
-type streamWriter struct {
-	mu       *sync.Mutex
-	buf      *bytes.Buffer
-	onUpdate agentcore.ToolUpdateFunc
-}
-
-func (w streamWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	w.buf.Write(p)
-	snapshot := w.buf.String()
-	w.mu.Unlock()
-	if w.onUpdate != nil {
-		w.onUpdate(agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(snapshot)}})
-	}
-	return len(p), nil
-}
-
 // Execute implements AgentTool. It streams combined stdout/stderr via onUpdate,
-// enforces a timeout, and kills the process on context cancellation. A non-zero
-// exit returns a Go error (→ isError) carrying the exit code and output.
+// enforces a timeout, and kills the process tree on context cancellation
+// (Ctrl-C / a canceled run). A non-zero exit returns a Go error (→ isError)
+// carrying the exit code and output.
+//
+// A command that outlives its timeout is not killed: it is adopted by the job
+// store and keeps running in the background, returning a bash_id the model can
+// drain with bash_output. That is what makes a slow build or a forgotten server
+// usable instead of a hard failure; a tool without a wired store (tests, an
+// embedded use) keeps the historical timeout error.
 func (t *BashTool) Execute(ctx context.Context, id string, args json.RawMessage, onUpdate agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
 	a, bad := decodeArgs[bashToolArgs](args, "bash")
 	if bad != nil {
@@ -198,69 +188,170 @@ func (t *BashTool) Execute(ctx context.Context, id string, args json.RawMessage,
 	if timeout > bashMaxTimeout {
 		timeout = bashMaxTimeout
 	}
+	return t.runForeground(ctx, a, timeout, onUpdate)
+}
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
+// foregroundCommand builds a command that is deliberately NOT bound to ctx: a
+// timeout hands the still-running process to the job store, and the turn context
+// is canceled when that turn ends, which would kill a background job immediately.
+// Cancellation is therefore handled explicitly in runForeground.
+func (t *BashTool) foregroundCommand(command string) *exec.Cmd {
 	shell, flag := resolveShell(t.Shell, runtime.GOOS, shellLookPath)
-	cmd := exec.CommandContext(runCtx, shell, flag, a.Command)
+	cmd := exec.Command(shell, flag, command)
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
 	}
+	// Own process group so a Ctrl-C/timeout kill takes the whole tree.
+	configureProcessGroup(cmd)
+	return cmd
+}
 
-	var mu sync.Mutex
-	var combined bytes.Buffer
-	sw := streamWriter{mu: &mu, buf: &combined, onUpdate: onUpdate}
-	cmd.Stdout = sw
-	cmd.Stderr = sw
+// runForeground runs command and waits for it, a timeout, or cancellation.
+func (t *BashTool) runForeground(ctx context.Context, a bashToolArgs, timeout time.Duration, onUpdate agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+	cmd := t.foregroundCommand(a.Command)
 
-	err := cmd.Run()
+	job := newBashJob(a.Command)
+	job.setOnUpdate(onUpdate)
+	w := job.writer()
+	cmd.Stdout = w
+	cmd.Stderr = w
 
-	mu.Lock()
-	output := combined.String()
-	mu.Unlock()
-
-	// Cap the output before it enters any ToolResult / error message, so a single
-	// command's huge output cannot blow the model's context. Truncation keeps a
-	// head + tail preview with a "[truncated N bytes]" marker in the middle.
-	output = truncateBashOutput(output)
-
-	// Context cancellation / timeout takes precedence in the message.
-	if runCtx.Err() == context.DeadlineExceeded {
-		return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}},
-			fmt.Errorf("bash: command timed out after %s\n%s", timeout, output)
-	}
-	if ctx.Err() == context.Canceled {
-		return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}},
-			fmt.Errorf("bash: command canceled\n%s", output)
+	if err := cmd.Start(); err != nil {
+		job.finish(-1, err.Error())
+		var execErr *exec.Error
+		if errors.As(err, &execErr) {
+			return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent("")}},
+				fmt.Errorf("bash: could not start shell %q: %v. On Windows install Git Bash or WSL (or configure a shell); commands are bash syntax", cmd.Args[0], execErr.Err)
+		}
+		return errorResult(fmt.Sprintf("bash: could not start command: %v", err)), nil
 	}
 
-	// A missing interpreter (no bash/powershell/cmd on PATH) surfaces as an
-	// *exec.Error before the command ever runs. Report it with actionable
-	// guidance instead of a bare "code -1", so the model stops retrying blindly.
-	var execErr *exec.Error
-	if errors.As(err, &execErr) {
-		return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}},
-			fmt.Errorf("bash: could not start shell %q: %v. On Windows install Git Bash or WSL (or configure a shell); commands are bash syntax", shell, execErr.Err)
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-waitCh:
+		return finishForegroundJob(job, err)
+	case <-ctx.Done():
+		// A command that finished at the same moment wins the race: report its
+		// real result instead of a cancellation it did not suffer.
+		select {
+		case err := <-waitCh:
+			return finishForegroundJob(job, err)
+		default:
+		}
+		return cancelForeground(cmd, job, waitCh)
+	case <-timer.C:
+		select {
+		case err := <-waitCh:
+			return finishForegroundJob(job, err)
+		default:
+		}
+		return t.backgroundAfterTimeout(cmd, job, waitCh, timeout)
 	}
+}
+
+// finishForegroundJob records the terminal state and shapes the ordinary
+// success/failure result.
+func finishForegroundJob(job *BashJob, err error) (agentcore.AgentToolResult, error) {
+	code, msg := bashExitInfo(err)
+	job.finish(code, msg)
+	output := truncateBashOutput(job.fullOutput())
 
 	if err != nil {
-		exitCode := -1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			exitCode = ee.ExitCode()
-		}
 		return agentcore.AgentToolResult{
 				Content: agentcore.ContentList{agentcore.NewTextContent(output)},
-				Details: map[string]any{"exitCode": exitCode},
+				Details: map[string]any{"exitCode": code},
 			},
-			fmt.Errorf("bash: command exited with code %d\n%s", exitCode, output)
+			fmt.Errorf("bash: command exited with code %d\n%s", code, output)
 	}
 
 	return agentcore.AgentToolResult{
 		Content: agentcore.ContentList{agentcore.NewTextContent(output)},
 		Details: map[string]any{"exitCode": 0},
 	}, nil
+}
+
+// cancelForeground stops a foreground command because its context was canceled
+// (Ctrl-C, or the run being torn down) and reports the captured output. The whole
+// process group is killed so a helper the shell spawned does not keep running
+// after the tool call has failed.
+func cancelForeground(cmd *exec.Cmd, job *BashJob, waitCh <-chan error) (agentcore.AgentToolResult, error) {
+	job.setOnUpdate(nil)
+	killProcessTree(cmd)
+	code, msg := bashExitInfo(<-waitCh)
+	job.finish(code, msg)
+	output := truncateBashOutput(job.fullOutput())
+	return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}},
+		fmt.Errorf("bash: command canceled\n%s", output)
+}
+
+// backgroundAfterTimeout keeps a foreground command that outlived timeout alive:
+// it moves the job into the store so bash_output can drain it and kill_bash can
+// stop it. Without a store there is nothing to address it by, so it is killed
+// and reported as a timeout exactly as before.
+func (t *BashTool) backgroundAfterTimeout(cmd *exec.Cmd, job *BashJob, waitCh <-chan error, timeout time.Duration) (agentcore.AgentToolResult, error) {
+	job.setOnUpdate(nil)
+
+	if t.Jobs == nil {
+		killProcessTree(cmd)
+		code, msg := bashExitInfo(<-waitCh)
+		job.finish(code, msg)
+		output := truncateBashOutput(job.fullOutput())
+		return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}},
+			fmt.Errorf("bash: command timed out after %s\n%s", timeout, output)
+	}
+
+	t.Jobs.register(job, func() { killProcessTree(cmd) })
+	go func() {
+		code, msg := bashExitInfo(<-waitCh)
+		job.finish(code, msg)
+	}()
+
+	reason := fmt.Sprintf("bash: TIMEOUT — the command was still running after %s, so it was moved to the background instead of being killed (it keeps running).", timeout)
+	return agentcore.AgentToolResult{
+		Content: agentcore.ContentList{agentcore.NewTextContent(backgroundNotice(reason, job))},
+		Details: map[string]any{"bash_id": job.ID, "background": true, "timedOut": true},
+	}, nil
+}
+
+// backgroundNotice formats the result of a command that is now running in the
+// background: what happened to it (a timeout, or an explicit run_in_background
+// request), its bash_id, and the exact calls that follow it. A foreground
+// command that outlived its timeout has already consumed the turn's worth of
+// time, so this notice is the only place the model learns the job still exists
+// and how to reach its output or wait for it — write it as instructions, not as
+// decoration.
+func backgroundNotice(reason string, job *BashJob) string {
+	var b strings.Builder
+	b.WriteString(reason)
+	fmt.Fprintf(&b, "\nbash_id: %s\n\n", job.ID)
+	b.WriteString("Follow-up calls:\n")
+	fmt.Fprintf(&b, "  bash_output {\"bash_id\": %q}  — output collected so far, returns immediately\n", job.ID)
+	fmt.Fprintf(&b, "  bash_output {\"bash_id\": %q, \"wait_ms\": 30000}  — wait up to 30s for new output, then return\n", job.ID)
+	fmt.Fprintf(&b, "  bash_output {\"bash_id\": %q, \"wait_for_exit\": true, \"wait_ms\": 120000}  — wait until it finishes\n", job.ID)
+	fmt.Fprintf(&b, "  kill_bash {\"bash_id\": %q}  — stop it\n", job.ID)
+	if partial := truncateBashOutput(job.fullOutput()); partial != "" {
+		b.WriteString("\npartial output so far:\n")
+		b.WriteString(partial)
+	}
+	return b.String()
+}
+
+// bashExitInfo maps the error from cmd.Wait to an exit code and message.
+func bashExitInfo(err error) (code int, msg string) {
+	if err == nil {
+		return 0, ""
+	}
+	code = -1
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	}
+	return code, err.Error()
 }
 
 // startBackground launches the command detached from the turn context and
@@ -276,15 +367,15 @@ func (t *BashTool) startBackground(a bashToolArgs) (agentcore.AgentToolResult, e
 	}
 
 	var jobCtx context.Context
-	var cancel context.CancelFunc
+	var cancelCtx context.CancelFunc
 	if a.TimeoutMs > 0 {
 		timeout := time.Duration(a.TimeoutMs) * time.Millisecond
 		if timeout > bashMaxTimeout {
 			timeout = bashMaxTimeout
 		}
-		jobCtx, cancel = context.WithTimeout(context.Background(), timeout)
+		jobCtx, cancelCtx = context.WithTimeout(context.Background(), timeout)
 	} else {
-		jobCtx, cancel = context.WithCancel(context.Background())
+		jobCtx, cancelCtx = context.WithCancel(context.Background())
 	}
 
 	shell, flag := resolveShell(t.Shell, runtime.GOOS, shellLookPath)
@@ -292,37 +383,40 @@ func (t *BashTool) startBackground(a bashToolArgs) (agentcore.AgentToolResult, e
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
 	}
+	configureProcessGroup(cmd)
+	// CommandContext's default Cancel kills only the shell; kill the group too so
+	// an explicit timeout_ms does not leave helpers behind.
+	cmd.Cancel = func() error {
+		killProcessTree(cmd)
+		return nil
+	}
 
-	job := t.Jobs.create(a.Command, cancel)
+	// kill_bash/KillAll go through this func so stopping a job takes the whole
+	// process tree with it.
+	job := t.Jobs.create(a.Command, func() {
+		cancelCtx()
+		killProcessTree(cmd)
+	})
 	w := job.writer()
 	cmd.Stdout = w
 	cmd.Stderr = w
 
 	if err := cmd.Start(); err != nil {
-		cancel()
+		cancelCtx()
 		job.finish(-1, err.Error())
 		return errorResult(fmt.Sprintf("bash: could not start background command: %v", err)), nil
 	}
 
 	go func() {
 		err := cmd.Wait()
-		cancel()
-		exitCode := 0
-		errMsg := ""
-		if err != nil {
-			exitCode = -1
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
-				exitCode = ee.ExitCode()
-			}
-			errMsg = err.Error()
-		}
-		job.finish(exitCode, errMsg)
+		cancelCtx()
+		code, msg := bashExitInfo(err)
+		job.finish(code, msg)
 	}()
 
-	msg := fmt.Sprintf("started background command %s: %s\nuse bash_output %q to read its output, kill_bash %q to stop it", job.ID, a.Command, job.ID, job.ID)
+	reason := fmt.Sprintf("bash: started in the background (no default timeout; it keeps running until it exits or kill_bash stops it): %s", a.Command)
 	return agentcore.AgentToolResult{
-		Content: agentcore.ContentList{agentcore.NewTextContent(msg)},
+		Content: agentcore.ContentList{agentcore.NewTextContent(backgroundNotice(reason, job))},
 		Details: map[string]any{"bash_id": job.ID, "background": true},
 	}, nil
 }
