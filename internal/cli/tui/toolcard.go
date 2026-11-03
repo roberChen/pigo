@@ -345,7 +345,7 @@ func (c toolCard) summaryArg() string {
 		return clipLine(argText(c.input, "command"), 80)
 	case "bash_output", "kill_bash":
 		return clipLine(argText(c.input, "job_id", "id"), 40)
-	case "read", "write", "edit", "multiedit":
+	case "read", "view_image", "write", "edit", "multiedit":
 		return clipLine(argText(c.input, "path", "file_path"), 90)
 	case "grep", "find":
 		if p := argText(c.input, "pattern"); p != "" {
@@ -549,7 +549,7 @@ func (c toolCard) headerOnlyArgs() map[string]bool {
 		return map[string]bool{"command": true, "description": true}
 	case "bash_output", "kill_bash":
 		return map[string]bool{"job_id": true, "id": true}
-	case "read", "write", "edit", "multiedit":
+	case "read", "view_image", "write", "edit", "multiedit":
 		return map[string]bool{"path": true, "file_path": true}
 	case "grep", "find":
 		return map[string]bool{"pattern": true, "path": true}

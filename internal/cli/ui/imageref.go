@@ -8,14 +8,12 @@
 package ui
 
 import (
-	"encoding/base64"
-	"fmt"
-	"net/http"
-	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/imageload"
 )
 
 // imageRefPattern matches the two supported image-reference syntaxes:
@@ -81,39 +79,51 @@ func BuildUserContent(prompt string) (agentcore.ContentList, error) {
 
 // loadImageContent reads an image file and returns an ImageContent with the
 // data base64-encoded and the mime type sniffed from the file extension (with a
-// content-sniff fallback). It errors if the file cannot be read or is not a
-// recognizable image type.
+// content-sniff fallback). It errors if the file cannot be read, exceeds
+// imageload.MaxImageBytes, or is not a recognizable image type. The work lives in
+// package imageload so the read/view_image tools and this prompt syntax share one
+// size limit and one sniffing rule.
 func loadImageContent(path string) (agentcore.ImageContent, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return agentcore.ImageContent{}, fmt.Errorf("read image %q: %w", path, err)
-	}
-	mime := mimeFromPath(path)
-	if mime == "" {
-		// Fall back to content sniffing when the extension is unknown.
-		mime = http.DetectContentType(data)
-	}
-	if !strings.HasPrefix(mime, "image/") {
-		return agentcore.ImageContent{}, fmt.Errorf("%q is not a recognized image (detected %q)", path, mime)
-	}
-	enc := base64.StdEncoding.EncodeToString(data)
-	return agentcore.NewImageContent(enc, mime), nil
+	return imageload.Load(path)
 }
 
-// mimeFromPath maps a file extension to an image mime type. It returns "" for
+// mimeFromPath maps a file extension to an image mime type, returning "" for
 // unknown extensions so the caller can fall back to content sniffing.
 func mimeFromPath(path string) string {
-	lower := strings.ToLower(path)
-	switch {
-	case strings.HasSuffix(lower, ".png"):
-		return "image/png"
-	case strings.HasSuffix(lower, ".jpg"), strings.HasSuffix(lower, ".jpeg"):
-		return "image/jpeg"
-	case strings.HasSuffix(lower, ".gif"):
-		return "image/gif"
-	case strings.HasSuffix(lower, ".webp"):
-		return "image/webp"
-	default:
-		return ""
+	return imageload.MIMEFromPath(path)
+}
+
+// ImageRef renders path as the prompt image reference most likely to round-trip
+// through imageRefPattern. The compact "@image:<path>" form terminates at
+// whitespace, so a path containing a space is emitted as the Markdown form,
+// which allows spaces inside its parentheses. Callers that already hold a
+// content list should attach the block directly instead (imageload.Load) rather
+// than going through a string.
+func ImageRef(path string) string {
+	if strings.ContainsAny(path, " \t\n") {
+		return "![image](" + path + ")"
 	}
+	return "@image:" + path
+}
+
+// AttachImages returns prompt prefixed with a reference for each path, in order,
+// so a single --image list lands ahead of the question the user typed. The text
+// is returned unchanged when paths is empty. Paths that cannot be made absolute
+// are used verbatim.
+func AttachImages(prompt string, paths []string) string {
+	if len(paths) == 0 {
+		return prompt
+	}
+	refs := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		refs = append(refs, ImageRef(p))
+	}
+	prefix := strings.Join(refs, " ")
+	if prompt == "" {
+		return prefix
+	}
+	return prefix + " " + prompt
 }

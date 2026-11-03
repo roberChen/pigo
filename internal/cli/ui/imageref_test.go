@@ -120,3 +120,70 @@ func assertTextThenImage(t *testing.T, content agentcore.ContentList, wantText, 
 		t.Errorf("no image block with mime %q in %#v", wantMime, content)
 	}
 }
+
+// TestImageRefKeepsSpacesRoundTrippable: the compact @image form stops at
+// whitespace, so a path with a space must be emitted as the Markdown form or the
+// reference would be truncated when it is parsed back.
+func TestImageRefKeepsSpacesRoundTrippable(t *testing.T) {
+	if got, want := ImageRef("/tmp/shot.png"), "@image:/tmp/shot.png"; got != want {
+		t.Errorf("ImageRef(no space) = %q, want %q", got, want)
+	}
+	spaced := "/tmp/my shot.png"
+	if got, want := ImageRef(spaced), "![image]("+spaced+")"; got != want {
+		t.Errorf("ImageRef(space) = %q, want the Markdown form %q", got, want)
+	}
+}
+
+// TestAttachImagesPrefixesPrompt: --image references land ahead of the question,
+// absolute so the model is not left guessing the working directory, and an empty
+// prompt yields just the references (the interactive pre-fill case).
+func TestAttachImagesPrefixesPrompt(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTempPNG(t)
+
+	if got := AttachImages("what is this?", nil); got != "what is this?" {
+		t.Errorf("AttachImages(no images) = %q, want the prompt unchanged", got)
+	}
+	got := AttachImages("what is this?", []string{path})
+	if !strings.HasSuffix(got, " what is this?") {
+		t.Errorf("AttachImages = %q, want the prompt last", got)
+	}
+	if !strings.Contains(got, "@image:") || !strings.Contains(got, path) {
+		t.Errorf("AttachImages = %q, want an @image reference", got)
+	}
+
+	prefill := AttachImages("", []string{path})
+	if prefill != "@image:"+path {
+		t.Errorf("AttachImages(empty prompt) = %q, want just the reference", prefill)
+	}
+
+	// A relative path is made absolute so it resolves no matter what the model's
+	// tools later treat as their root.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	rel := filepath.Join(dir, "pixel.png")
+	if err := os.WriteFile(rel, pngBytes, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if got := AttachImages("", []string{"pixel.png"}); got != "@image:"+rel {
+		t.Errorf("AttachImages(relative) = %q, want the absolute path %q", got, "@image:"+rel)
+	}
+}
+
+// TestAttachImagesContentAttaches parses its own output back through
+// BuildUserContent, which is the round trip cmd/pigo relies on for headless
+// runs: the emitted reference must actually attach the image.
+func TestAttachImagesContentAttaches(t *testing.T) {
+	path := writeTempPNG(t)
+	content, err := BuildUserContent(AttachImages("describe it", []string{path}))
+	if err != nil {
+		t.Fatalf("BuildUserContent: %v", err)
+	}
+	assertTextThenImage(t, content, "describe it", "image/png")
+}

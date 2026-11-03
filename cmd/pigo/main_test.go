@@ -348,3 +348,69 @@ func TestApplyFileConfig_MemoryOverride(t *testing.T) {
 		t.Errorf("max_context 50%% of 200000 = %d, want 100000", got)
 	}
 }
+
+// --- --image plumbing ---
+
+// TestValidateImages covers the launch-time check: a real PNG passes, while a
+// missing path, an empty entry, a directory and a non-image file each fail with
+// a message naming the offending path. Validation happens before any assembly so
+// a bad flag cannot start a provider round trip.
+func TestValidateImages(t *testing.T) {
+	dir := t.TempDir()
+	png := filepath.Join(dir, "shot.png")
+	pngBytes := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+		0x89,
+	}
+	if err := os.WriteFile(png, pngBytes, 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	text := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(text, []byte("plain text"), 0o644); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+
+	if err := validateImages(nil); err != nil {
+		t.Errorf("validateImages(nil) = %v, want nil", err)
+	}
+	if err := validateImages([]string{png, png}); err != nil {
+		t.Errorf("validateImages(two valid) = %v, want nil", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"missing", []string{filepath.Join(dir, "nope.png")}, "nope.png"},
+		{"empty entry", []string{"  "}, "empty path"},
+		{"directory", []string{dir}, "directory"},
+		{"not an image", []string{text}, "not a recognized image"},
+	} {
+		err := validateImages(tc.paths)
+		if err == nil {
+			t.Errorf("%s: validateImages accepted %q", tc.name, tc.paths)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want it to mention %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// TestDispatchRejectsBadImage checks the wiring, not just the helper: dispatch
+// must exit 2 before touching a provider or the session store.
+func TestDispatchRejectsBadImage(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
+	var out, errOut bytes.Buffer
+	bad := filepath.Join(t.TempDir(), "missing.png")
+	code := dispatch(context.Background(), cliOptions{prompt: "look", images: []string{bad}}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (errOut=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "--image") {
+		t.Errorf("errOut = %q, want it to name --image", errOut.String())
+	}
+}

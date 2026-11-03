@@ -123,7 +123,7 @@ func activityOf(ev agentcore.AgentEvent) string {
 	switch e := ev.(type) {
 	case agentcore.ToolExecutionStartEvent:
 		switch e.ToolName {
-		case "read":
+		case "read", "view_image":
 			return "Reading"
 		case "edit", "write":
 			return "Editing"

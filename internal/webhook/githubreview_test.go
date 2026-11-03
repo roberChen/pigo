@@ -255,13 +255,21 @@ func TestWebhookCreatesReadOnlyReviewSession(t *testing.T) {
 		t.Errorf("header.ID = %q, want %q", header.ID, req.SessionID)
 	}
 
-	// The tool set is read-only: exactly read/grep/find.
+	// The tool set is read-only: exactly read/view_image/grep/find. view_image
+	// is included because a review of UI work may need to look at a screenshot,
+	// and viewing is as side-effect free as reading.
 	names := map[string]bool{}
 	for _, t2 := range ReadOnlyTools("/") {
 		names[t2.Name()] = true
 	}
-	if len(names) != 3 || !names["read"] || !names["grep"] || !names["find"] {
-		t.Fatalf("ReadOnlyTools = %v, want exactly read/grep/find", names)
+	want := []string{"read", "view_image", "grep", "find"}
+	if len(names) != len(want) {
+		t.Fatalf("ReadOnlyTools = %v, want exactly %v", names, want)
+	}
+	for _, n := range want {
+		if !names[n] {
+			t.Fatalf("ReadOnlyTools = %v, missing %q", names, n)
+		}
 	}
 }
 

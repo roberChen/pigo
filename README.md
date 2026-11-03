@@ -174,6 +174,7 @@ pigo -m ollama/qwen2.5-coder -u http://localhost:11434/v1 -p "解释 main.go 做
 | `--no-skills` | | `false` | 禁用技能发现（不加载 `~/.agents/skills`：`/skill` 无技能可选，模型也不再自动调用） |
 | `--no-prompt-templates` | | `false` | 禁用提示词模板发现（不加载 `~/.pigo/{commands,prompts}`、`.pigo/prompts`、config `prompts`、`--prompt-template`）；内置斜杠命令不受影响 |
 | `--prompt-template` | | `nil` | 从文件或目录（非递归）加载提示词模板；可重复（对标 pi `--prompt-template`） |
+| `--image` | | `nil` | 把本地图片附加到首轮提问（视觉模型用）；可重复。`-p` 下随提问一起发送，交互模式下预填到输入框让你补问题。启动时校验存在性/大小/是否为图片 |
 | `--system-prompt` | | `""` | 用自定义系统提示词替换默认的 coding-assistant 提示词 |
 | `--append-system-prompt` | | `nil` | 向系统提示词末尾追加文本或文件内容；可重复 |
 | `--version` | `-v` | `false` | 打印版本信息并退出 |
@@ -315,7 +316,8 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 
 | 工具 | 说明 |
 |------|------|
-| `read` | 按路径读取文本文件，支持行 offset/limit，输出带行号，超大文件截断 |
+| `read` | 按路径读取文本文件，支持行 offset/limit，输出带行号，超大文件截断；图片文件自动转为图片内容（视觉模型直接看，纯文本模型退回尺寸描述） |
+| `view_image` | 读取本地图片作为多模态内容返回给模型（视觉模型可看，纯文本模型只得到路径/MIME/字节数描述）；支持 PNG/JPEG/GIF/WebP 等，受大小上限约束 |
 | `write` | 创建或覆盖文件，按需创建父目录 |
 | `edit` | 精确字符串替换（`old_string` 需唯一，除非 `replace_all`），返回 diff |
 | `grep` | 正则检索文件内容，支持 glob 过滤，跳过 `.gitignore` 路径 |
@@ -622,7 +624,7 @@ UserPromptSubmit() { echo '{"additionalContext":"branch: '"$(git branch --show-c
 | `PIGO_EVENT_LOG` | 事件日志路径 |
 | `XDG_CONFIG_HOME` | 改变 `config.toml` 的查找根 |
 
-**仅命令行、pigorc 不适用**：`-p/--print`、`--cwd`、`--no-tui`、`--version`、`--list-sessions`、`--resume`/`--continue`、`--subagent-rpc`、`--dream*`、`--github-review*`、`--append-system-prompt`、`--prompt-template`、`--no-prompt-templates`——它们描述的是"这一次怎么跑"，不是持久配置。其余 flag 都有上面的配置等价物。
+**仅命令行、pigorc 不适用**：`-p/--print`、`--cwd`、`--no-tui`、`--version`、`--list-sessions`、`--resume`/`--continue`、`--subagent-rpc`、`--dream*`、`--github-review*`、`--append-system-prompt`、`--prompt-template`、`--no-prompt-templates`、`--image`——它们描述的是"这一次怎么跑"，不是持久配置。其余 flag 都有上面的配置等价物。
 
 ### 示例
 

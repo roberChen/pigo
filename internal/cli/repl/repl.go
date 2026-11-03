@@ -72,6 +72,9 @@ type replDeps struct {
 	// change.
 	mcp   *mcp.Manager
 	slash *runtime.SlashRegistry
+	// initialInput pre-fills the first prompt line (--image references) instead
+	// of submitting it, so the user still writes the question. Consumed once.
+	initialInput string
 	// skills is the pre-loaded skill set the slash registry was built from; a
 	// reload refreshes it together with the registry. /status and /skill read it.
 	skills []*runtime.Skill
@@ -282,6 +285,9 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 		}
 	}
 	editor := newREPLLineEditor(in, deps.in, out, deps.slash, priorInputs)
+	// --image pre-fills the first prompt instead of submitting it: the user still
+	// writes the question. Consumed once so later prompts start empty.
+	editor.prefill = deps.initialInput
 	editor.models = append([]string{deps.live.Model}, editor.models...)
 
 	// A SIGINT during a run cancels only that run; the handler is installed for

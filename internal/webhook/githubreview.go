@@ -113,7 +113,9 @@ func (s *Server) clock() time.Time {
 
 // readOnlyToolNames is the allowlist the review run is constrained to: the
 // model can inspect the workspace but cannot write, edit, execute, or fan out.
-var readOnlyToolNames = map[string]struct{}{"read": {}, "grep": {}, "find": {}}
+var readOnlyToolNames = map[string]struct{}{
+	"read": {}, "view_image": {}, "grep": {}, "find": {},
+}
 
 // ReadOnlyTools returns the read-only subset of pigo's built-in tools, the tool
 // set a review session runs with.

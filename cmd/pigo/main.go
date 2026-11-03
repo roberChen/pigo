@@ -39,6 +39,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/tui"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/dream"
+	"github.com/smallnest/pigo/internal/imageload"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/selfupdate"
 	"github.com/smallnest/pigo/internal/webhook"
@@ -106,6 +107,13 @@ type cliOptions struct {
 	// settings, CLI); built-in slash commands are unaffected. Independent of
 	// --no-skills.
 	noPromptTemplates bool
+	// images holds --image paths (repeatable): local files attached to the
+	// opening user turn as multimodal image blocks, so a VL model can be asked
+	// about a screenshot without typing @image:<path> by hand. Validated
+	// (exists, readable, is an image, within the size cap) before any run starts;
+	// in the interactive modes they pre-fill the composer rather than submit, so
+	// the user still writes the question.
+	images []string
 	// subagentRPC selects the process-isolated sub-agent server mode (US-019,
 	// #135): pigo reads JSON-RPC sub-agent run requests from stdin and writes
 	// results to stdout. Internal, used by SubAgentTool's process mode.
@@ -199,6 +207,7 @@ func registerFlags(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt to use instead of the default coding-assistant prompt (mirrors pi --system-prompt)")
 	fs.StringArrayVar(&opts.appendSystemPrompt, "append-system-prompt", nil, "append text or file contents to the system prompt; repeatable (mirrors pi --append-system-prompt)")
 	fs.StringArrayVar(&opts.promptTemplates, "prompt-template", nil, "load a prompt template from a file or directory (non-recursive); repeatable (mirrors pi --prompt-template)")
+	fs.StringArrayVar(&opts.images, "image", nil, "attach a local image file (PNG/JPEG/GIF/WebP/...) to the opening prompt for a vision model; repeatable. With -p it is sent with the prompt; in the interactive modes it pre-fills the composer")
 	fs.StringVar(&opts.thinkingLevel, "thinking-level", "", "reasoning effort: off|minimal|low|medium|high|xhigh|max (overrides PIGO_THINKING_LEVEL and config; default medium)")
 	fs.BoolVar(&opts.subagentRPC, "subagent-rpc", false, "internal: run as a process-isolated sub-agent JSON-RPC server over stdio (US-019)")
 	fs.BoolVar(&opts.dream, "dream", false, "internal: run a memory-consolidation pass over the global/project memory scope, emit a Report JSON on stdout, and exit (SPEC §4.1)")
@@ -478,6 +487,16 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		return 0
 	}
 
+	// --image paths are validated before anything is assembled: a typo, a
+	// directory, a non-image file or an oversized screenshot is a user error,
+	// and discovering it at request time (after a provider round trip, or
+	// half-way through an interactive session) would be far worse. This runs
+	// before the interactive/headless split so both get the same message.
+	if err := validateImages(opts.images); err != nil {
+		fmt.Fprintf(errOut, "pigo: %v\n", err)
+		return 2
+	}
+
 	// --continue resolves to the most recently updated session id.
 	resumeID := opts.resumeID
 	if opts.continueLast && resumeID == "" {
@@ -556,6 +575,9 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 				CliPrompts:        opts.promptTemplates,
 				NoPromptTemplates: opts.noPromptTemplates,
 				Reloader:          opts.reloader,
+				// --image pre-fills the composer (references only) instead of
+				// submitting; the interactive modes still need the question.
+				InitialInput: ui.AttachImages("", opts.images),
 			}); err != nil {
 				fmt.Fprintf(errOut, "pigo: %v\n", err)
 				return 1
@@ -582,6 +604,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			NoPromptTemplates: opts.noPromptTemplates,
 			Dream:             opts.dreamCfg,
 			Reloader:          opts.reloader,
+			InitialInput:      ui.AttachImages("", opts.images),
 		}); err != nil {
 			fmt.Fprintf(errOut, "pigo: %v\n", err)
 			return 1
@@ -611,9 +634,11 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		defer env.Memory.Close()
 	}
 	return headless.Run(ctx, headless.RunParams{
-		Mode:          mode,
-		Env:           env,
-		Prompt:        opts.prompt,
+		Mode: mode,
+		Env:  env,
+		// --image turns into leading @image references so BuildUserContent in the
+		// driver attaches the bytes; the headless path has no composer to pre-fill.
+		Prompt:        ui.AttachImages(opts.prompt, opts.images),
 		Model:         opts.model,
 		APIKey:        opts.apiKey,
 		ThinkingLevel: opts.thinkingLevel,
@@ -797,4 +822,22 @@ func flagDocs(fs *flag.FlagSet) []config.FlagDoc {
 		})
 	})
 	return out
+}
+
+// validateImages checks every --image path up front so a bad reference fails at
+// launch with exit code 2 instead of mid-run. Each path is resolved against the
+// process working directory (already switched by -C/--cwd), and the check covers
+// existence, readability, size (imageload.MaxImageBytes) and image-ness — the
+// same rules the tools and the prompt reference syntax apply, so the flag cannot
+// accept something the run would later reject.
+func validateImages(paths []string) error {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("--image: empty path")
+		}
+		if err := imageload.Validate(p); err != nil {
+			return fmt.Errorf("--image: %w", err)
+		}
+	}
+	return nil
 }

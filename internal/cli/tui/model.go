@@ -231,7 +231,7 @@ func NewModel(opts Options) Model {
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
 	}
-	return Model{
+	m := Model{
 		opts:         opts,
 		theme:        theme,
 		transcript:   newTranscript(theme),
@@ -251,6 +251,12 @@ func NewModel(opts Options) Model {
 		pastes:       make(map[int]string),
 		images:       make(map[int]string),
 	}
+	// --image seeds the composer with the references (not a submitted prompt) so
+	// the user writes the question around them, matching the REPL's prefill.
+	if opts.InitialInput != "" {
+		m.input.SetValue(opts.InitialInput)
+	}
+	return m
 }
 
 // withSession binds the assembled run session to the model: it wires the real

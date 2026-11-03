@@ -197,11 +197,24 @@ func encodeOpenAIMessage(m agentcore.Message) []map[string]any {
 		}
 		return []map[string]any{entry}
 	case agentcore.ToolResultMessage:
-		return []map[string]any{{
+		tool := map[string]any{
 			"role":         "tool",
 			"tool_call_id": msg.ToolCallID,
 			"content":      agentcore.ContentToText(msg.Content),
-		}}
+		}
+		// The Chat Completions tool role carries text only, so an image a tool
+		// returned (view_image, a read of a screenshot) would otherwise vanish
+		// from the request and the model would answer blind. Carry the images in
+		// a follow-up user message right after the tool result: the pairing with
+		// tool_call_id stays intact and the image reaches the model as ordinary
+		// multimodal input, which every VL gateway accepts.
+		if imgs := imageOnlyList(msg.Content); len(imgs) > 0 {
+			return []map[string]any{tool, {
+				"role":    "user",
+				"content": openAIUserContent(withImageNote(imgs, msg.ToolName)),
+			}}
+		}
+		return []map[string]any{tool}
 	default:
 		return nil
 	}
@@ -460,7 +473,7 @@ func encodeAnthropicMessage(m agentcore.Message) map[string]any {
 		return map[string]any{"role": "user", "content": []map[string]any{{
 			"type":        "tool_result",
 			"tool_use_id": msg.ToolCallID,
-			"content":     agentcore.ContentToText(msg.Content),
+			"content":     anthropicToolResultContent(msg.Content),
 		}}}
 	default:
 		return nil
@@ -541,17 +554,82 @@ func anthropicUserContent(content agentcore.ContentList) any {
 			}
 			blocks = append(blocks, map[string]any{"type": "text", "text": b.Text})
 		case agentcore.ImageContent:
-			blocks = append(blocks, map[string]any{
-				"type": "image",
-				"source": map[string]any{
-					"type":       "base64",
-					"media_type": b.MimeType,
-					"data":       b.Data,
-				},
-			})
+			blocks = append(blocks, anthropicImageBlock(b))
 		}
 	}
 	return blocks
+}
+
+// anthropicImageBlock renders one image as the Messages API's base64 source
+// block. Shared by user content and tool results, which accept the same shape.
+func anthropicImageBlock(b agentcore.ImageContent) map[string]any {
+	return map[string]any{
+		"type": "image",
+		"source": map[string]any{
+			"type":       "base64",
+			"media_type": b.MimeType,
+			"data":       b.Data,
+		},
+	}
+}
+
+// anthropicToolResultContent shapes a tool result's content for the Anthropic
+// wire. Text-only results stay a plain string (the common case). A result that
+// carries an image becomes a block array, which is how the Messages API accepts
+// images inside a tool_result — without this the image was flattened away by
+// ContentToText and a view_image call came back empty.
+func anthropicToolResultContent(content agentcore.ContentList) any {
+	hasImage := false
+	for _, c := range content {
+		if _, ok := c.(agentcore.ImageContent); ok {
+			hasImage = true
+			break
+		}
+	}
+	if !hasImage {
+		return agentcore.ContentToText(content)
+	}
+	blocks := make([]map[string]any, 0, len(content))
+	for _, c := range content {
+		switch b := c.(type) {
+		case agentcore.TextContent:
+			if b.Text == "" {
+				continue
+			}
+			blocks = append(blocks, map[string]any{"type": "text", "text": b.Text})
+		case agentcore.ImageContent:
+			blocks = append(blocks, anthropicImageBlock(b))
+		}
+	}
+	if len(blocks) == 0 {
+		// A tool_result block must not be empty.
+		blocks = []map[string]any{{"type": "text", "text": " "}}
+	}
+	return blocks
+}
+
+// imageOnlyList returns just the image blocks of content, or nil when it holds
+// none. It is the "does this result carry a picture?" test shared by the wires.
+func imageOnlyList(content agentcore.ContentList) agentcore.ContentList {
+	var out agentcore.ContentList
+	for _, c := range content {
+		if img, ok := c.(agentcore.ImageContent); ok {
+			out = append(out, img)
+		}
+	}
+	return out
+}
+
+// withImageNote prepends a one-line text block naming the tool the images came
+// from, so the follow-up user message is self-describing instead of a bare
+// picture the model must guess the provenance of.
+func withImageNote(imgs agentcore.ContentList, toolName string) agentcore.ContentList {
+	if toolName == "" {
+		toolName = "a tool"
+	}
+	out := make(agentcore.ContentList, 0, len(imgs)+1)
+	out = append(out, agentcore.NewTextContent("Image output from "+toolName+":"))
+	return append(out, imgs...)
 }
 
 // contextHasImage reports whether any message in the context carries an image
@@ -564,6 +642,11 @@ func contextHasImage(msgs []agentcore.Message) bool {
 			content = msg.Content
 		case agentcore.CompactionMessage:
 			content = msg.AsUserMessage().Content
+		case agentcore.ToolResultMessage:
+			// A tool can return an image (view_image, a read of a screenshot).
+			// Without this case the capability check saw no image and a text-only
+			// model silently accepted a call whose whole point was the picture.
+			content = msg.Content
 		default:
 			continue
 		}

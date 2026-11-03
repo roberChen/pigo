@@ -67,4 +67,9 @@ type Options struct {
 	// settings, CLI); built-in slash commands are unaffected. Independent of
 	// --no-skills.
 	NoPromptTemplates bool
+
+	// InitialInput, when non-empty, pre-fills the composer on launch instead of
+	// submitting it. cmd/pigo uses it for --image: the references land in the
+	// editor so the user adds the question around them.
+	InitialInput string
 }

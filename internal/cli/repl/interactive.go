@@ -91,6 +91,11 @@ type Options struct {
 	// whether to launch the startup background consolidation; a zero value
 	// (Enabled false) disables the auto-trigger entirely.
 	Dream dream.Config
+
+	// InitialInput, when non-empty, pre-fills the very first prompt line instead
+	// of submitting it. cmd/pigo uses it for --image: the references land in the
+	// composer so the user adds the question, and later prompts start empty.
+	InitialInput string
 }
 
 // Run starts the line-based REPL over a persisted session. It keeps
@@ -268,6 +273,9 @@ func Run(opts Options) error {
 		// registry is rebuilt from the sources resolved at launch (same tiers,
 		// same precedence).
 		skills: opts.Skills,
+		// InitialInput is pre-filled, not submitted: --image lands in the prompt
+		// so the user asks the question around it.
+		initialInput: opts.InitialInput,
 		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager, mcpMgr *mcp.Manager) *runtime.SlashRegistry {
 			reg, err := prompts.BuildSlashRegistry(live, creds, skills, plugins, prompts.PromptTemplateSources{
 				Settings:       opts.ConfigPrompts,

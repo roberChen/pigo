@@ -527,12 +527,25 @@ func encodeResponsesMessage(m agentcore.Message) []map[string]any {
 	switch msg := m.(type) {
 	case agentcore.ToolResultMessage:
 		// A tool result is backfilled against the model's call_id so the model
-		// can pair it with the request it issued the previous turn.
-		return []map[string]any{{
+		// can pair it with the request it issued the previous turn. function_call_output
+		// carries a string, so an image a tool returned is replayed as a follow-up
+		// user message with input_image parts — the same shape the Responses API
+		// accepts for user input — instead of being flattened to text.
+		out := []map[string]any{{
 			"type":    "function_call_output",
 			"call_id": msg.ToolCallID,
 			"output":  contentText(msg.Content),
 		}}
+		if imgs := imageOnlyList(msg.Content); len(imgs) > 0 {
+			if parts, ok := responsesImageParts(agentcore.UserMessage{Content: withImageNote(imgs, msg.ToolName)}); ok {
+				out = append(out, map[string]any{
+					"type":    "message",
+					"role":    agentcore.RoleUser,
+					"content": parts,
+				})
+			}
+		}
+		return out
 	case agentcore.AssistantMessage:
 		var items []map[string]any
 		if text := contentText(msg.Content); text != "" {

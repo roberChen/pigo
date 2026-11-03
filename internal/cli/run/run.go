@@ -390,6 +390,7 @@ func BuiltinTools(cwd string, disabled bool) []agentcore.AgentTool {
 	jobs := agenttool.NewBashJobStore()
 	return []agentcore.AgentTool{
 		&agenttool.ReadTool{Root: cwd, ExtraRoots: ReadableExtraRoots()},
+		&agenttool.ViewImageTool{Root: cwd, ExtraRoots: ReadableExtraRoots()},
 		&agenttool.WriteTool{Root: cwd, ExtraRoots: ReadableExtraRoots(), Snap: snap},
 		&agenttool.EditTool{Root: cwd, ExtraRoots: ReadableExtraRoots(), Snap: snap},
 		&agenttool.GrepTool{Root: cwd},

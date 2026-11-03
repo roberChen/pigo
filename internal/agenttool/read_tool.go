@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/imageload"
 )
 
 // readToolMaxLines caps how many lines a single read returns before truncating
@@ -69,7 +70,9 @@ func (t *ReadTool) Name() string { return "read" }
 // Description implements AgentTool.
 func (t *ReadTool) Description() string {
 	return "Read a text file's contents by path, with optional line offset/limit. " +
-		"Output is line-numbered; very large files are truncated."
+		"Output is line-numbered; very large files are truncated. An image file " +
+		"(PNG, JPEG, GIF, WebP, ...) is returned as an image block the model can see, " +
+		"not as text."
 }
 
 // Schema implements AgentTool.
@@ -125,6 +128,23 @@ func (t *ReadTool) Execute(ctx context.Context, id string, args json.RawMessage,
 	}
 	if info.IsDir() {
 		return errorResult(fmt.Sprintf("read: %q is a directory, not a file", a.Path)), nil
+	}
+	// An image file is returned as an image block rather than decoded as text:
+	// scanning a PNG would emit megabytes of line-numbered binary, and a VL model
+	// would still not see the picture. A model that reaches for `read` on
+	// screenshot.png — the natural first attempt — gets the image instead of an
+	// error, mirroring how Claude Code's Read handles image files. The extension
+	// check is only a cheap pre-filter; imageload.Load has the final say and
+	// reports anything that is not a real image.
+	if imageload.LooksLikeImage(full) {
+		img, err := imageload.Load(full)
+		if err != nil {
+			return errorResult("read: " + err.Error()), nil
+		}
+		return agentcore.AgentToolResult{Content: agentcore.ContentList{
+			img,
+			agentcore.NewTextContent("read image " + imageload.Describe(a.Path, img)),
+		}}, nil
 	}
 
 	f, err := os.Open(full)

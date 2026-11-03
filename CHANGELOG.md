@@ -138,6 +138,21 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Added
+- **Images are first-class in the agent loop, not just in the prompt**: a vision
+  model can now *see* a screenshot a tool produced, and a screenshot can be
+  attached without typing reference syntax. `view_image` (new, read-only) loads a
+  PNG/JPEG/GIF/WebP under the existing `imageload` size cap and returns it as
+  multimodal content; `read` detects image files and does the same instead of
+  dumping binary bytes into the transcript. The tool-result encoders no longer
+  drop those blocks: Anthropic receives an image block inside the `tool_result`,
+  while OpenAI-compatible and Responses providers splice a follow-up user/message
+  turn carrying the image next to the tool's text, since their tool messages are
+  text-only. Model capability detection (`contextHasImage`) now scans tool
+  results too, so such a session is not misrouted to a text-only fallback. A
+  text-only model still gets a path/MIME/byte-size description instead of losing
+  the call, and `--image <path>` (repeatable) attaches local files to the opening
+  turn — sent with `-p`, pre-filled into the composer in the REPL and TUI — after
+  start-up validation of existence, size and image-ness (exit 2 on a bad path).
 - **Full-screen composer with always-on vim editing (`Ctrl+E`)**: long prompts
   had to be revised in a composer capped at six rows, with arrow keys and
   backspaces. `Ctrl+E` now expands the editor to the whole terminal above the
