@@ -28,6 +28,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/memory"
@@ -226,11 +227,11 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 	// runs — the store is surfaced rather than silently overwritten.
 	mgr, mgrErr := trust.NewManager(trust.DefaultPath())
 	if mgrErr != nil {
-		fmt.Fprintf(os.Stderr, "pigo: trust store unavailable, trust disabled: %v\n", mgrErr)
+		diag.Diagf("trust store unavailable, trust disabled: %v", mgrErr)
 		mgr = nil
 	}
 	if cwd == "" && mgr != nil {
-		fmt.Fprintf(os.Stderr, "pigo: cannot resolve working directory, trust disabled\n")
+		diag.Diagf("cannot resolve working directory, trust disabled")
 		mgr = nil
 	}
 
@@ -277,14 +278,14 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 	// --approve (Options.Approve) or the shared trust store; project-layer hooks
 	// only apply when trusted (FR-14). A malformed hook layer disables hooks with a
 	// warning rather than failing the TUI launch.
-	s.hookDeps = run.HookDeps{SessionID: header.ID, ProjectDir: cwd, WarnLog: os.Stderr}
+	s.hookDeps = run.HookDeps{SessionID: header.ID, ProjectDir: cwd, WarnLog: diag.Writer()}
 	trusted := opts.Approve || (mgr != nil && mgr.IsTrusted(cwd))
 	var baseOnEvent func(agentcore.AgentEvent)
-	if n := plugin.NewEventNotifier(opts.Plugins, os.Stderr); n != nil {
+	if n := plugin.NewEventNotifier(opts.Plugins, diag.Writer()); n != nil {
 		baseOnEvent = n.Handle
 	}
 	if set, err := run.ResolveHookSet(cwd, trusted); err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: hooks disabled: %v\n", err)
+		diag.Diagf("hooks disabled: %v", err)
 		s.onEvent = baseOnEvent
 	} else if d := run.BuildDispatcher(set, s.hookDeps); d != nil {
 		s.dispatcher = d

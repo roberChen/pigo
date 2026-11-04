@@ -21,13 +21,12 @@ package runtime
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/provider"
 )
 
@@ -415,9 +414,9 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 // (MemoryRoot and SessionID both set) — which is how memory.enabled=false keeps
 // the whole subsystem inert. It reuses res.Summary (no extra summarization call)
 // via BuildCheckpoint, tagging the checkpoint with the compaction cut point as
-// its watermark. All failures are non-fatal: they are logged to stderr and the
-// run continues on the compacted context (WriteCheckpoint's log-and-continue
-// contract).
+// its watermark. All failures are non-fatal: they go to the diag sink (silent
+// unless PIGO_DEBUG or a front-end collector is installed) and the run continues
+// on the compacted context (WriteCheckpoint's log-and-continue contract).
 func writeCompactionCheckpoint(ctx context.Context, msgs agentcore.MessageList, res *compaction.CompactionResult, cfg *RunConfig) {
 	if cfg.MemoryRoot == "" || cfg.SessionID == "" || res == nil {
 		return
@@ -437,11 +436,11 @@ func writeCompactionCheckpoint(ctx context.Context, msgs agentcore.MessageList, 
 	}
 	cp, err := BuildCheckpoint(ctx, msgs[:watermark], watermark, time.Now(), summarize)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: checkpoint: build for session %s: %v\n", cfg.SessionID, err)
+		diag.Diagf("checkpoint: build for session %s: %v", cfg.SessionID, err)
 		return
 	}
 	if err := WriteCheckpoint(cfg.SessionID, cfg.MemoryRoot, cp); err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: checkpoint: write for session %s: %v\n", cfg.SessionID, err)
+		diag.Diagf("checkpoint: write for session %s: %v", cfg.SessionID, err)
 	}
 }
 

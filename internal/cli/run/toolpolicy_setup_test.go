@@ -1,12 +1,14 @@
 package run
 
 import (
+	"bytes"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/smallnest/pigo/internal/diag"
 )
 
 // writePolicySkill drops a minimal valid skill into dir so LoadSkills has
@@ -163,30 +165,24 @@ func TestSetupEnvSkillsGatedOnFilteredReadTool(t *testing.T) {
 	}
 }
 
-// captureStderr runs fn with os.Stderr redirected to a pipe and returns whatever
-// was written. It is not safe under t.Parallel — these tests must stay serial.
-func captureStderr(t *testing.T, fn func()) string {
+// captureDiag runs fn with the diag sink redirected to a buffer and returns the
+// diagnostics it emitted. Non-fatal warnings go through internal/diag rather than
+// stderr (see AGENTS.md): the TUI renders them in its transcript, and a normal
+// launch stays silent. Installing a sink overrides the PIGO_DEBUG default, so the
+// test does not depend on the environment. Not safe under t.Parallel.
+func captureDiag(t *testing.T, fn func()) string {
 	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
+	var buf bytes.Buffer
+	diag.Install(&buf)
+	t.Cleanup(func() { diag.Install(nil) })
 	fn()
-	w.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read captured stderr: %v", err)
-	}
-	return string(out)
+	return buf.String()
 }
 
 // TestSetupEnvNoToolsWithPolicyWarns is the counterpart to the typo guarantee:
 // under --no-tools the set is empty, so ValidateToolPolicy cannot flag a
 // misspelled name. Rather than let the boundary silently vanish, SetupEnv must
-// still succeed but print a warning that the policy is inert — otherwise a user
+// still succeed but report a warning that the policy is inert — otherwise a user
 // combining --no-tools with a (possibly misspelled) --allowed-tools would
 // believe a boundary is in force when none is.
 func TestSetupEnvNoToolsWithPolicyWarns(t *testing.T) {
@@ -195,7 +191,7 @@ func TestSetupEnvNoToolsWithPolicyWarns(t *testing.T) {
 
 	var env Env
 	var err error
-	stderr := captureStderr(t, func() {
+	logged := captureDiag(t, func() {
 		// A deliberately misspelled name: with tools present this would abort with
 		// exit code 2, but --no-tools skips validation, so it must not error.
 		env, err = SetupEnv("openrouter/free", "", "", "", "", true /*noTools*/, true /*noSkills*/, "", nil, false, NewToolPolicy([]string{"raed"}, nil))
@@ -206,7 +202,7 @@ func TestSetupEnvNoToolsWithPolicyWarns(t *testing.T) {
 	if len(env.Tools) != 0 {
 		t.Errorf("--no-tools must leave no tools, got %q", names(env.Tools))
 	}
-	if !strings.Contains(stderr, "--no-tools disables all tools") {
-		t.Errorf("expected an inert-policy warning on stderr, got %q", stderr)
+	if !strings.Contains(logged, "--no-tools disables all tools") {
+		t.Errorf("expected an inert-policy warning on the diag sink, got %q", logged)
 	}
 }

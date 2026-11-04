@@ -22,6 +22,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/jsonrpc"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -119,9 +120,9 @@ func handleSubAgentRequest(ctx context.Context, enc *json.Encoder, req *jsonrpc.
 	// empty (omitted from HookInput). A malformed hook layer disables hooks with a
 	// warning rather than failing the child run.
 	if set, herr := run.ResolveHookSet(cwd, run.Trusted(cwd)); herr != nil {
-		fmt.Fprintf(os.Stderr, "pigo: hooks disabled: %v\n", herr)
+		diag.Diagf("hooks disabled: %v", herr)
 	} else {
-		run.InstallHooks(&runCfg, set, run.HookDeps{ProjectDir: cwd, WarnLog: os.Stderr})
+		run.InstallHooks(&runCfg, set, run.HookDeps{ProjectDir: cwd, WarnLog: diag.Writer()})
 	}
 	text, err := runtime.RunSubAgentOnce(ctx, params.SystemPrompt, params.Prompt, tools, runCfg)
 	if err != nil {

@@ -9,12 +9,12 @@ package tui
 
 import (
 	"errors"
-	"os"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -125,7 +125,7 @@ func (s *runSession) applyReload(res *run.ReloadResult) {
 // baseObserver returns the plugin event observer for a plugin manager, or nil when
 // no plugin subscribed (the common case, where the observer seam stays unset).
 func baseObserver(mgr *plugin.Manager) func(agentcore.AgentEvent) {
-	if n := plugin.NewEventNotifier(mgr, os.Stderr); n != nil {
+	if n := plugin.NewEventNotifier(mgr, diag.Writer()); n != nil {
 		return n.Handle
 	}
 	return nil

@@ -22,6 +22,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -55,7 +56,7 @@ func LoadPromptPaths(paths []string) []runtime.SlashCommand {
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: prompts path %q not found, skipping\n", p)
+			diag.Diagf("prompts path %q not found, skipping", p)
 			continue
 		}
 		var cmds []runtime.SlashCommand
@@ -70,7 +71,7 @@ func LoadPromptPaths(paths []string) []runtime.SlashCommand {
 			}
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: prompts path %q: %v\n", p, err)
+			diag.Diagf("prompts path %q: %v", p, err)
 			continue
 		}
 		out = append(out, cmds...)
@@ -149,7 +150,7 @@ func BuildSlashRegistry(live *cli.LiveConfig, creds *provider.CredentialStore, s
 		for i, e := range sh {
 			parts[i] = e.String()
 		}
-		fmt.Fprintf(os.Stderr, "pigo: commands shadowed by higher-priority source (rename to use): %v\n", parts)
+		diag.Diagf("commands shadowed by higher-priority source (rename to use): %v", parts)
 	}
 	return reg, nil
 }

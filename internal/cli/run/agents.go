@@ -26,6 +26,7 @@ import (
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -70,16 +71,16 @@ func buildAgentTools(defs []config.AgentConfig, bc agentBuildContext) []agentcor
 	for _, def := range defs {
 		name := strings.ToLower(strings.TrimSpace(def.Name))
 		if name == "" {
-			fmt.Fprintln(os.Stderr, "pigo: agent definition skipped: name is required")
+			diag.Diagf("agent definition skipped: name is required")
 			continue
 		}
 		if taken[name] {
-			fmt.Fprintf(os.Stderr, "pigo: agent %q skipped: the name is already used by another tool\n", name)
+			diag.Diagf("agent %q skipped: the name is already used by another tool", name)
 			continue
 		}
 		tool, err := buildAgentTool(def, name, bc)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: agent %q skipped: %v\n", name, err)
+			diag.Diagf("agent %q skipped: %v", name, err)
 			continue
 		}
 		taken[name] = true
@@ -140,8 +141,8 @@ func buildAgentTool(def config.AgentConfig, name string, bc agentBuildContext) (
 			},
 			Batch: agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: ToolRegistry(childTools)}},
 		}
-		if d := hooks.NewDispatcher(hookSet, bc.cwd, os.Stderr); d != nil {
-			deps := HookDeps{ProjectDir: bc.cwd, WarnLog: os.Stderr}
+		if d := hooks.NewDispatcher(hookSet, bc.cwd, diag.Writer()); d != nil {
+			deps := HookDeps{ProjectDir: bc.cwd, WarnLog: diag.Writer()}
 			InstallToolSeams(&cfg, d, deps)
 			// A child ends on SubagentStop, not the parent's Stop event.
 			InstallSubagentStop(&cfg, d, deps)
@@ -195,7 +196,7 @@ func filterAgentTools(tools []agentcore.AgentTool, allow []string, agentName str
 		}
 	}
 	for name := range want {
-		fmt.Fprintf(os.Stderr, "pigo: agent %q: tool %q is not available to sub-agents and was ignored\n", agentName, name)
+		diag.Diagf("agent %q: tool %q is not available to sub-agents and was ignored", agentName, name)
 	}
 	return out, nil
 }
@@ -209,11 +210,11 @@ func agentHookSet(def config.AgentConfig, cwd string) hooks.HookSet {
 	for _, h := range def.Hooks {
 		canonical, ok := hooks.CanonicalEvent(h.Event)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "pigo: agent %q: unknown hook event %q ignored\n", def.Name, h.Event)
+			diag.Diagf("agent %q: unknown hook event %q ignored", def.Name, h.Event)
 			continue
 		}
 		if strings.TrimSpace(h.Command) == "" {
-			fmt.Fprintf(os.Stderr, "pigo: agent %q: hook %s has no command, ignored\n", def.Name, canonical)
+			diag.Diagf("agent %q: hook %s has no command, ignored", def.Name, canonical)
 			continue
 		}
 		var timeout *int
@@ -234,7 +235,7 @@ func agentHookSet(def config.AgentConfig, cwd string) hooks.HookSet {
 	}
 	inherited, err := ResolveHookSet(cwd, Trusted(cwd))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: agent %q: inherited hooks disabled: %v\n", def.Name, err)
+		diag.Diagf("agent %q: inherited hooks disabled: %v", def.Name, err)
 		return set
 	}
 	for event, matchers := range inherited {

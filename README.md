@@ -621,7 +621,7 @@ UserPromptSubmit() { echo '{"additionalContext":"branch: '"$(git branch --show-c
 | `PIGO_SKILLS_DIR` | 技能目录（默认 `~/.agents/skills`） |
 | `PIGO_MAX_SUBAGENTS` | 子 Agent 并发上限 |
 | `PIGO_STREAM_IDLE_TIMEOUT` | 流式空闲超时 |
-| `PIGO_DEBUG` | 调试输出 |
+| `PIGO_DEBUG` | 打开诊断输出（默认静默）。TUI 下诊断信息渲染进对话区而不是写 stderr，避免破坏全屏画面 |
 | `PIGO_EVENT_LOG` | 事件日志路径 |
 | `XDG_CONFIG_HOME` | 改变 `config.toml` 的查找根 |
 

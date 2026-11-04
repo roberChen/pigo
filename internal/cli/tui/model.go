@@ -18,6 +18,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/prompts"
 	"github.com/smallnest/pigo/internal/cli/status"
 	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/runtime"
 )
@@ -162,6 +163,12 @@ type Model struct {
 	// lastToolCard points at the most recently started card; Ctrl+O toggles its
 	// expanded state and re-flows the transcript when no card is selected.
 	lastToolCard *toolCard
+
+	// diags is the diagnostic collector installed for this run (diag.go). Every
+	// non-fatal pigo diagnostic goes through it instead of stderr, so nothing ever
+	// writes behind Bubble Tea's back and corrupts the alt screen. nil (the
+	// session-less constructor) arms no drain command.
+	diags *diag.Collector
 	// selectedCardID is the tool card the user picked (a click or card navigation).
 	// It is the target of Ctrl+O and wears an accent border; "" means none.
 	selectedCardID string
@@ -290,8 +297,10 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 // Init implements tea.Model. It kicks off the async git probe so the status bar
 // can show the branch/dirty state as soon as it resolves; the alt-screen is
 // requested declaratively via the AltScreen field on the View returned by View.
+// It also arms the diagnostic drain, so a message queued during assembly (before
+// the first frame) is rendered instead of lost.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(fetchGitCmd(m.cwd), m.input.Focus(), func() tea.Msg {
+	return tea.Batch(fetchGitCmd(m.cwd), m.input.Focus(), waitDiag(m.diags), func() tea.Msg {
 		return tea.RequestBackgroundColor()
 	})
 }
@@ -633,6 +642,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetContext(m.ctxMeter.view())
 		m.transcript.addSystem("(context compacted)")
 		return m, m.pumpNext()
+
+	case diagMsg:
+		return m.handleDiag(msg)
 
 	case reloadDoneMsg:
 		// A config reload finished (explicit /reload or the automatic pickup before a

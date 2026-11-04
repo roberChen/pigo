@@ -79,6 +79,15 @@ results are appended and the inner loop repeats until no tool calls, then
 - **Tool names are lowercase, multi-word with underscores** (`bash_output`,
   `kill_bash`, `memory_search`, `schedule_create`); user-facing matching is
   case-insensitive so Claude Code spellings (`Read`) work.
+- **Never write diagnostics to `os.Stderr` directly — use `diag.Diagf`**
+  (`internal/diag`). Non-fatal messages (bad config layer, plugin/MCP failure,
+  disabled hooks, checkpoint write error) are silent by default and only emitted
+  when `PIGO_DEBUG` is set. The TUI installs a `diag.Collector`, which turns them
+  into queued lines the model folds into the transcript on the UI goroutine: a
+  stray `fmt.Fprintln(os.Stderr, ...)` from a background goroutine (reload, MCP
+  refresh, sub-agent) paints over the alt-screen frame and corrupts the display.
+  Machine modes (`-p`, `stream-json`) must keep stdout/stderr clean, so a new
+  diagnostic is a `diag.Diagf` call, never a `Printf` or a logger.
 
 ## Testing notes
 

@@ -18,13 +18,12 @@
 package tui
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/prompts"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
 	"github.com/smallnest/pigo/internal/provider"
@@ -61,7 +60,7 @@ func newSlashRegistryFor(opts Options, live *cli.LiveConfig, skills []*runtime.S
 		Disable:  opts.NoPromptTemplates,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
+		diag.Diagf("slash-commands: %v", err)
 	}
 	prompts.RegisterMCPCommand(reg, mcpMgr)
 	// /jobs closes over the background registries. A reload rebuilds the tool set

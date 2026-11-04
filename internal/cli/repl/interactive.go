@@ -19,6 +19,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/headless"
 	"github.com/smallnest/pigo/internal/cli/prompts"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/dream"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/plugin"
@@ -188,11 +189,11 @@ func Run(opts Options) error {
 	// trust is disabled too, since an empty cwd would silently never match.
 	mgr, mgrErr := trust.NewManager(trust.DefaultPath())
 	if mgrErr != nil {
-		fmt.Fprintf(os.Stderr, "pigo: trust store unavailable, trust disabled: %v\n", mgrErr)
+		diag.Diagf("trust store unavailable, trust disabled: %v", mgrErr)
 		mgr = nil
 	}
 	if cwdErr != nil && mgr != nil {
-		fmt.Fprintf(os.Stderr, "pigo: cannot resolve working directory, trust disabled: %v\n", cwdErr)
+		diag.Diagf("cannot resolve working directory, trust disabled: %v", cwdErr)
 		mgr = nil
 	}
 	// in is the shared input reader for the main loop and the tool-call
@@ -213,7 +214,7 @@ func Run(opts Options) error {
 		ProjectTrusted: mgr != nil && mgr.IsTrusted(cwd),
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
+		diag.Diagf("slash-commands: %v", err)
 	}
 	// /mcp is installed here (not by BuildSlashRegistry) because it needs the
 	// connected manager the assembly just built. /jobs is the same shape: it closes
@@ -267,7 +268,7 @@ func Run(opts Options) error {
 		memstore:   run.MemoryStoreFromTools(opts.Tools),
 		snap:       run.SnapshotRecorderFromTools(opts.Tools),
 		jobs:       run.BashJobStoreFromTools(opts.Tools),
-		notifier:   plugin.NewEventNotifier(opts.Plugins, os.Stderr),
+		notifier:   plugin.NewEventNotifier(opts.Plugins, diag.Writer()),
 		goal:       agenttool.NewGoalState(),
 		telemetry:  cli.NewTelemetryHolder(),
 		reloader:   opts.Reloader,
@@ -287,7 +288,7 @@ func Run(opts Options) error {
 				ProjectTrusted: mgr != nil && mgr.IsTrusted(cwd),
 			})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "pigo: slash-commands: %v\n", err)
+				diag.Diagf("slash-commands: %v", err)
 			}
 			prompts.RegisterMCPCommand(reg, mcpMgr)
 			// A reload keeps the same background registries (the assembly rebinds

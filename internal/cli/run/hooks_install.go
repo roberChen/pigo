@@ -14,9 +14,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/runtime"
 )
@@ -24,7 +24,8 @@ import (
 // HookDeps carries the run-scoped context a Dispatcher needs: the session id and
 // project directory that populate each HookInput / the hook process environment,
 // and the writer that receives isolation warnings. WarnLog may be nil (defaults
-// to os.Stderr), matching the plugin.EventNotifier convention.
+// to diag.Writer, i.e. silent unless PIGO_DEBUG or a front-end sink is installed),
+// matching the plugin.EventNotifier convention.
 type HookDeps struct {
 	SessionID  string
 	ProjectDir string
@@ -45,7 +46,7 @@ type HookDeps struct {
 func InstallHooks(cfg *runtime.RunConfig, set hooks.HookSet, deps HookDeps) *hooks.Dispatcher {
 	warn := deps.WarnLog
 	if warn == nil {
-		warn = os.Stderr
+		warn = diag.Writer()
 	}
 	d := hooks.NewDispatcher(set, deps.ProjectDir, warn)
 	if d == nil {
@@ -63,7 +64,7 @@ func InstallHooks(cfg *runtime.RunConfig, set hooks.HookSet, deps HookDeps) *hoo
 func BuildDispatcher(set hooks.HookSet, deps HookDeps) *hooks.Dispatcher {
 	warn := deps.WarnLog
 	if warn == nil {
-		warn = os.Stderr
+		warn = diag.Writer()
 	}
 	return hooks.NewDispatcher(set, deps.ProjectDir, warn)
 }

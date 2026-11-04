@@ -13,9 +13,9 @@ package run
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/runtime"
 )
@@ -40,7 +40,7 @@ func stopHook(d *hooks.Dispatcher, deps HookDeps, event string, maxBlocks int) f
 	}
 	warn := deps.WarnLog
 	if warn == nil {
-		warn = os.Stderr
+		warn = diag.Writer()
 	}
 	consecutive := 0
 	return func(ctx context.Context, _ *agentcore.AgentContext) *runtime.StopDecision {

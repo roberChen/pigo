@@ -38,6 +38,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/sessioncmd"
 	"github.com/smallnest/pigo/internal/cli/tui"
 	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/dream"
 	"github.com/smallnest/pigo/internal/imageload"
 	"github.com/smallnest/pigo/internal/provider"
@@ -289,9 +290,14 @@ func main() {
 	// MCP servers — and is the exact code a live reload re-runs, so a reloaded
 	// session cannot drift from a freshly launched one.
 	cwd, _ := os.Getwd()
+	// Layer messages (a bad pigorc option, a malformed config.toml, a rejected
+	// provider) are diagnostics, not output: they stay silent unless PIGO_DEBUG is
+	// set, and a front-end with a terminal (the TUI) renders them itself. The
+	// self-description tools (/status, pigo_config) remain the way to inspect the
+	// effective configuration.
 	resolved, messages := resolveConfig(flagsOnly, cwd)
 	for _, msg := range messages {
-		fmt.Fprintf(os.Stderr, "pigo: %s\n", msg)
+		diag.Diagf("%s", msg)
 	}
 	opts = resolved
 	opts.reloader = newReloader(flagsOnly, cwd)

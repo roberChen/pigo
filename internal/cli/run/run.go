@@ -9,7 +9,6 @@ package run
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/smallnest/pigo/internal/agenttool"
 	"github.com/smallnest/pigo/internal/builtinskills"
 	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hooks"
 	"github.com/smallnest/pigo/internal/mcp"
 	"github.com/smallnest/pigo/internal/memory"
@@ -137,7 +137,7 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		tools = append(tools, &agenttool.MemorySearchTool{Store: state.Memory})
 	default:
 		if store, err := OpenMemoryStore(memEnabled); err != nil {
-			fmt.Fprintf(os.Stderr, "pigo: memory disabled: %v\n", err)
+			diag.Diagf("memory disabled: %v", err)
 			memoryNote = "open failed: " + err.Error()
 		} else if store != nil {
 			memStore = store
@@ -227,11 +227,11 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 			// Plugins are processes: restarting them on a reload would drop their
 			// in-memory state for no reason.
 			mgr = state.Plugins
-		} else if m, err := plugin.Discover(PluginsDir(), os.Stderr, os.Stderr); err == nil {
+		} else if m, err := plugin.Discover(PluginsDir(), diag.Writer(), diag.Writer()); err == nil {
 			tools = append(tools, m.Tools()...)
 			mgr = m
 		} else {
-			fmt.Fprintf(os.Stderr, "pigo: plugin discovery failed: %v\n", err)
+			diag.Diagf("plugin discovery failed: %v", err)
 		}
 	}
 	// Connect the configured MCP servers and expose their tools. Like plugins this is
@@ -240,7 +240,7 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 	// privileges, exactly like hooks and plugins.
 	var mcpMgr *mcp.Manager
 	if !noTools {
-		mcpMgr = connectMCP(context.Background(), config.CurrentMCP(), os.Stderr)
+		mcpMgr = connectMCP(context.Background(), config.CurrentMCP(), diag.Writer())
 		// The policy must also govern servers switched on later with /mcp, or the
 		// boundary could be widened at runtime by enabling a server whose tools it
 		// had excluded.
@@ -286,21 +286,21 @@ func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 		report.Tools = tools
 	}
 	if len(tools) == 0 && !noTools && !policy.IsZero() {
-		fmt.Fprintln(os.Stderr, "pigo: warning: the tool policy removed every tool; the model will run without tools")
+		diag.Diagf("warning: the tool policy removed every tool; the model will run without tools")
 	}
 	// --no-tools already disables everything, so a tool policy alongside it has
 	// no effect — and because the set is empty, ValidateToolPolicy above skipped
 	// name validation, meaning a typo here would otherwise pass unnoticed. Say so
 	// rather than letting the user believe a boundary is in force.
 	if noTools && !policy.IsZero() {
-		fmt.Fprintln(os.Stderr, "pigo: warning: --no-tools disables all tools; --allowed-tools/--disallowed-tools are ignored (and unvalidated)")
+		diag.Diagf("warning: --no-tools disables all tools; --allowed-tools/--disallowed-tools are ignored (and unvalidated)")
 	}
 	// Load skills once (shared between prompt injection and /skill). A partial
 	// parse error still yields the skills that DID load,
 	// so one malformed file is a non-fatal warning rather than a hard failure.
 	skills, err := LoadSkills(noSkills)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: skills: %v\n", err)
+		diag.Diagf("skills: %v", err)
 	}
 	// Skills are discovered after the tool boundary is applied, so the report is
 	// completed here rather than at construction.
@@ -596,11 +596,8 @@ func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 	if noSkills {
 		return nil, nil
 	}
-	var blog io.Writer
-	if os.Getenv("PIGO_DEBUG") != "" {
-		blog = os.Stderr
-	}
-	builtinskills.Bootstrap(ConfigDir(), SkillsDir(), blog)
+	// Bootstrap logs only in debug mode: a first launch installs skills silently.
+	builtinskills.Bootstrap(ConfigDir(), SkillsDir(), diag.Writer())
 	dir := SkillsDir()
 	if dir == "" {
 		return nil, nil
@@ -626,7 +623,7 @@ func refreshConfigReference(skillsDir string) {
 		Version: config.CurrentVersion(),
 		Flags:   config.CurrentFlagDocs(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "pigo: config reference: %v\n", err)
+		diag.Diagf("config reference: %v", err)
 	}
 }
 
