@@ -154,3 +154,79 @@ func TestHeadlessPersistCompactionShrink(t *testing.T) {
 		t.Errorf("cursor after clamp = %d, want 2", hs.persisted)
 	}
 }
+
+// TestPersistAfterCompactionKeepsTurn verifies a mid-run compaction does not drop
+// the turn. Compaction rewrites agentCtx.Messages into a checkpoint plus a short
+// tail, shrinking it below the persisted cursor; clamping the cursor would make
+// the tail empty and leave the session file without the turn just answered.
+func TestPersistAfterCompactionKeepsTurn(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
+
+	_, hs, err := openHeadlessSession("", "faux-model", "faux", "sys prompt")
+	if err != nil {
+		t.Fatalf("openHeadlessSession: %v", err)
+	}
+	// Three turns on disk before the compacting run.
+	if err := hs.persist(&agentcore.AgentContext{Messages: agentcore.MessageList{
+		textUser("one"), textAssistant("two"),
+		textUser("three"), textAssistant("four"),
+		textUser("five"), textAssistant("six"),
+	}}); err != nil {
+		t.Fatalf("first persist: %v", err)
+	}
+
+	// The run compacted the first four messages and added a new turn, so the
+	// context (5) is now shorter than what is on disk (6).
+	compacted := agentcore.MessageList{
+		agentcore.CompactionMessage{RoleField: agentcore.RoleCompaction, Summary: "summary", CoveredMessages: 4},
+		textUser("five"), textAssistant("six"),
+		textUser("seven"), textAssistant("eight"),
+	}
+	if err := hs.persist(&agentcore.AgentContext{Messages: compacted}); err != nil {
+		t.Fatalf("persist after compaction: %v", err)
+	}
+
+	_, path, err := hs.store.LoadPath(hs.header.ID)
+	if err != nil {
+		t.Fatalf("LoadPath: %v", err)
+	}
+	checkpointAt := -1
+	for i, e := range path {
+		if _, ok := e.Message.(agentcore.CompactionMessage); ok {
+			checkpointAt = i
+		}
+	}
+	if checkpointAt < 0 {
+		t.Fatalf("active path has no compaction checkpoint: %+v", path)
+	}
+	if got := agentcore.ContentToText(contentListOf(path[len(path)-1].Message)); got != "eight" {
+		t.Fatalf("active path tip = %q, want the post-compaction turn %q", got, "eight")
+	}
+
+	// Advance past the compacted context: a normal append must still work, so the
+	// compaction path left the leaf and cursor consistent.
+	if err := hs.persist(&agentcore.AgentContext{Messages: append(compacted,
+		textUser("nine"), textAssistant("ten"))}); err != nil {
+		t.Fatalf("persist after the compacted turn: %v", err)
+	}
+	_, path, err = hs.store.LoadPath(hs.header.ID)
+	if err != nil {
+		t.Fatalf("LoadPath after append: %v", err)
+	}
+	if got := agentcore.ContentToText(contentListOf(path[len(path)-1].Message)); got != "ten" {
+		t.Fatalf("active path tip after append = %q, want %q", got, "ten")
+	}
+}
+
+// contentListOf returns a message's content list, or nil for roles without one.
+func contentListOf(m agentcore.Message) agentcore.ContentList {
+	switch msg := m.(type) {
+	case agentcore.UserMessage:
+		return msg.Content
+	case agentcore.AssistantMessage:
+		return msg.Content
+	case agentcore.ToolResultMessage:
+		return msg.Content
+	}
+	return nil
+}

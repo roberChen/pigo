@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/session"
 )
 
@@ -162,11 +163,21 @@ func headlessCwd() string {
 // caller to surface; the run's output has already been emitted regardless.
 func (hs *headlessSession) persist(agentCtx *agentcore.AgentContext) error {
 	// Compaction can rebuild agentCtx.Messages to fewer entries than were on disk
-	// before the run (loop.go maybeAutoCompact replaces the slice). Clamp the
-	// cursor so the tail slice stays in bounds; when the context shrank there is
-	// nothing new to append past what compaction kept.
+	// before the run (loop.go maybeAutoCompact replaces the slice), so the
+	// append-a-tail branch model no longer holds. Clamping the cursor would make
+	// the tail empty and silently drop the whole turn from the session file;
+	// persist the compacted context instead, exactly as the REPL and TUI do.
 	if hs.persisted > len(agentCtx.Messages) {
+		hs.header.Model = hs.model
+		hs.header.Provider = hs.provider
+		leaf, err := cli.PersistCompactedContext(hs.store, hs.header, hs.curLeaf, agentCtx.Messages)
+		if err != nil {
+			return err
+		}
+		hs.header.UpdatedAt = time.Now().UTC()
+		hs.curLeaf = leaf
 		hs.persisted = len(agentCtx.Messages)
+		return nil
 	}
 	tail := agentCtx.Messages[hs.persisted:]
 	if len(tail) == 0 {
