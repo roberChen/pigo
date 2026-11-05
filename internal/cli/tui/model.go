@@ -1184,15 +1184,27 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	case "enter":
-		// Enter submits the composed buffer (FR-13). Shift+Enter inserts a newline
-		// (rebound in newInput) so the editor is a true multi-line composer; when
-		// the slash menu is open, Enter runs the highlighted command (handled
-		// above), so this branch is only reached with the menu closed. In vim
-		// normal mode Enter is a command-mode key, not a submit: the operator must
-		// get back to insert mode (i/a/o …) before sending.
+		// Enter submits the composed buffer (FR-13) from the inline composer.
+		// Shift+Enter inserts a newline (rebound in newInput) so the editor is a
+		// true multi-line composer; when the slash menu is open, Enter runs the
+		// highlighted command (handled above), so this branch is only reached with
+		// the menu closed.
+		//
+		// The full-screen composer never sends on Enter: it is a modal editor, so
+		// Enter breaks the line in insert mode (vim's meaning) and is a command key
+		// in normal mode. Sending from there is a deliberate two-step — Ctrl+E (or
+		// :q) back to the inline composer, then Enter — which keeps a vim user's
+		// habitual Enter from firing a half-written prompt.
 		if !m.running {
-			if m.input.Fullscreen() && m.input.Mode() == vimNormal {
-				return m, nil
+			if m.input.Fullscreen() {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				if !m.input.Fullscreen() {
+					// :q left the layout; fall back to the ordinary relayout path.
+					m.menu.close()
+				}
+				m.relayout()
+				return m, cmd
 			}
 			return m.submit()
 		}

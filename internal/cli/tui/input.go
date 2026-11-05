@@ -150,11 +150,14 @@ func newInput() input {
 // not intercept itself (submit / interrupt / quit); subclasses of key handling
 // are:
 //
-//   - inline layout: everything goes to textarea, exactly as before.
-//   - full screen, insert mode: textarea handles the key, except Esc which
-//     switches to normal mode without touching the buffer.
+//   - inline layout: everything goes to textarea, exactly as before (Enter is
+//     intercepted by the model as submit).
+//   - full screen, insert mode: textarea handles the key, so Enter breaks the
+//     line as it does in vim; Esc switches to normal mode without touching the
+//     buffer. There is no send key here — sending is the inline composer's Enter.
 //   - full screen, normal mode: the key is a command for the vim core and never
-//     reaches textarea, so plain letters cannot leak into the buffer.
+//     reaches textarea, so plain letters cannot leak into the buffer. `:q` (like
+//     Ctrl+E) leaves the full-screen layout.
 //
 // Height is owned by textarea's DynamicHeight (see newInput); buffer
 // replacements through SetValue recompute it, so there is nothing to re-sync
@@ -199,6 +202,12 @@ func (in input) updateNormal(msg tea.KeyPressMsg) (input, tea.Cmd) {
 	out := in.vim.key(msg.String(), msg.Text, b, in.normalCursor())
 	if out.changed {
 		in.ta.SetValue(out.value)
+	}
+	if out.leave {
+		// :q hands the screen back to the transcript without touching the draft,
+		// exactly like Ctrl+E; the model relayouts after this returns.
+		in.SetFullscreen(false, 0)
+		return in, nil
 	}
 	if out.insert {
 		in.mode = vimInsert
@@ -285,6 +294,13 @@ func (in *input) SetFullscreen(on bool, rows int) {
 		in.vim.reset()
 		in.insertUndoPushed = false
 		in.ta.DynamicHeight = false
+		// Full screen is a real editor, so Enter breaks the line instead of
+		// sending. The inline composer keeps Enter as the send key, which is why
+		// this binding is added here and dropped again on the way out.
+		in.ta.KeyMap.InsertNewline = key.NewBinding(
+			key.WithKeys("enter", "ctrl+m", "shift+enter", "ctrl+j", "alt+enter"),
+			key.WithHelp("enter", "insert newline"),
+		)
 		in.setFullRows(rows)
 		return
 	}
@@ -295,6 +311,12 @@ func (in *input) SetFullscreen(on bool, rows int) {
 	in.insertUndoPushed = false
 	in.ta.DynamicHeight = true
 	in.ta.MinHeight = 1
+	// Back to the form semantics: Enter sends again, so only the explicit newline
+	// keys reach the textarea.
+	in.ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "ctrl+j", "alt+enter"),
+		key.WithHelp("shift+enter", "insert newline"),
+	)
 	setEditorRows(&in.ta, maxInputRows)
 	in.resyncInlineHeight()
 }
@@ -461,7 +483,7 @@ const fullscreenMinRows = 4
 // deliberately ASCII and mode-aware: insert mode advertises how to reach normal
 // mode, normal mode advertises the commands and how to get back.
 func (in input) hintLines() []string {
-	leave := "ctrl+e leave full screen"
+	leave := "ctrl+e leave full screen" // :q does the same in normal mode
 	if in.mode == vimNormal {
 		// The cheat sheet stays on one row: what does not fit an 80-column
 		// terminal is dropped rather than wrapped, and the optional tail only
@@ -471,7 +493,7 @@ func (in input) hintLines() []string {
 			sheet += " · f t find"
 		}
 		lines := []string{
-			"-- " + in.mode.label() + " --  i a o insert · u undo · " + leave,
+			"-- " + in.mode.label() + " --  i a o insert · u undo · :q / " + leave,
 			sheet,
 		}
 		if width := in.width; width > 0 && width < hintTwoLineWidth {
@@ -480,8 +502,8 @@ func (in input) hintLines() []string {
 		return lines
 	}
 	lines := []string{
-		"-- " + in.mode.label() + " --  esc normal mode · " + leave,
-		"enter send · shift+enter newline · ctrl+v paste image",
+		"-- " + in.mode.label() + " --  enter newline · esc normal mode · " + leave,
+		"enter sends in the inline composer · ctrl+v paste image",
 	}
 	if width := in.width; width > 0 && width < hintTwoLineWidth {
 		return lines[:1]

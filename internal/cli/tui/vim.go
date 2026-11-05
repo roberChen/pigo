@@ -20,16 +20,20 @@ import (
 // up the multi-line insert experience the TUI already had.
 //
 // Scope: insert and normal modes; hjkl, word and line motions; d/c/y operators
-// with counts; x/X/D/C/s/S/Y; i/a/I/A/o/O; p/P; r; J; ~; u. Visual mode, search
-// (/, n), macros and text objects (ciw) are intentionally out of scope and are
-// documented as such in README, so the limit is known rather than surprising.
+// with counts; x/X/D/C/s/S/Y; i/a/I/A/o/O; p/P; r; J; ~; u; :q to leave. Visual
+// mode, search (/, n), macros and text objects (ciw) are intentionally out of
+// scope and are documented as such in README, so the limit is known rather than
+// surprising.
 
 // vimMode is the composer's editing mode while modal editing is enabled.
 type vimMode uint8
 
 const (
-	// vimInsert is ordinary text entry: keys reach the textarea unchanged,
-	// Enter submits, Shift+Enter inserts a newline.
+	// vimInsert is ordinary text entry: keys reach the textarea with vim's
+	// meaning, so Enter breaks the line like it does in vim. The composer is an
+	// editor, not a form: sending is the inline layout's Enter (leave full screen
+	// with Ctrl+E or :q first), which is also what stops a vim user from firing a
+	// half-written prompt with the Enter they pressed to start a new paragraph.
 	vimInsert vimMode = iota
 	// vimNormal is command mode, entered with Esc.
 	vimNormal
@@ -188,6 +192,7 @@ type vimOutcome struct {
 	cursor   vimCursor // caret after the command (normal-mode position)
 	insert   bool      // switch to insert mode
 	insertAt vimCursor // insertion caret when insert is true
+	leave    bool      // leave the full-screen composer (:q)
 }
 
 // noop is the common "key consumed, nothing to do" outcome.
@@ -284,6 +289,12 @@ func (s *vimState) key(key, text string, b vimBuffer, cur vimCursor) vimOutcome 
 		return s.moveWord(1, true, b, cur)
 	case "f", "F", "t", "T":
 		s.prefix = rune(key[0])
+		return noop(cur)
+	case ":":
+		// An ex command line. Only :q is implemented: the composer has no file to
+		// write and no buffer to abandon, so ":q" is the documented way back to the
+		// inline layout (Ctrl+E is the shortcut).
+		s.prefix = ':'
 		return noop(cur)
 	case "G":
 		row := b.lastRow()
@@ -390,6 +401,15 @@ func (s *vimState) applyPrefix(key, text string, b vimBuffer, cur vimCursor) vim
 		s.reset()
 		return noop(b.clampNormal(tp))
 
+	case ':':
+		// An unsupported ex command is dropped, exactly like an unknown normal-mode
+		// key: the draft is never touched by a mistyped command.
+		s.reset()
+		if r, ok := vimPrintableRune(key, text); ok && r == 'q' {
+			return vimOutcome{handled: true, cursor: cur, leave: true}
+		}
+		return noop(cur)
+
 	case 'r':
 		r, ok := vimPrintableRune(key, text)
 		if !ok || r == '\n' {
@@ -407,7 +427,7 @@ func (s *vimState) applyPrefix(key, text string, b vimBuffer, cur vimCursor) vim
 func (s *vimState) applyOperatorMotion(key, text string, b vimBuffer, cur vimCursor) vimOutcome {
 	// g and f/t are themselves prefixes; they persist across the next key.
 	switch key {
-	case "g", "f", "F", "t", "T":
+	case "g", "f", "F", "t", "T", ":":
 		s.prefix = rune(key[0])
 		return noop(cur)
 	}

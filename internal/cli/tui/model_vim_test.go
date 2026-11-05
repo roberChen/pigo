@@ -207,7 +207,7 @@ func TestFullscreenNarrowTerminalKeepsOneHintLine(t *testing.T) {
 	if strings.Count(view, "\n") != 19 {
 		t.Fatalf("view rows = %d, want 19", strings.Count(view, "\n"))
 	}
-	if strings.Contains(view, "shift+enter newline") {
+	if strings.Contains(view, "enter sends in the inline composer") {
 		t.Fatalf("second hint line rendered on a narrow terminal:\n%s", view)
 	}
 }
@@ -226,20 +226,76 @@ func TestFullscreenResizeRefillsTerminal(t *testing.T) {
 	}
 }
 
-// TestFullscreenSubmitReturnsToInline verifies sending from the full-screen
-// composer hands the screen back rather than leaving an empty zoomed editor.
-func TestFullscreenSubmitReturnsToInline(t *testing.T) {
+// TestFullscreenEnterBreaksLineInsteadOfSending pins the full-screen contract:
+// Enter is a newline (vim's meaning), never a send. A vim user pressing Enter to
+// start a paragraph must not fire a half-written prompt, and the draft and
+// layout must survive. Sending is the inline composer's Enter.
+func TestFullscreenEnterBreaksLineInsteadOfSending(t *testing.T) {
 	m := newVimModel(t, "hello")
 	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := next.(Model)
-	if got.input.Fullscreen() {
-		t.Fatal("submit left the composer full screen")
+	if !got.input.Fullscreen() {
+		t.Fatal("Enter left the full-screen composer")
 	}
+	if got.input.Value() != "hello\n" {
+		t.Fatalf("Enter value = %q, want a trailing newline", got.input.Value())
+	}
+	if joined := strings.Join(blockTexts(got.transcript), "\n"); strings.Contains(joined, "hello") {
+		t.Fatalf("Enter from full screen sent the prompt:\n%s", joined)
+	}
+}
+
+// TestFullscreenColonQuitsToInline covers :q: it hands the screen back to the
+// inline composer with the draft and caret intact, without sending. Enter then
+// sends from there, which is the documented two-step.
+func TestFullscreenColonQuitsToInline(t *testing.T) {
+	m := newVimModel(t, "hello")
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(Model)
+	if m.input.Mode() != vimNormal {
+		t.Fatalf("mode = %v, want normal", m.input.Mode())
+	}
+	next, _ = m.Update(runeKey(':'))
+	m = next.(Model)
+	next, _ = m.Update(runeKey('q'))
+	got := next.(Model)
+	if got.input.Fullscreen() {
+		t.Fatal(":q left the composer full screen")
+	}
+	if got.input.Value() != "hello" {
+		t.Fatalf(":q changed the draft: %q", got.input.Value())
+	}
+	if joined := strings.Join(blockTexts(got.transcript), "\n"); strings.Contains(joined, "hello") {
+		t.Fatalf(":q sent the prompt:\n%s", joined)
+	}
+
+	// Back inline, Enter sends again.
+	next, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = next.(Model)
 	if got.input.Value() != "" {
-		t.Fatalf("input not cleared after submit: %q", got.input.Value())
+		t.Fatalf("inline Enter did not send: %q", got.input.Value())
 	}
 	if joined := strings.Join(blockTexts(got.transcript), "\n"); !strings.Contains(joined, "hello") {
-		t.Fatalf("submit from full screen did not record the prompt:\n%s", joined)
+		t.Fatalf("inline Enter did not record the prompt:\n%s", joined)
+	}
+}
+
+// TestFullscreenUnknownColonCommandKeepsDraft guards the command line against
+// swallowing the buffer: an unsupported ex command is dropped, like any
+// unmapped normal-mode key.
+func TestFullscreenUnknownColonCommandKeepsDraft(t *testing.T) {
+	m := newVimModel(t, "hello")
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(Model)
+	for _, r := range ":wq" {
+		next, _ = m.Update(runeKey(r))
+		m = next.(Model)
+	}
+	if !m.input.Fullscreen() {
+		t.Fatal("an unknown ex command left full screen")
+	}
+	if m.input.Value() != "hello" {
+		t.Fatalf("an unknown ex command changed the draft: %q", m.input.Value())
 	}
 }
 

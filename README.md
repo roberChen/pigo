@@ -427,21 +427,22 @@ REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`
 全屏编辑器底部常驻**快捷键提示条**（随模式变化，窄终端自动缩成一行），所以不需要记命令：
 
 ```
--- INSERT --  esc normal mode · ctrl+e leave full screen
-enter send · shift+enter newline · ctrl+v paste image
--- NORMAL --  i a o insert · u undo · ctrl+e leave full screen
+-- INSERT --  enter newline · esc normal mode · ctrl+e leave full screen
+enter sends in the inline composer · ctrl+v paste image
+-- NORMAL --  i a o insert · u undo · :q / ctrl+e leave full screen
 h j k l w b e move · 0 ^ $ gg G jump · dd cc yy lines · x X del · p P paste · f t find
 ```
 
 （这里的 `ctrl+v` 是输入框自身的粘贴图片键；提示条按当前宽度裁剪，放不下的部分以 `…` 结尾。）
 
-- **INSERT（进入全屏时的默认模式）**：输入、粘贴与平时一致；`Esc` 进入 NORMAL，不会发送也不会退出。全屏时斜杠命令的自动补全弹层不显示（命令本身仍可正常输入并执行），把整屏留给正文。
-- **NORMAL**：可打印字符不会插入正文，`Enter` 不提交（先 `i`/`a`/`o` 回到 INSERT），`↑`/`↓` 是 `k`/`j` 而不是历史。
+- **INSERT（进入全屏时的默认模式）**：输入、粘贴与平时一致；`Enter` **换行**（和 vim 一样），不发送——写长文时按 Enter 起新段落是本能动作，绝不该把半截 prompt 发出去。`Esc` 进入 NORMAL，不会发送也不会退出。全屏时斜杠命令的自动补全弹层不显示（命令本身仍可正常输入并执行），把整屏留给正文。
+- **NORMAL**：可打印字符不会插入正文，`Enter` 是命令键（先 `i`/`a`/`o` 回到 INSERT），`↑`/`↓` 是 `k`/`j` 而不是历史。
 - **移动**：`h j k l`、`w b e`、`0 ^ $`、`gg G`、`f/t/F/T{char}`，均支持 `{count}` 前缀（`3w`、`2j`、`2G`）。
 - **修改**：`x X`、`dd D`、`dw de d$ d0 dj dG dgg df/dt`、`cc C s S`、`r{char}`、`~`、`J`；`y` 系列同理，`p`/`P` 粘贴。
 - **回到 INSERT**：`i a I A o O`、`c` 系列、`s`/`S`。
 - **撤销**：`u`；一次 INSERT 会话（进入 INSERT 到 `Esc`）整体一步撤销。
-- **退出全屏**：`Ctrl+E`（任何模式下都可用）。提交消息后自动退出全屏。
+- **发送**：全屏里**没有**发送键。按 `Ctrl+E`（或 NORMAL 下 `:q`）回到内联输入框，再按 `Enter` 发送——两次操作换来的是不会误发。草稿与光标位置全程保留。
+- **退出全屏**：`Ctrl+E`（任何模式下都可用），NORMAL 下 `:q` 等价。
 - **安全性**：NORMAL 下未映射的键被吞掉，不会破坏正文；中文/emoji 按 rune 移动。暂不支持可视模式（`v`）、宏（`q`）、寄存器前缀（`"a`）和 `/` 搜索（`/` 仍归斜杠菜单）。
 - 只影响全屏 TUI；REPL（`--no-tui`）和无头模式没有这个概念。
 
