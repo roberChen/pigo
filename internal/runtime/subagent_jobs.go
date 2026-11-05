@@ -243,7 +243,14 @@ func (j *subAgentJob) describeMessageLocked() agentcore.AgentMessage {
 		b.WriteString("status: done\n")
 		b.WriteString("report:\n" + j.result)
 	}
-	return agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent(b.String())}}
+	// Origin marks this as a harness-injected turn, not something the human typed:
+	// the model must see it as input, but a resumed session must not replay the
+	// child's report behind a "you" gutter as if the user had said it.
+	return agentcore.UserMessage{
+		RoleField: agentcore.RoleUser,
+		Content:   agentcore.ContentList{agentcore.NewTextContent(b.String())},
+		Origin:    agentcore.UserMessageOriginSubAgentReport,
+	}
 }
 
 // pending reports whether any job is still running.

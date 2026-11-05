@@ -41,14 +41,33 @@ type Usage struct {
 
 // UserMessage is input from the user. Content is restricted at construction to
 // text/image blocks (runtime constraint, not a separate interface).
+//
+// Origin distinguishes a turn the human typed from one the harness injected
+// (see UserMessageOrigin*). It is persisted so a resumed session renders an
+// injected turn as what it is instead of replaying it behind a "you" gutter: a
+// finished background sub-agent's report is delivered as a user-role turn so the
+// model sees it as input, but it is not something the human said.
 type UserMessage struct {
 	RoleField string      `json:"role"`
 	Content   ContentList `json:"content"`
 	Timestamp int64       `json:"timestamp"`
+	Origin    string      `json:"origin,omitempty"`
 }
 
 func (UserMessage) isMessage()     {}
 func (m UserMessage) Role() string { return RoleUser }
+
+// UserMessageOrigin values for UserMessage.Origin. The empty value means the
+// turn came from the human.
+const (
+	// UserMessageOriginSubAgentReport marks a finished background sub-agent's
+	// report injected onto the follow-up seam.
+	UserMessageOriginSubAgentReport = "subagent_report"
+)
+
+// IsSynthetic reports whether the harness rather than the human produced this
+// user turn. Callers use it to render the turn as a note instead of a prompt.
+func (m UserMessage) IsSynthetic() bool { return m.Origin != "" }
 
 // AssistantMessage is a model response. Content may hold text/thinking/toolCall
 // blocks. StopReason follows pi's set (end_turn/tool_use/length/error/aborted).

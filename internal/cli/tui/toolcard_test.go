@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -349,5 +350,31 @@ func TestRawToolArgs(t *testing.T) {
 	got := rawToolArgs(long, nil)
 	if runes := []rune(got); len(runes) != cardRawArgsLimit+1 || runes[len(runes)-1] != '…' {
 		t.Errorf("long payload not clipped with an ellipsis: len=%d", len(runes))
+	}
+}
+
+// TestToolCardTaskExpandStaysBounded verifies an expanded sub-agent report is
+// still capped well below the generic ceiling: the report is the child's whole
+// transcript and lives in its own session file, so expanding the card must not
+// pour it into the parent transcript.
+func TestToolCardTaskExpandStaysBounded(t *testing.T) {
+	theme := DefaultTheme()
+	var b strings.Builder
+	for i := 0; i < cardTaskExpanded+10; i++ {
+		fmt.Fprintf(&b, "report-line-%03d\n", i)
+	}
+	card := toolCard{name: "task", response: parseToolResult(b.String()), state: cardSuccess}
+	card.expanded = true
+
+	out := card.render(theme, 60)
+	// The hint is wrapped to the card width, so match a stable fragment.
+	if !strings.Contains(out, "lines omitted") || !strings.Contains(out, "agent's") {
+		t.Errorf("expanded task card should point at the child session\n%s", out)
+	}
+	if strings.Contains(out, "report-line-049") {
+		t.Errorf("expanded task card should cap the report\n%s", out)
+	}
+	if !strings.Contains(out, "report-line-000") {
+		t.Errorf("expanded task card should keep the head of the report\n%s", out)
 	}
 }

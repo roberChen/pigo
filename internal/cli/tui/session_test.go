@@ -435,3 +435,47 @@ func toolNamesOf(tools []agentcore.AgentTool) []string {
 	}
 	return out
 }
+
+// TestResumeRendersSubAgentReportAsNote pins the resume behavior for a finished
+// background sub-agent: its report is persisted as a user-role turn so the model
+// sees it as input, but it was never typed by the human. A resumed session must
+// therefore render it as a dim note, not behind the "▌ you" gutter — otherwise
+// resuming a session that ran a background sub-agent looks like the child's
+// content had been pasted into the main conversation as a user prompt.
+func TestResumeRendersSubAgentReportAsNote(t *testing.T) {
+	store := newTestStore(t)
+	id := saveSession(t, store, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("please delegate")}},
+		agentcore.UserMessage{
+			RoleField: agentcore.RoleUser,
+			Content:   agentcore.ContentList{agentcore.NewTextContent("A background sub-agent you started has finished.\nstatus: done\nreport:\nCHILD-REPORT")},
+			Origin:    agentcore.UserMessageOriginSubAgentReport,
+		},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("thanks")}},
+	})
+
+	s, history, err := newRunSessionWithStore(store, Options{ResumeID: id})
+	if err != nil {
+		t.Fatalf("newRunSessionWithStore: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history len = %d, want 3 (the report stays in context)", len(history))
+	}
+	// The model must still receive the report as a user turn.
+	if _, ok := history[1].(agentcore.UserMessage); !ok {
+		t.Fatalf("history[1] = %T, want the report to remain a UserMessage for the model", history[1])
+	}
+
+	tr := newTranscript(DefaultTheme())
+	seedTranscript(&tr, history)
+	if len(tr.blocks) != 3 {
+		t.Fatalf("transcript blocks = %d, want 3", len(tr.blocks))
+	}
+	if tr.blocks[1].role != roleSystem {
+		t.Errorf("report block role = %v, want roleSystem (not a human turn)", tr.blocks[1].role)
+	}
+	if !strings.Contains(tr.blocks[1].text, "CHILD-REPORT") {
+		t.Errorf("report block lost the content: %q", tr.blocks[1].text)
+	}
+	_ = s
+}

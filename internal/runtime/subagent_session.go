@@ -52,7 +52,11 @@ func openSubAgentSession(parentSession, continueID, agentName, model, providerNa
 	cwd, _ := os.Getwd()
 
 	if continueID != "" {
-		header, entries, err := store.LoadEntries(continueID)
+		// LoadPath follows the active branch. LoadEntries would return the whole
+		// file including abandoned sibling branches, so a continued child that had
+		// been rewound would replay turns it no longer descends from and re-anchor
+		// its leaf on the last line of the file instead of the live tip.
+		header, entries, err := store.LoadPath(continueID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("load sub-agent session %s: %w", continueID, err)
 		}
@@ -69,11 +73,7 @@ func openSubAgentSession(parentSession, continueID, agentName, model, providerNa
 		for i, e := range entries {
 			msgs[i] = e.Message
 		}
-		leaf := ""
-		if len(entries) > 0 {
-			leaf = entries[len(entries)-1].ID
-		}
-		return &subAgentSession{store: store, header: header, curLeaf: leaf, persisted: len(msgs)}, msgs, nil
+		return &subAgentSession{store: store, header: header, curLeaf: session.TipLeaf(entries), persisted: len(msgs)}, msgs, nil
 	}
 
 	header := session.SessionHeader{

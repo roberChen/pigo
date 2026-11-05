@@ -100,6 +100,11 @@ func sessionMatchesProject(h session.SessionHeader, projectDir string) bool {
 //   - state.LastRunAt zero (never run) → the most-recent recentN matching
 //     sessions by UpdatedAt descending (a bounded first-run window).
 //
+// Sub-agent sessions are skipped: they are an implementation detail of the
+// conversation that dispatched them, so distilling them would pull a child's
+// internal working notes into long-term memory and inject them back into later
+// main-agent turns. Only top-level conversations are a source of durable facts.
+//
 // recentN falls back to DefaultRecentSessions when non-positive. The result is
 // ordered most-recent-first so transcript budgeting keeps the freshest context.
 func collectRecentSessions(sessions []session.SessionHeader, state State, projectDir string, recentN int) []session.SessionHeader {
@@ -108,6 +113,9 @@ func collectRecentSessions(sessions []session.SessionHeader, state State, projec
 	}
 	var matched []session.SessionHeader
 	for _, h := range sessions {
+		if h.IsSubAgent() {
+			continue
+		}
 		if sessionMatchesProject(h, projectDir) {
 			matched = append(matched, h)
 		}

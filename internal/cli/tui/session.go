@@ -596,6 +596,30 @@ func (s *runSession) persist() error {
 	return nil
 }
 
+// syntheticTurnSummary condenses a replayed harness-injected user turn (a
+// finished background sub-agent's report) into a short transcript note. The
+// report is the child's transcript rather than this conversation's content, so
+// the resumed view keeps the status header plus a bounded gist instead of
+// dumping the child's whole answer into the parent transcript. The full text
+// stays in history for the model and in the child's own session file.
+func syntheticTurnSummary(text string) string {
+	const maxLines = 5
+	const maxLineWidth = 160
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) <= maxLines {
+		return text
+	}
+	out := make([]string, 0, maxLines+1)
+	for _, ln := range lines[:maxLines] {
+		if len(ln) > maxLineWidth {
+			ln = ln[:maxLineWidth] + "…"
+		}
+		out = append(out, ln)
+	}
+	out = append(out, fmt.Sprintf("… %d more lines (the full report is in the sub-agent's session)", len(lines)-maxLines))
+	return strings.Join(out, "\n")
+}
+
 // seedTranscript replays a resumed session's prior messages into the transcript
 // so the user sees the conversation so far before re-prompting (the TUI analogue
 // of repl.replayTranscript). User and assistant text become their respective
@@ -624,7 +648,17 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 		switch msg := m.(type) {
 		case agentcore.UserMessage:
 			if text := agentcore.ContentToText(msg.Content); text != "" {
-				t.blocks = append(t.blocks, transcriptBlock{role: roleUser, text: text})
+				// A harness-injected turn (a finished background sub-agent's report)
+				// is not something the human said: replay it as a dim note so a
+				// resumed session does not present the child's content as a user
+				// prompt. It stays in history for the model, but the view keeps only
+				// a bounded summary — the report is the child's transcript, not this
+				// conversation's content, and it is reachable in full via its session.
+				if msg.IsSynthetic() {
+					t.blocks = append(t.blocks, transcriptBlock{role: roleSystem, text: syntheticTurnSummary(text)})
+				} else {
+					t.blocks = append(t.blocks, transcriptBlock{role: roleUser, text: text})
+				}
 				t.activeAssistant = -1
 			}
 		case agentcore.AssistantMessage:

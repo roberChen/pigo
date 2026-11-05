@@ -288,3 +288,30 @@ func TestRunNoDurableFactsNoOp(t *testing.T) {
 		t.Fatalf("expected '无新增' no-op note, got %v", rep.Notes)
 	}
 }
+
+// TestCollectTranscriptsSkipsSubAgentSessions verifies a sub-agent's transcript
+// never reaches the distiller: a child conversation is an implementation detail
+// of its parent, so distilling it would pull the child's internal notes into
+// long-term memory and re-inject them into later main-agent turns.
+func TestCollectTranscriptsSkipsSubAgentSessions(t *testing.T) {
+	proj := t.TempDir()
+	now := time.Now().UTC()
+	src := &stubSessions{
+		headers: []session.SessionHeader{
+			{ID: "parent", Cwd: proj, UpdatedAt: now},
+			{ID: "child", Cwd: proj, UpdatedAt: now.Add(time.Second), SubAgent: "task", ParentSession: "parent"},
+		},
+		msgs: map[string]agentcore.MessageList{
+			"parent": {userMsg("top-level fact"), asstMsg("noted")},
+			"child":  {userMsg("CHILD-ONLY-SECRET"), asstMsg("child answer")},
+		},
+	}
+
+	got := collectTranscripts(src, State{}, proj, 20, 0)
+	if !strings.Contains(got, "top-level fact") {
+		t.Fatalf("parent transcript missing from result:\n%s", got)
+	}
+	if strings.Contains(got, "CHILD-ONLY-SECRET") {
+		t.Errorf("sub-agent transcript was distilled into memory:\n%s", got)
+	}
+}

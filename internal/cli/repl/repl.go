@@ -618,6 +618,13 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 		fmt.Fprintf(out, "pigo: %v\n", err)
 		return
 	}
+	// Warn once here rather than letting the turn assemble and silently drop the
+	// picture: the request layer strips images the model cannot accept, so
+	// without this the user would see a normal answer that ignored their image.
+	if agentcore.ContentHasImage(content) &&
+		!provider.ModelSupportsImages(deps.live.ProviderName, deps.live.Model) {
+		fmt.Fprintln(out, "pigo: note: "+deps.live.Model+" does not accept image input; the attached image was not sent")
+	}
 	// UserPromptSubmit runs before the prompt is committed to the shared context,
 	// so a block aborts the turn without leaving a dangling user message; any
 	// additionalContext is injected into this turn only (one-shot reminder).
@@ -1265,7 +1272,14 @@ func replayTranscript(out io.Writer, messages []agentcore.AgentMessage) {
 		switch msg := m.(type) {
 		case agentcore.UserMessage:
 			if t := agentcore.ContentToText(msg.Content); t != "" {
-				fmt.Fprintf(out, "> %s\n", t)
+				// A harness-injected turn (a finished background sub-agent's report)
+				// was never typed by the human: replay it as a dim note rather than a
+				// "> " prompt, so resuming does not read as if the user said it.
+				if msg.IsSynthetic() {
+					fmt.Fprintln(out, ui.Colorize(color, ui.Dim, "· "+ui.OneLine(t)))
+				} else {
+					fmt.Fprintf(out, "> %s\n", t)
+				}
 			}
 		case agentcore.AssistantMessage:
 			if t := agentcore.ContentToText(msg.Content); t != "" {

@@ -84,6 +84,12 @@ const (
 	cardTaskLines      = 10  // sub-agent report
 	cardInputLines     = 3   // argument lines before "+N more"
 	cardExpandedLines  = 400 // hard ceiling once expanded
+	// cardTaskExpanded caps an expanded sub-agent report far below the generic
+	// ceiling: the report is the child's whole transcript, and the full text lives
+	// in the child's session file, so dumping it into the parent transcript buries
+	// the parent's own turns. Expanding is for re-reading the gist, not the child's
+	// entire run.
+	cardTaskExpanded = 40
 	collapsedDiffLines = 12
 	cardRawArgsLimit   = 400
 	cardArgValueLimit  = 120
@@ -640,7 +646,7 @@ func (c toolCard) responseLines() []cardLine {
 	limit := c.previewBudget()
 	keepTail := c.toolFamily() == "bash"
 	if c.expanded {
-		limit = cardExpandedLines
+		limit = c.expandedBudget()
 	}
 	clamped, hidden := clampStrings(raw, limit, keepTail)
 	// A failed tool's message is red, so the reason stands out. Command output is not:
@@ -664,6 +670,9 @@ func (c toolCard) responseLines() []cardLine {
 // path instead of the (already used) expand key.
 func (c toolCard) hiddenHint(hidden int) string {
 	if c.expanded {
+		if c.toolFamily() == "task" || c.toolFamily() == "task_output" {
+			return fmt.Sprintf("… %d lines omitted (the full report is in the sub-agent's session)", hidden)
+		}
 		return fmt.Sprintf("… %d lines omitted (use /export for the full transcript)", hidden)
 	}
 	return fmt.Sprintf("… %d more lines · Ctrl+O", hidden)
@@ -682,6 +691,16 @@ func (c toolCard) previewBudget() int {
 		return 2 // the summary line; the change itself is the Diff section
 	}
 	return cardPreviewLines
+}
+
+// expandedBudget is how many response lines the card shows once expanded. Only
+// the sub-agent report is capped below the generic ceiling; see cardTaskExpanded.
+func (c toolCard) expandedBudget() int {
+	switch c.toolFamily() {
+	case "task", "task_output":
+		return cardTaskExpanded
+	}
+	return cardExpandedLines
 }
 
 // diffLines renders the reported unified diff, capped while collapsed.

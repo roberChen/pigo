@@ -182,3 +182,58 @@ func TestSubAgentWithoutParentSessionIsNotPersisted(t *testing.T) {
 		t.Errorf("session store has %d sessions, want none", len(headers))
 	}
 }
+
+// TestOpenSubAgentSessionContinuesActiveBranch verifies a continued child resumes
+// the branch it actually descends from. A child that was rewound holds abandoned
+// sibling turns in its file; passing the whole file to the model would replay
+// turns the conversation no longer continues from.
+func TestOpenSubAgentSessionContinuesActiveBranch(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
+	store, err := session.OpenDefaultStore()
+	if err != nil {
+		t.Fatalf("OpenDefaultStore: %v", err)
+	}
+	header := session.SessionHeader{ID: "20260101-000000-000042", ParentSession: "parent-session-1", SubAgent: "task"}
+	if _, err := store.AppendBranch(header, "", agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("start")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("abandoned answer")}},
+	}); err != nil {
+		t.Fatalf("AppendBranch: %v", err)
+	}
+	_, entries, err := store.LoadEntries(header.ID)
+	if err != nil {
+		t.Fatalf("LoadEntries: %v", err)
+	}
+	// A replacement branch from the root: the original assistant turn becomes an
+	// abandoned sibling, exactly like a /tree leaf switch.
+	leaf, err := store.AppendBranch(header, entries[0].ID, agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("corrective prompt")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("kept answer")}},
+	})
+	if err != nil {
+		t.Fatalf("AppendBranch alt: %v", err)
+	}
+
+	child, msgs, err := openSubAgentSession("parent-session-1", header.ID, "task", "child-model", "faux", "sys")
+	if err != nil {
+		t.Fatalf("openSubAgentSession: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("continued child sees %d messages, want 3 (root + replacement branch)", len(msgs))
+	}
+	for _, m := range msgs {
+		switch msg := m.(type) {
+		case agentcore.UserMessage:
+			if strings.Contains(agentcore.ContentToText(msg.Content), "abandoned answer") {
+				t.Fatalf("continued child replayed an abandoned branch: %+v", msgs)
+			}
+		case agentcore.AssistantMessage:
+			if strings.Contains(agentcore.ContentToText(msg.Content), "abandoned answer") {
+				t.Fatalf("continued child replayed an abandoned branch: %+v", msgs)
+			}
+		}
+	}
+	if child.curLeaf != leaf {
+		t.Errorf("curLeaf = %q, want the active tip %q", child.curLeaf, leaf)
+	}
+}
