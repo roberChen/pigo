@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/agenttool"
@@ -146,4 +147,104 @@ func TestTaskNilEmitterNoPanic(t *testing.T) {
 	if got := agentcore.ContentToText(res.Content); got != "child final report" {
 		t.Errorf("task result = %q, want 'child final report'", got)
 	}
+}
+
+// TestSubAgentEmitsEndEvent verifies every child run reports a terminal
+// SubAgentEndEvent keyed by the same id its progress events used: the parent
+// tool-call id for a synchronous child, or the background job id for a
+// background child. Without it a status consumer cannot retire a background
+// row, because the launching call's tool execution end carries the tool-call id
+// and never the job id.
+func TestSubAgentEmitsEndEvent(t *testing.T) {
+	t.Run("sync", func(t *testing.T) {
+		child := &fauxProvider{
+			name:   "faux-child",
+			models: []provider.Model{{Provider: "faux-child", ID: "child"}},
+			turns:  []fauxTurn{textTurn("report")},
+		}
+		tool := NewTaskTool(func() RunConfig {
+			return RunConfig{
+				LoopConfig: LoopConfig{Model: "child", Stream: provider.StreamFnFromProvider(child)},
+				Batch:      agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: agenttool.NewToolRegistry()}},
+			}
+		}, nil, nil)
+
+		var mu sync.Mutex
+		var ends []agentcore.SubAgentEndEvent
+		emit := func(ctx context.Context, ev agentcore.AgentEvent) error {
+			if e, ok := ev.(agentcore.SubAgentEndEvent); ok {
+				mu.Lock()
+				ends = append(ends, e)
+				mu.Unlock()
+			}
+			return nil
+		}
+		ctx := agentcore.WithProgressEmitter(context.Background(), emit)
+
+		const parentID = "parent-call"
+		if _, err := tool.Execute(ctx, parentID, json.RawMessage(`{"prompt":"work"}`), nil); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(ends) != 1 {
+			t.Fatalf("got %d SubAgentEndEvents, want exactly one", len(ends))
+		}
+		if ends[0].ToolCallID != parentID {
+			t.Errorf("end ToolCallID = %q, want the parent tool-call id %q", ends[0].ToolCallID, parentID)
+		}
+	})
+
+	t.Run("background", func(t *testing.T) {
+		child := newGatedProvider("background report")
+		tool, jobs, ctx := backgroundTool(t, child)
+
+		var mu sync.Mutex
+		var ends, progress []string
+		emit := func(ctx context.Context, ev agentcore.AgentEvent) error {
+			mu.Lock()
+			defer mu.Unlock()
+			switch e := ev.(type) {
+			case agentcore.SubAgentProgressEvent:
+				progress = append(progress, e.ToolCallID)
+			case agentcore.SubAgentEndEvent:
+				ends = append(ends, e.ToolCallID)
+			}
+			return nil
+		}
+		ctx = agentcore.WithProgressEmitter(ctx, emit)
+
+		if _, err := tool.Execute(ctx, "call-bg", json.RawMessage(`{"prompt":"work","background":true}`), nil); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		select {
+		case <-child.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("background child never started")
+		}
+		close(child.release)
+		job := mustJob(t, jobs, "job-1")
+		select {
+		case <-job.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("child did not finish")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(ends) != 1 {
+			t.Fatalf("got %d SubAgentEndEvents, want exactly one", len(ends))
+		}
+		if ends[0] != "job-1" {
+			t.Errorf("end ToolCallID = %q, want the job id job-1", ends[0])
+		}
+		// The whole sub-agent stream must be keyed consistently by the job id, since
+		// that is what the panel row was created under.
+		for _, id := range progress {
+			if id != "job-1" {
+				t.Errorf("progress ToolCallID = %q, want job-1", id)
+			}
+		}
+	})
 }

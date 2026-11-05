@@ -26,6 +26,7 @@ const (
 	EventCompactionStart     = "compaction_start"
 	EventTelemetry           = "telemetry"
 	EventSubAgentProgress    = "subagent_progress"
+	EventSubAgentEnd         = "subagent_end"
 )
 
 // AgentStartEvent is emitted once when a loop run begins. SessionID, when set,
@@ -144,6 +145,20 @@ type SubAgentProgressEvent struct {
 	Tokens int
 }
 
+// SubAgentEndEvent signals that a sub-agent settled (completed, failed, timed
+// out or was cancelled). It is the terminal counterpart of
+// SubAgentProgressEvent and exists because a background child outlives the tool
+// call that launched it: its progress events are keyed by the background job id,
+// while that call's tool_execution_end carries the tool-call id. Without a
+// terminal event keyed by the same id as the progress stream, a status consumer
+// has no way to retire the row for a background child.
+type SubAgentEndEvent struct {
+	// ToolCallID is the id the finished sub-agent's progress events were keyed
+	// by: the parent task call's tool-call id for a synchronous child, or the
+	// background job id for a background child.
+	ToolCallID string
+}
+
 // ToolTiming records how long one tool invocation took, keyed by tool name in
 // TelemetryEvent.ToolDurationsMs. It aggregates repeated calls of the same tool
 // so a summary stays compact regardless of turn count.
@@ -200,6 +215,7 @@ func (CompactionEvent) isAgentEvent()          {}
 func (CompactionStartEvent) isAgentEvent()     {}
 func (TelemetryEvent) isAgentEvent()           {}
 func (SubAgentProgressEvent) isAgentEvent()    {}
+func (SubAgentEndEvent) isAgentEvent()         {}
 
 func (AgentStartEvent) EventType() string          { return EventAgentStart }
 func (AgentEndEvent) EventType() string            { return EventAgentEnd }
@@ -215,3 +231,4 @@ func (CompactionEvent) EventType() string          { return EventCompaction }
 func (CompactionStartEvent) EventType() string     { return EventCompactionStart }
 func (TelemetryEvent) EventType() string           { return EventTelemetry }
 func (SubAgentProgressEvent) EventType() string    { return EventSubAgentProgress }
+func (SubAgentEndEvent) EventType() string         { return EventSubAgentEnd }

@@ -517,3 +517,39 @@ func TestModelPromptHistoryDedupsAndStashesDraft(t *testing.T) {
 		t.Errorf("↓ should restore the stashed draft %q, got %q", "draft", got)
 	}
 }
+
+// TestModelSubagentBackgroundJobRetires pins the background sub-agent lifecycle:
+// the launching task call's toolEndMsg carries the tool-call id while all
+// progress for the background child carries the job id, so the row is keyed by
+// the job id and only the terminal subagentDoneMsg retires it. Before the
+// terminal event existed the row stayed on screen (its clock climbing, activity
+// frozen) until the whole run ended — which read as "the sub-agent is still
+// running until Ctrl-C".
+func TestModelSubagentBackgroundJobRetires(t *testing.T) {
+	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.running = true
+	m.spinner.begin(time.Now(), "")
+
+	m = apply(t, m, toolStartMsg{id: "call-bg", name: "task", input: map[string]any{"description": "bg work", "background": true}})
+	m = apply(t, m, toolEndMsg{id: "call-bg", ok: true, result: "Started background sub-agent"})
+
+	m = apply(t, m, subagentProgressMsg{id: "job-1", desc: "bg work", activity: "Thinking", tokens: 120})
+	if got := m.subagents.active(); got != 1 {
+		t.Fatalf("active while the background child runs = %d, want 1", got)
+	}
+
+	m = apply(t, m, subagentDoneMsg{id: "job-1"})
+	if got := m.subagents.active(); got != 0 {
+		t.Fatalf("active after the background child settled = %d, want 0", got)
+	}
+	if view := m.View().Content; strings.Contains(view, "⏺") {
+		t.Errorf("view still shows the settled sub-agent row: %q", view)
+	}
+
+	// A progress event still in flight after the terminal event must not bring the
+	// row back.
+	m = apply(t, m, subagentProgressMsg{id: "job-1", desc: "bg work", activity: "Reading", tokens: 130})
+	if got := m.subagents.active(); got != 0 {
+		t.Errorf("late progress resurrected the retired row: active = %d, want 0", got)
+	}
+}

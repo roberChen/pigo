@@ -49,8 +49,13 @@ type subagentRow struct {
 // zero value is a valid empty, unselected panel — selecting defaults false so the
 // selected int's zero value never spuriously marks row 0.
 type subagentPanel struct {
-	order     []string
-	byID      map[string]*subagentRow
+	order []string
+	byID  map[string]*subagentRow
+	// retired records ids whose row has settled. A progress event for a retired
+	// id is ignored: a background child's terminal event can race a late progress
+	// emit, and update() creates rows for unknown ids, so without this tombstone a
+	// finished sub-agent would reappear as a doomed-to-live row.
+	retired   map[string]struct{}
 	selecting bool
 	selected  int
 	expanded  bool
@@ -63,6 +68,9 @@ func (p *subagentPanel) add(id, desc string, now time.Time) {
 	if p.byID == nil {
 		p.byID = make(map[string]*subagentRow)
 	}
+	// An explicit start is authoritative: it revives an id retired earlier (e.g. a
+	// retried task call reusing the same tool-call id).
+	delete(p.retired, id)
 	if row, ok := p.byID[id]; ok {
 		row.desc = desc
 		row.start = now
@@ -77,6 +85,11 @@ func (p *subagentPanel) add(id, desc string, now time.Time) {
 // before or without a start) adds the row so no update is lost; now seeds its
 // start clock in that case.
 func (p *subagentPanel) update(id, desc, activity string, tokens int, now time.Time) {
+	// A settled id never comes back: the row was retired (tool end or terminal
+	// event) and any progress still in flight is stale.
+	if _, gone := p.retired[id]; gone {
+		return
+	}
 	if p.byID == nil {
 		p.byID = make(map[string]*subagentRow)
 	}
@@ -107,13 +120,15 @@ func (p *subagentPanel) appendOutput(id, delta string) {
 	}
 }
 
-// remove drops the row for id (the task's toolEndMsg). It is a no-op when id is
-// absent, so an end without a matching start — or a duplicate end — is safe.
-// The selection is clamped to the shrunken order so the cursor never dangles past
-// the end; removing the last row clears the selection entirely.
-func (p *subagentPanel) remove(id string) {
+// remove drops the row for id (the task's toolEndMsg) and tombstones it, so a
+// later progress event cannot resurrect the row. It reports whether a row was
+// actually dropped. The selection is clamped to the shrunken order so the cursor
+// never dangles past the end; removing the last row clears the selection
+// entirely.
+func (p *subagentPanel) remove(id string) bool {
+	p.markRetired(id)
 	if _, ok := p.byID[id]; !ok {
-		return
+		return false
 	}
 	delete(p.byID, id)
 	for i, v := range p.order {
@@ -124,11 +139,29 @@ func (p *subagentPanel) remove(id string) {
 	}
 	if len(p.order) == 0 {
 		p.clearSelection()
-		return
+		return true
 	}
 	if p.selected >= len(p.order) {
 		p.selected = len(p.order) - 1
 	}
+	return true
+}
+
+// retire settles id unconditionally: it drops the row (if any) and tombstones
+// the id even when no row exists, so a child whose first observed event is its
+// completion never grows a phantom row later. It reports whether a row was
+// dropped, letting the caller skip a relayout for a no-op.
+func (p *subagentPanel) retire(id string) bool {
+	return p.remove(id)
+}
+
+// markRetired records that id has settled. The map is created lazily: the zero
+// panel is valid and the common case never retires an id.
+func (p *subagentPanel) markRetired(id string) {
+	if p.retired == nil {
+		p.retired = make(map[string]struct{})
+	}
+	p.retired[id] = struct{}{}
 }
 
 // active reports the number of live sub-agents (status rows the panel would

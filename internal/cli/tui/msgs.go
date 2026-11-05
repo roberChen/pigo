@@ -68,6 +68,14 @@ type subagentProgressMsg struct {
 	tokens   int
 }
 
+// subagentDoneMsg retires a sub-agent's status-panel row (translated from
+// agentcore.SubAgentEndEvent). id is the key the settled child's progress events
+// used: the parent task call's id for a synchronous child, or the background job
+// id for a background child. A background row is keyed by the job id and the
+// launching call's toolEndMsg carries the tool-call id, so this event is the only
+// signal that retires it.
+type subagentDoneMsg struct{ id string }
+
 // telemetryMsg carries the run's end-of-run telemetry summary.
 type telemetryMsg struct{ ev agentcore.TelemetryEvent }
 
@@ -85,6 +93,12 @@ type compactionMsg struct{ tokensAfter int }
 // runEndMsg is the final message: the run has fully drained. err is non-nil when
 // the run ended in error (or was interrupted).
 type runEndMsg struct{ err error }
+
+// noticeMsg is a one-off operator-facing note the session emits before a run
+// starts (e.g. the prompt attached an image the selected model cannot accept).
+// It lands in the transcript as a system line so the turn that follows is not
+// mistaken for having seen the picture.
+type noticeMsg struct{ text string }
 
 // remoteInputMsg carries a prompt submitted from the paired remote browser
 // (remote-control, #443). The listener Cmd (Model.waitRemoteInput) blocks on the

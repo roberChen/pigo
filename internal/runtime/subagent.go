@@ -351,6 +351,17 @@ func (t *SubAgentTool) startBackground(ctx context.Context, prompt, description,
 // events (the parent tool call id, or the job id for a background child) and
 // onActivity, when set, records the child's current activity on the job.
 func (t *SubAgentTool) runChild(ctx context.Context, emitID, prompt, description, continueID string, onUpdate agentcore.ToolUpdateFunc, onActivity func(string)) (string, string, error) {
+	// Capture the caller's ctx and the run-level progress emitter BEFORE the
+	// per-agent timeout narrows ctx: the terminal SubAgentEndEvent must reach the
+	// parent stream even when the child was cut short by its own timeout (a
+	// timeout-cancelled ctx would drop the emit and strand the status row).
+	emitCtx := ctx
+	parentEmit := agentcore.ProgressEmitterFromContext(ctx)
+	if parentEmit != nil {
+		defer func() {
+			_ = parentEmit(emitCtx, agentcore.SubAgentEndEvent{ToolCallID: emitID})
+		}()
+	}
 	// Concurrency guard: when a shared semaphore is configured, acquire a slot
 	// before spawning the child and release it via defer so a panic or error
 	// still frees the slot. A full channel blocks (queues) the acquire; a
@@ -421,7 +432,7 @@ func (t *SubAgentTool) runChild(ctx context.Context, emitID, prompt, description
 	// activity granularity (per child tool start / turn boundary), NOT per text
 	// delta, so event volume stays proportional to the child's tool calls. When
 	// no emitter is present the OnEvent hook is left nil and progress is skipped.
-	if parentEmit := agentcore.ProgressEmitterFromContext(ctx); parentEmit != nil {
+	if parentEmit != nil {
 		// chars accumulates the child's streamed text length so a coarse output
 		// token estimate can ride along on each progress event (0 = unknown).
 		chars := 0
@@ -441,7 +452,7 @@ func (t *SubAgentTool) runChild(ctx context.Context, emitID, prompt, description
 			if onActivity != nil {
 				onActivity(act)
 			}
-			_ = parentEmit(ctx, agentcore.SubAgentProgressEvent{
+			_ = parentEmit(emitCtx, agentcore.SubAgentProgressEvent{
 				ToolCallID:  emitID,
 				Description: description,
 				Activity:    act,

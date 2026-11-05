@@ -110,6 +110,16 @@ func RunHeadless(ctx context.Context, agentCtx *agentcore.AgentContext, cfg Head
 			}
 			return
 		}
+		// SubAgentEndEvent is the terminal counterpart of the progress line above.
+		// It carries no user-visible content (the child's report is already on the
+		// tool result), so it is forwarded to an external observer but kept out of
+		// the stream-json envelope exactly like progress.
+		if se, ok := ev.(agentcore.SubAgentEndEvent); ok {
+			if cfg.OnEvent != nil {
+				cfg.OnEvent(se)
+			}
+			return
+		}
 		if streamJSON && writeErr == nil {
 			if err := writeEventJSON(cfg.Out, ev); err != nil {
 				writeErr = err

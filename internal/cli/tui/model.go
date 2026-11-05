@@ -581,9 +581,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subagentProgressMsg:
 		// A running sub-agent reported structured progress: refresh its panel row's
 		// activity/tokens. update adds the row if it is missing so a late/out-of-order
-		// progress (arriving before the task's start) is still shown (SPEC 5.4).
+		// progress (arriving before the task's start) is still shown (SPEC 5.4), and
+		// ignores ids that already settled.
 		m.subagents.update(msg.id, msg.desc, msg.activity, msg.tokens, time.Now())
 		m.relayout() // a first-seen id adds a row; keep the transcript sized to it
+		return m, m.pumpNext()
+
+	case subagentDoneMsg:
+		// The sub-agent settled: retire its panel row. This is the only retire signal
+		// a background child gets — it outlives the tool call that launched it, so its
+		// progress events are keyed by the job id while that call's toolEndMsg carries
+		// the tool-call id. retire tombstones the id, so a late progress event cannot
+		// resurrect the row.
+		if m.subagents.retire(msg.id) {
+			m.relayout()
+		}
 		return m, m.pumpNext()
 
 	case toolEndMsg:
@@ -607,9 +619,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript.reflow()
 		}
 		// Retire the sub-agent's status-panel row (a no-op for non-task tools whose id
-		// was never added), reclaiming its reserved height.
-		if _, wasSub := m.subagents.byID[msg.id]; wasSub {
-			m.subagents.remove(msg.id)
+		// was never added), reclaiming its reserved height. remove tombstones the id,
+		// so progress still in flight cannot resurrect the row.
+		if m.subagents.remove(msg.id) {
 			m.relayout()
 		}
 		return m, m.pumpNext()
@@ -722,6 +734,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.seedContextMeter()
 			m.transcript.addSystem(msg.summary)
 		}
+		m.relayout()
+		return m, nil
+
+	case noticeMsg:
+		// A session-level note queued ahead of a run's first event (e.g. the prompt
+		// carried an image the selected model cannot accept). It is informational,
+		// so it must not disturb the running spinner.
+		m.transcript.addSystem("note: " + msg.text)
 		m.relayout()
 		return m, nil
 

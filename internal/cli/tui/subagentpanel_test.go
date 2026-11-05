@@ -290,3 +290,38 @@ func TestSubagentPanelAppendOutputUnknown(t *testing.T) {
 		t.Errorf("active after appendOutput to unknown id = %d, want 0", p.active())
 	}
 }
+
+// TestSubagentPanelRetireTombstones pins the no-resurrection invariant: once an
+// id is retired it never comes back, even when a progress event for it is still
+// in flight (a background child's terminal event can race a late emit), and even
+// when the id never had a row. An explicit add is authoritative and revives it
+// (a retried task call reuses the tool-call id).
+func TestSubagentPanelRetireTombstones(t *testing.T) {
+	now := time.Now()
+	var p subagentPanel
+	p.add("a", "task A", now)
+	p.retire("a")
+	if got := p.active(); got != 0 {
+		t.Fatalf("active after retire = %d, want 0", got)
+	}
+	p.update("a", "task A", "Editing", 10, now)
+	if got := p.active(); got != 0 {
+		t.Errorf("late progress resurrected a retired row: active = %d, want 0", got)
+	}
+
+	// Retiring an id that never had a row must still tombstone it, so a child
+	// whose first observed event is its completion cannot grow a phantom row.
+	if p.retire("ghost") {
+		t.Error("retire(ghost) reported a dropped row, want false")
+	}
+	p.update("ghost", "task", "Thinking", 0, now)
+	if got := p.active(); got != 0 {
+		t.Errorf("retired ghost was added by progress: active = %d, want 0", got)
+	}
+
+	// An explicit start wins: it clears the tombstone.
+	p.add("a", "task A", now)
+	if got := p.active(); got != 1 {
+		t.Errorf("active after re-add = %d, want 1", got)
+	}
+}
