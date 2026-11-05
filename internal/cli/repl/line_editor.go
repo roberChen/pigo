@@ -309,6 +309,18 @@ func (e *replLineEditor) remember(line string) {
 	}
 }
 
+// seedHistory replaces the ↑/↓ recall list with lines, oldest first, so entering
+// a resumed conversation (/resume, or a session resumed at startup) offers that
+// conversation's prompts rather than an empty list — or, briefly, the previous
+// conversation's. A large session is capped like a live one: the newest 200
+// entries are what a shell-style recall list keeps.
+func (e *replLineEditor) seedHistory(lines []string) {
+	e.history = nil
+	for _, line := range lines {
+		e.remember(line)
+	}
+}
+
 // formatSlashAutocompleteLabel renders a slash command for the Tab-completion
 // hint as "name <argument-hint> - description" (mirrors pi's autocomplete). The
 // argument-hint is shown verbatim (frontmatter supplies its own <angle>/

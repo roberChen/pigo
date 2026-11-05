@@ -285,6 +285,10 @@ func Run(opts Options) error {
 		// InitialInput is pre-filled, not submitted: --image lands in the prompt
 		// so the user asks the question around it.
 		initialInput: opts.InitialInput,
+		// Resume the ↑/↓ recall list from the full branch, not from the surviving
+		// context: a compaction summary keeps the conversation going but must not
+		// erase prompts the human can still see in the replay.
+		priorInputs: cli.UserInputs(history),
 		rebuildSlash: func(skills []*runtime.Skill, plugins *plugin.Manager, mcpMgr *mcp.Manager) *runtime.SlashRegistry {
 			reg, err := prompts.BuildSlashRegistry(live, creds, skills, plugins, prompts.PromptTemplateSources{
 				Settings:       opts.ConfigPrompts,

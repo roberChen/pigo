@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -595,5 +596,41 @@ func TestEditLoopMultiLineSubmitJoinsWithNewline(t *testing.T) {
 	}
 	if got != "a\nb\nc" {
 		t.Fatalf("submitted %q, want %q", got, "a\nb\nc")
+	}
+}
+
+// TestSeedHistoryReplacesRecallList verifies resuming a conversation swaps the
+// whole ↑/↓ list rather than appending to it, and that a recalled entry still
+// submits intact.
+func TestSeedHistoryReplacesRecallList(t *testing.T) {
+	e := editorWithInput("\x1b[A\r", "stale prompt")
+	e.seedHistory([]string{"older prompt", "newest prompt"})
+	if got, want := e.history, []string{"older prompt", "newest prompt"}; len(got) != len(want) ||
+		got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	got, err := e.editLoop("")
+	if err != nil {
+		t.Fatalf("editLoop error: %v", err)
+	}
+	if got != "newest prompt" {
+		t.Fatalf("↑ recalled+submitted %q, want %q", got, "newest prompt")
+	}
+}
+
+// TestSeedHistoryCapsToNewest verifies seeding a very long session keeps the
+// newest entries, the same bound a live recall list applies.
+func TestSeedHistoryCapsToNewest(t *testing.T) {
+	e := testLineEditor()
+	lines := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		lines = append(lines, fmt.Sprintf("prompt-%03d", i))
+	}
+	e.seedHistory(lines)
+	if len(e.history) != 200 {
+		t.Fatalf("history length = %d, want 200", len(e.history))
+	}
+	if e.history[0] != "prompt-050" || e.history[199] != "prompt-249" {
+		t.Fatalf("history window = [%q … %q], want the newest 200", e.history[0], e.history[199])
 	}
 }

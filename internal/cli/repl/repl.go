@@ -75,6 +75,12 @@ type replDeps struct {
 	// initialInput pre-fills the first prompt line (--image references) instead
 	// of submitting it, so the user still writes the question. Consumed once.
 	initialInput string
+	// priorInputs seeds the line editor's ↑/↓ recall list with the conversation's
+	// human-typed prompts, oldest first. Run passes the full resumed branch
+	// (compaction checkpoints included) so the list matches the replayed
+	// transcript; nil means "derive from agentCtx.Messages", which is what direct
+	// callers and freshly started sessions get.
+	priorInputs []string
 	// skills is the pre-loaded skill set the slash registry was built from; a
 	// reload refreshes it together with the registry. /status and /skill read it.
 	skills []*runtime.Skill
@@ -278,11 +284,12 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 		run.DispatchSessionStart(context.Background(), d, &ssCfg, deps.hookDeps, "startup")
 		deps.reminders = ssCfg.Reminders
 	}
-	var priorInputs []string
-	for _, msg := range deps.agentCtx.Messages {
-		if user, ok := msg.(agentcore.UserMessage); ok {
-			priorInputs = append(priorInputs, agentcore.ContentToText(user.Content))
-		}
+	priorInputs := deps.priorInputs
+	if priorInputs == nil {
+		// Direct callers (tests, embedding) do not seed the field: fall back to
+		// the context they built. It is the same list for a session that has not
+		// been compacted.
+		priorInputs = cli.UserInputs(deps.agentCtx.Messages)
 	}
 	editor := newREPLLineEditor(in, deps.in, out, deps.slash, priorInputs)
 	// --image pre-fills the first prompt instead of submitting it: the user still
@@ -452,14 +459,14 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			// /import loads a JSONL export as a fresh session and switches to it,
 			// swapping deps.header / deps.agentCtx in place — which a slash Action
 			// closure cannot do. The guard keeps "/important" from matching.
-			runImport(out, &deps, line)
+			runImport(out, &deps, editor, line)
 			continue
 		}
 		if line == "/resume" || strings.HasPrefix(line, "/resume ") {
 			// /resume lists the stored sessions and loads a chosen one, swapping
 			// deps.header / deps.agentCtx in place — state a slash Action closure
 			// cannot reach. The guard keeps "/resumed" style names from matching.
-			runResume(out, &deps, line)
+			runResume(out, &deps, editor, line)
 			continue
 		}
 		if line == "/copy" {
@@ -991,7 +998,7 @@ func runExport(out io.Writer, deps *replDeps, line string) {
 // REPL to it (swapping header + shared context in place) so the next prompt
 // continues the imported conversation. The original file is untouched; the new
 // session records the source id as its ParentSession.
-func runImport(out io.Writer, deps *replDeps, line string) {
+func runImport(out io.Writer, deps *replDeps, editor *replLineEditor, line string) {
 	path := pathCommandArg(line, "/import")
 	if path == "" {
 		fmt.Fprintln(out, "usage: /import <path.jsonl>")
@@ -1007,8 +1014,9 @@ func runImport(out io.Writer, deps *replDeps, line string) {
 	// continue from its last compaction checkpoint. The entries are already
 	// persisted verbatim, so the cursor is marked at the tip.
 	branch := session.PathToLeaf(entries, session.TipLeaf(entries))
+	imported := session.Messages(branch)
 	deps.header = newHeader
-	deps.agentCtx.Messages = session.MessagesSinceLastCompaction(session.Messages(branch))
+	deps.agentCtx.Messages = session.MessagesSinceLastCompaction(imported)
 	deps.persisted = len(deps.agentCtx.Messages)
 	deps.curLeaf = session.TipLeaf(branch)
 	// A side thread branched from the previous conversation no longer applies to
@@ -1020,6 +1028,9 @@ func runImport(out io.Writer, deps *replDeps, line string) {
 	if deps.telemetry != nil {
 		deps.telemetry.Reset()
 	}
+	// The imported conversation becomes the live one, so its human prompts replace
+	// the previous session's in the ↑/↓ recall list.
+	editor.seedHistory(cli.UserInputs(imported))
 	fmt.Fprintf(out, "imported %d entries from %s → session %s\n", len(branch), path, newHeader.ID)
 }
 
@@ -1032,9 +1043,9 @@ const resumeListLimit = 20
 // one; "/resume <n>" loads the n-th of those and "/resume <id>" accepts a
 // session id (or unique prefix, e.g. one printed by `pigo --list-sessions`).
 // Loading swaps the live session in place — header, shared context, branch
-// cursor and telemetry — and replays its transcript, exactly as resuming the
-// same session at startup would.
-func runResume(out io.Writer, deps *replDeps, line string) {
+// cursor and telemetry — replays its transcript, and re-seeds the line editor's
+// recall list, exactly as resuming the same session at startup would.
+func runResume(out io.Writer, deps *replDeps, editor *replLineEditor, line string) {
 	arg := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
 	sums, err := deps.store.Summaries(resumeListLimit)
 	if err != nil {
@@ -1092,6 +1103,10 @@ func runResume(out io.Writer, deps *replDeps, line string) {
 	if len(history) > len(deps.agentCtx.Messages) {
 		trimmed = fmt.Sprintf("; %d earlier messages shown but summarized in context", len(history)-len(deps.agentCtx.Messages))
 	}
+	// The ↑/↓ list belongs to the conversation being entered: replace the previous
+	// session's prompts with this branch's, full history included (the replay
+	// below shows turns a compaction summarized away, and recall follows it).
+	editor.seedHistory(cli.UserInputs(history))
 	fmt.Fprintf(out, "resumed session %s (%d messages%s)\n", header.ID, len(deps.agentCtx.Messages), trimmed)
 	if header.Cwd != "" && deps.cwd != "" && header.Cwd != deps.cwd {
 		// The session was recorded in another project: say so, since tools keep

@@ -4,7 +4,9 @@ package repl
 // one into the live REPL session.
 
 import (
+	"bufio"
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -102,5 +104,27 @@ func TestREPLResumeAcceptsSessionID(t *testing.T) {
 	}
 	if !strings.Contains(got, "resumed session "+id) || !strings.Contains(got, "> by id question") {
 		t.Errorf("/resume <id> did not load and replay the session:\n%s", got)
+	}
+}
+
+// TestREPLResumeSeedsInputHistory verifies /resume rebuilds the line editor's
+// ↑/↓ recall list from the conversation it loads: the resumed session's prompts
+// replace whatever the previous conversation had left in the list, so recall
+// matches the transcript the user is looking at.
+func TestREPLResumeSeedsInputHistory(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, store := newTestDeps(t, p)
+
+	id := "20260710-120000-000009"
+	saveResumeSession(t, store, id, time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC), "earlier question", "answer")
+
+	r := strings.NewReader("")
+	editor := newREPLLineEditor(r, bufio.NewReader(r), io.Discard, deps.slash, []string{"stale prompt"})
+
+	var out bytes.Buffer
+	runResume(&out, &deps, editor, "/resume "+id)
+
+	if len(editor.history) != 1 || editor.history[0] != "earlier question" {
+		t.Fatalf("recall list = %q, want [earlier question] (the stale entry replaced)", editor.history)
 	}
 }

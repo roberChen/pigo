@@ -268,3 +268,49 @@ func TestResumeRendersToolCards(t *testing.T) {
 		t.Fatalf("lastToolCard = %+v, want the replayed read card", m.lastToolCard)
 	}
 }
+
+// TestResumeSeedsPromptHistory verifies resuming a session at startup puts its
+// earlier prompts back under ↑: the recall list covers the conversation the
+// transcript replays, not just the turns typed in this process.
+func TestResumeSeedsPromptHistory(t *testing.T) {
+	store := newTestStore(t)
+	id := "20260710-150000-000006"
+	saveResumeSession(t, store, id, time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC), "earlier question", "earlier answer")
+
+	m := resumeTestModel(t, store, id)
+	if len(m.history) != 1 || m.history[0] != "earlier question" {
+		t.Fatalf("history = %q, want [earlier question]", m.history)
+	}
+	if m.histIdx != len(m.history) {
+		t.Errorf("histIdx = %d, want %d (parked past the newest entry)", m.histIdx, len(m.history))
+	}
+
+	// ↑ recalls it into the composer, so the restore is usable, not just stored.
+	m = apply(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := m.input.Value(); got != "earlier question" {
+		t.Errorf("↑ recalled %q, want %q", got, "earlier question")
+	}
+}
+
+// TestResumeSwitchReplacesPromptHistory verifies /resume swaps the recall list
+// with the entered conversation's prompts instead of appending the two, so a
+// recalled entry never belongs to a session the user has left.
+func TestResumeSwitchReplacesPromptHistory(t *testing.T) {
+	store := newTestStore(t)
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	currentID := "20260710-160000-000007"
+	targetID := "20260710-170000-000008"
+	saveResumeSession(t, store, currentID, base, "current question", "current answer")
+	saveResumeSession(t, store, targetID, base.Add(time.Hour), "target question", "target answer")
+
+	m := resumeTestModel(t, store, currentID)
+	if len(m.history) != 1 || m.history[0] != "current question" {
+		t.Fatalf("history before /resume = %q, want [current question]", m.history)
+	}
+
+	next, _ := m.runSlash("/resume " + targetID)
+	m = next.(Model)
+	if len(m.history) != 1 || m.history[0] != "target question" {
+		t.Fatalf("history after /resume = %q, want [target question]", m.history)
+	}
+}

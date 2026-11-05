@@ -255,6 +255,9 @@ func (m Model) resumeSession(id string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m = m.swapToSession(s, history, saveErr)
+	// The recall list belongs to the conversation being entered, so /resume gets
+	// the same ↑/↓ history as resuming at startup.
+	m = m.seedInputHistory(history)
 	note := fmt.Sprintf("resumed session %s (%d messages)", s.header.ID, len(history))
 	if s.header.Cwd != "" && m.cwd != "" && s.header.Cwd != m.cwd {
 		// The session was recorded in another project: say so, since the tools

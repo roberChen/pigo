@@ -291,6 +291,9 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	// Seed the context readout from the resumed (or empty) conversation so the
 	// status bar shows its usage before the first turn.
 	m.seedContextMeter()
+	// Put the resumed conversation's prompts back under ↑/↓: resuming at startup
+	// replays the transcript, and recall must cover the same turns.
+	m = m.seedInputHistory(history)
 	return m
 }
 
@@ -1542,6 +1545,19 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.startPrompt(outcome.Prompt)
+}
+
+// seedInputHistory replaces the ↑/↓ recall list with the conversation's
+// human-typed prompts, oldest first, and parks the browse cursor past the newest
+// entry (the "live draft" position). Entering a resumed conversation restores the
+// list the way a fresh process would: the prompts of the conversation being
+// entered, including turns a compaction summarized out of the model's context,
+// because the user can still see them in the replayed transcript.
+func (m Model) seedInputHistory(history []agentcore.Message) Model {
+	m.history = cli.UserInputs(history)
+	m.histIdx = len(m.history)
+	m.histDraft = ""
+	return m
 }
 
 // recordHistory appends an submitted input to the browse history (skipping a
