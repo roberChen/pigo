@@ -394,6 +394,12 @@ var customProviderKeys = map[string]string{}
 // which would silently redirect traffic meant for that service.
 var customProviders = map[string]bool{}
 
+// modelImageSupport records per-model image declarations made by a user. It is
+// keyed by provider name and then model id, and it overrides the provider's
+// coarse SupportsImages flag: one gateway can serve both a vision model and a
+// text-only one. Absent entries fall back to the provider's setting.
+var modelImageSupport = map[string]map[string]bool{}
+
 // LookupProviderSpec returns the ProviderSpec for a provider name and whether it
 // is a known provider (built-in or registered custom). The returned spec is a
 // copy; mutating its slice or map fields is discouraged as they are shared with
@@ -423,6 +429,12 @@ func IsCustomProvider(name string) bool {
 // whole request, so the default is "no". Built-in providers are unaffected by
 // that rule — their capability comes from the built-in preset table and stays as
 // it always was, so a config entry can neither downgrade nor widen them.
+//
+// A per-model declaration wins over the provider's coarse setting: [[models]]
+// (or `model add ... --supports-images`) lets one gateway serve a vision model
+// and a text-only one at the same time. It is consulted for every provider,
+// built-in included, so a user can pin a built-in provider's newly added
+// vision model without waiting for the preset table.
 func ModelSupportsImages(providerName, model string) bool {
 	spec, ok := LookupProviderSpec(providerName)
 	if !ok {
@@ -430,10 +442,144 @@ func ModelSupportsImages(providerName, model string) bool {
 		// permissive built-in default: unknown capability defers to the wire.
 		return true
 	}
+	if declared, ok := declaredModelImageSupport(spec.Name, model); ok {
+		return declared
+	}
 	if !IsCustomProvider(spec.Name) {
 		return true
 	}
 	return spec.SupportsImages
+}
+
+// declaredModelImageSupport returns the image capability a user declared for one
+// model, and whether one was declared at all.
+func declaredModelImageSupport(providerName, model string) (bool, bool) {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	model = strings.TrimSpace(model)
+	if providerName == "" || model == "" {
+		return false, false
+	}
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	decls := modelImageSupport[providerName]
+	if len(decls) == 0 {
+		return false, false
+	}
+	if v, ok := decls[model]; ok {
+		return v, true
+	}
+	// A routed id ("mycorp/mycorp-vl") names the same model as its bare tail, so
+	// accept either spelling. The bare id is what the picker and the wire use.
+	if i := strings.LastIndexByte(model, '/'); i >= 0 {
+		if v, ok := decls[model[i+1:]]; ok {
+			return v, true
+		}
+	}
+	return false, false
+}
+
+// DeclaredModel is one model the user declared: its id, display label, and the
+// image capability it declared (nil when it only named the model).
+type DeclaredModel struct {
+	ID          string
+	DisplayName string
+	// SupportsImages is nil when the declaration only lists the model and leaves
+	// the capability to the provider's default.
+	SupportsImages *bool
+}
+
+// declaredPresetIDs records which preset catalog entries were added by a model
+// declaration (rather than by a provider's `models` list), so a reload can drop
+// the stale ones without disturbing entries the provider owns.
+var declaredPresetIDs = map[string][]string{}
+
+// RegisterDeclaredModels records the model declarations for one provider: the
+// per-model image capabilities, and the models themselves so they are selectable
+// even when the provider's `models` list does not name them. An empty slice
+// clears the provider's declarations.
+//
+// It runs after RegisterCustomProvider, and a repeated call replaces the previous
+// set for that provider, so a reloaded config takes effect without a restart.
+func RegisterDeclaredModels(providerName string, models []DeclaredModel) {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	if providerName == "" {
+		return
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	// Drop the catalog entries the previous declaration added for this provider.
+	if ids := declaredPresetIDs[providerName]; len(ids) > 0 {
+		kept := PresetCatalog[:0]
+		for _, m := range PresetCatalog {
+			if m.Provider == providerName && containsModelID(ids, m.ID) {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		PresetCatalog = kept
+		delete(declaredPresetIDs, providerName)
+	}
+
+	if len(models) == 0 {
+		delete(modelImageSupport, providerName)
+		return
+	}
+
+	decls := make(map[string]bool, len(models))
+	var added []string
+	for _, m := range models {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			continue
+		}
+		if m.SupportsImages != nil {
+			decls[id] = *m.SupportsImages
+		}
+		// Make the model selectable: update the label of an entry the provider's
+		// own list already created, or add one.
+		if i, ok := presetIndexLocked(providerName, id); ok {
+			if m.DisplayName != "" {
+				PresetCatalog[i].DisplayName = m.DisplayName
+			}
+			continue
+		}
+		label := m.DisplayName
+		if label == "" {
+			label = id
+		}
+		PresetCatalog = append(PresetCatalog, PresetModel{Provider: providerName, ID: id, DisplayName: label})
+		added = append(added, id)
+	}
+	if len(added) > 0 {
+		declaredPresetIDs[providerName] = added
+	}
+	if len(decls) == 0 {
+		delete(modelImageSupport, providerName)
+		return
+	}
+	modelImageSupport[providerName] = decls
+}
+
+// presetIndexLocked returns the catalog index of a (provider, id) pair. Callers
+// hold registryMu.
+func presetIndexLocked(providerName, id string) (int, bool) {
+	for i, m := range PresetCatalog {
+		if m.Provider == providerName && m.ID == id {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// containsModelID reports whether ids holds id.
+func containsModelID(ids []string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // RegisterCustomProvider adds a user-defined provider to the registry so it
@@ -533,6 +679,7 @@ func UnregisterCustomProvider(name string) bool {
 func unregisterCustomProviderLocked(name string) {
 	delete(customProviders, name)
 	delete(customProviderKeys, name)
+	delete(modelImageSupport, name)
 	delete(providerRegistryByName, name)
 	kept := providerRegistry[:0]
 	for _, spec := range providerRegistry {

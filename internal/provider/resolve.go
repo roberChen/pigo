@@ -222,11 +222,14 @@ func ResolveNamedProvider(name, model, baseURL, protocol string, env func(string
 	url := ResolveBaseURL(spec, baseURL, env)
 	// A custom provider's image capability is whatever the user declared (default
 	// off, see ProviderSpec.SupportsImages); a built-in provider keeps its
-	// historical permissive default. That flag reaches checkImageSupport, so an
-	// undeclared text-only gateway fails with a clear message instead of a wire
-	// error.
+	// historical permissive default. A per-model declaration wins over both, so
+	// one gateway can serve a vision model and a text-only one side by side.
+	// The same answer reaches checkImageSupport, so an undeclared text-only
+	// gateway fails with a clear message instead of a wire error.
 	supportsImages := true
-	if IsCustomProvider(spec.Name) {
+	if declared, ok := declaredModelImageSupport(spec.Name, model); ok {
+		supportsImages = declared
+	} else if IsCustomProvider(spec.Name) {
 		supportsImages = spec.SupportsImages
 	}
 	models := []Model{{Provider: spec.Name, ID: model, SupportsImages: supportsImages}}

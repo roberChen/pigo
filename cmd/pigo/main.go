@@ -398,7 +398,7 @@ func applyFileConfig(opts *cliOptions, cfg config.FileConfig, changed func(strin
 // It is also the reload path, so a definition that disappeared from the config
 // stops resolving, and a definition that changed replaces the previous one. The
 // messages it returns are shown to the user; a rejected definition never aborts.
-func registerConfiguredProviders(defs []config.ProviderConfig) []string {
+func registerConfiguredProviders(defs []config.ProviderConfig, declared []config.ModelConfig) []string {
 	var messages []string
 	names := make([]string, 0, len(defs))
 	for _, def := range defs {
@@ -442,9 +442,87 @@ func registerConfiguredProviders(defs []config.ProviderConfig) []string {
 		}
 		if err := provider.RegisterCustomProvider(spec, models, key); err != nil {
 			messages = append(messages, fmt.Sprintf("provider %q: %v", def.Name, err))
+			continue
 		}
 	}
+	// Declared models ride on their provider, and are applied after every
+	// provider exists so a [[models]] entry may name a built-in gateway too.
+	messages = append(messages, applyDeclaredModels(declared)...)
 	return messages
+}
+
+// applyDeclaredModels records the [[models]] / `model add` declarations in the
+// provider registry and makes each declared model selectable. A declaration is
+// independent of the provider table: one gateway can serve a vision model and a
+// text-only one, and a model may be declared for a provider pigo already knows
+// (built-in or configured purely through environment variables).
+//
+// It is also the reload path: a provider that lost its declarations has them
+// cleared, so a deleted entry stops affecting the model picker and the image
+// gate without a restart.
+func applyDeclaredModels(declared []config.ModelConfig) []string {
+	var messages []string
+	byProvider := map[string][]config.ModelConfig{}
+	order := make([]string, 0, len(declared))
+	for _, mc := range declared {
+		name := strings.ToLower(strings.TrimSpace(mc.Provider))
+		id := strings.TrimSpace(mc.ID)
+		if id == "" {
+			continue
+		}
+		if name == "" {
+			messages = append(messages, fmt.Sprintf("model %q: a provider is required ([[models]] provider = \"...\")", id))
+			continue
+		}
+		if _, ok := provider.LookupProviderSpec(name); !ok {
+			messages = append(messages, fmt.Sprintf("model %q: unknown provider %q (define it with [[providers]] first)", id, name))
+			continue
+		}
+		if _, seen := byProvider[name]; !seen {
+			order = append(order, name)
+		}
+		byProvider[name] = append(byProvider[name], mc)
+	}
+
+	for _, name := range order {
+		provider.RegisterDeclaredModels(name, declaredModels(byProvider[name]))
+	}
+	// Clear declarations for providers the previous load touched and this one no
+	// longer does.
+	for _, name := range configuredModelProviders {
+		if _, kept := byProvider[name]; kept {
+			continue
+		}
+		provider.RegisterDeclaredModels(name, nil)
+	}
+	configuredModelProviders = order
+	return messages
+}
+
+// declaredModels converts config model declarations into the registry form,
+// de-duplicating ids. The last declaration of an id wins, matching the
+// last-wins rule the config layers already use.
+func declaredModels(defs []config.ModelConfig) []provider.DeclaredModel {
+	out := make([]provider.DeclaredModel, 0, len(defs))
+	index := map[string]int{}
+	for _, def := range defs {
+		id := strings.TrimSpace(def.ID)
+		if id == "" {
+			continue
+		}
+		m := provider.DeclaredModel{
+			ID:             id,
+			DisplayName:    strings.TrimSpace(def.DisplayName),
+			SupportsImages: def.SupportsImages,
+		}
+		if i, ok := index[id]; ok {
+			out[i] = m
+			continue
+		}
+		index[id] = len(out)
+		out = append(out, m)
+	}
+	return out
 }
 
 // containsString reports whether ss holds s.

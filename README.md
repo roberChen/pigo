@@ -293,6 +293,31 @@ pigo --model mycorp -p "..."                           # 裸名字 → 第一个
 
 规则与内置一致：`<PROVIDER>_BASE_URL` 可覆盖 base_url；Key 解析顺序为 `--api-key` → 环境变量（含 `env_var`）→ 定义内的 `api_key`/`credential`；名字不能与内置 Provider 重名（要把内置指向别的端点请用 `ZAI_BASE_URL` 这类变量）。定义非法（缺 base_url、未知协议、重名）在启动时告警并被忽略，不影响其他配置。
 
+**自定义模型（含 vision 声明）**：模型与 Provider 是**分开声明**的——`[[providers]]` 描述端点（协议、URL、凭据），`[[models]]` 描述单个 model id 及其能力。这样一个网关可以同时提供 vision 模型和纯文本模型：
+
+```toml
+# ~/.config/pigo/config.toml
+[[models]]
+id              = "mycorp-vl"
+provider        = "mycorp"                # 必须已定义（[[providers]] 或内置）
+display_name    = "MyCorp Vision"         # 可选，默认用 id
+supports_images = true                    # 声明为 vision 模型
+
+[[models]]
+id              = "mycorp-text"
+provider        = "mycorp"
+supports_images = false                   # 在支持图像的大 Provider 里钉住一个纯文本模型
+```
+
+```bash
+# ~/.pigo/pigorc，等价写法
+model add mycorp-vl --provider mycorp --supports-images --display-name "MyCorp Vision"
+model add mycorp-text --provider mycorp --no-supports-images
+model remove mycorp-vl                     # 取消
+```
+
+`supports_images` 正是 `view_image` 工具（以及 `read` 读图片文件时）的拦截依据：为 `true` 时把图片交给模型；为 `false` 时不发送图片，而是把"图片存在但未展示"的说明文字返回给模型（避免整轮请求被网关拒绝）。省略该键则继承 Provider 的 `supports_images`：自定义端点默认 `false`，内置 Provider 默认 `true`。模型级声明优先于 Provider 级声明，因此也能为**内置 Provider** 声明新增的 vision 模型，无需等 pigo 更新预置目录。指向不存在的 Provider 的 `[[models]]` 会在启动时告警并跳过。
+
 **使用例子：**
 
 ```bash

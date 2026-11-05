@@ -59,10 +59,15 @@ PreToolUse() {
 }
 post_tool_use() { gofmt -w . >/dev/null 2>&1 || true; }   # 9 events, any spelling
 
-# 4) third-party provider
+# 4) third-party provider (an endpoint) and its models (declared separately)
 provider add mycorp --type openai --base-url "https://llm.mycorp.com/v1" \
   --env-var MYCORP_API_KEY --model mycorp-large
 provider remove mycorp
+
+# a model is its own declaration; --supports-images marks a vision model
+model add mycorp-large --provider mycorp
+model add mycorp-vl --provider mycorp --supports-images --display-name "MyCorp Vision"
+model remove mycorp-vl
 
 # 5) custom sub-agent (agents are defined in the pigorc only)
 agent add researcher --description "Read-only researcher" \
@@ -94,6 +99,17 @@ one-off, `option base-url …` + `option protocol …`. The key comes from the d
 env var (default `<NAME>_API_KEY`), a named credential, or an inline `--api-key`
 (the environment still wins). Defined providers behave like built-ins: `/model`
 switching, model-id inference and the preset picker all see them.
+
+**Declare a model — and mark it a vision model.** Provider and model are split:
+`provider add` describes the endpoint (protocol, URL, credential), `model add`
+describes one id and its capabilities. `model add mycorp-vl --provider mycorp
+--supports-images` (or a `[[models]]` table with `supports_images = true`) says the
+id accepts image input, which is what lets `view_image` — and `read` on an image
+file — hand it the picture. Use `--no-supports-images` to pin one text-only id
+inside an otherwise vision-capable provider; omitting both inherits the provider's
+`supports_images` (false by default for a custom endpoint, true for a built-in).
+A model may be declared for a built-in provider too, so a newly added vision model
+works without waiting for pigo's preset table.
 
 **Define a custom sub-agent.** `agent add …` registers a tool named after the
 agent: its own system prompt, tool allow list, model, reasoning effort, timeout,

@@ -123,6 +123,52 @@ provider() {
   esac
 }
 
+# model add <id> [--provider NAME] [--display-name T] [--supports-images|--no-supports-images]
+# model remove <id>
+#
+# A model is declared separately from the provider that serves it: "provider add"
+# describes an endpoint (protocol, URL, credential) and "model add" describes one
+# id and its capabilities. --supports-images marks it a vision model; the
+# --no- form marks one text-only id inside an otherwise vision-capable provider.
+# Omitting both inherits the provider's declaration.
+model() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    add)
+      local id="${1:-}"
+      if [ -z "$id" ]; then
+        echo "pigorc: model add needs a model id" >&2
+        return 0
+      fi
+      shift || true
+      local provider="" display_name="" supports=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --provider)
+            provider="${2:-}"; shift 2 || break ;;
+          --display-name|--name)
+            display_name="${2:-}"; shift 2 || break ;;
+          --supports-images|--vision)
+            supports="true"; shift ;;
+          --no-supports-images|--no-vision)
+            supports="false"; shift ;;
+          *)
+            echo "pigorc: model add: unknown argument $1" >&2
+            shift ;;
+        esac
+      done
+      __pigo_emit model add "$id" "$provider" "$display_name" "$supports"
+      ;;
+    remove|rm)
+      __pigo_emit model remove "${1:-}"
+      ;;
+    *)
+      echo "pigorc: usage: model add <id> [--provider NAME] [--display-name T] [--supports-images|--no-supports-images]" >&2
+      ;;
+  esac
+}
+
 # agent add <name> [--description T] [--system-prompt T | --prompt-file F]
 #                 [--tools a,b] [--model M] [--thinking L] [--isolation I]
 #                 [--timeout N] [--inherit-hooks]

@@ -84,8 +84,10 @@ func (t *ViewImageTool) Execute(_ context.Context, _ string, args json.RawMessag
 		return *bad, nil
 	}
 	if t.ImagesSupported != nil && !t.ImagesSupported() {
-		return errorResult("view_image: the configured model does not accept image input; " +
-			"describe the file by path instead, or switch to a vision model"), nil
+		return errorResult("view_image: the configured model is not declared as a vision model, so it " +
+			"cannot accept image input; describe the file by path instead, or switch to a vision model " +
+			"(declare one with `model add <id> --supports-images` in the pigorc, or a [[models]] table " +
+			"with supports_images = true in config.toml)"), nil
 	}
 	if a.Path == "" {
 		return errorResult("view_image: path is required"), nil

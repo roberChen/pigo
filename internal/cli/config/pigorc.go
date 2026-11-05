@@ -19,6 +19,9 @@
 //	             [--env-var VAR] [--auth bearer|x-api-key] [--api-key KEY]
 //	             [--model ID ...]      define a third-party provider
 //	provider remove <name>              drop a definition from a lower layer
+//	model add <id> [--provider NAME] [--display-name T]
+//	          [--supports-images|--no-supports-images]   declare one model id
+//	model remove <id>                   drop a model declared by an earlier file
 //	agent add <name> [--description T] [--system-prompt T | --prompt-file F]
 //	          [--tools a,b] [--model M] [--thinking L] [--isolation I]
 //	          [--timeout N] [--inherit-hooks]   define a custom sub-agent
@@ -88,6 +91,13 @@ type Pigorc struct {
 	// definition). RemovedProviders names definitions to drop from a lower layer.
 	Providers        []ProviderConfig
 	RemovedProviders []string
+	// Models holds the model declarations the scripts added, in declaration
+	// order. A model is declared separately from its provider: the provider
+	// table names an endpoint, this table names one servable id and its
+	// capabilities (notably whether it is a vision model). RemovedModels names
+	// ids to drop from a lower layer.
+	Models        []ModelConfig
+	RemovedModels []string
 	// Agents holds the custom sub-agent definitions the scripts added, in
 	// declaration order. A repeated name replaces the earlier definition while
 	// keeping its hooks, and `agent remove` drops a definition gathered from an
@@ -314,6 +324,8 @@ func (p *Pigorc) parseRecords(records string) {
 				continue
 			}
 			p.addProviderModel(fields[1], fields[2])
+		case "model":
+			p.parseModelRecord(fields)
 		case "agent":
 			p.parseAgentRecord(fields)
 		case "mcp":
@@ -430,6 +442,93 @@ func (p *Pigorc) addProviderModel(name, id string) {
 		}
 	}
 	p.Providers[i].Models = append(p.Providers[i].Models, id)
+}
+
+// parseModelRecord folds one `model add|remove` record into p. A model is
+// declared independently of its provider so one gateway can mix vision and
+// text-only ids.
+func (p *Pigorc) parseModelRecord(fields []string) {
+	if len(fields) < 3 {
+		p.warnf("model: malformed record %v", fields)
+		return
+	}
+	switch fields[1] {
+	case "add":
+		if len(fields) != 6 {
+			p.warnf("model add: malformed record %v", fields)
+			return
+		}
+		def := ModelConfig{
+			ID:          strings.TrimSpace(fields[2]),
+			Provider:    strings.TrimSpace(fields[3]),
+			DisplayName: strings.TrimSpace(fields[4]),
+		}
+		if def.ID == "" {
+			p.warnf("model add: the model id must not be empty")
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(fields[5])) {
+		case "":
+			// Not declared: inherit the provider's setting.
+		case "true":
+			vision := true
+			def.SupportsImages = &vision
+		case "false":
+			vision := false
+			def.SupportsImages = &vision
+		default:
+			p.warnf("model add %s: supports-images must be true or false, got %q", def.ID, fields[5])
+			return
+		}
+		// A repeated declaration replaces the earlier one, but keeps the fields
+		// this call did not set, so a later file can refine a model the global
+		// pigorc declared.
+		if old := p.modelIndex(def.ID); old >= 0 {
+			def = mergeModelConfig(p.Models[old], def)
+			p.Models[old] = def
+			return
+		}
+		p.Models = append(p.Models, def)
+	case "remove":
+		id := strings.TrimSpace(fields[2])
+		if id == "" {
+			p.warnf("model remove: the model id must not be empty")
+			return
+		}
+		if i := p.modelIndex(id); i >= 0 {
+			p.Models = append(p.Models[:i], p.Models[i+1:]...)
+		}
+		p.RemovedModels = append(p.RemovedModels, id)
+	default:
+		p.warnf("model: unknown action %q", fields[1])
+	}
+}
+
+// modelIndex returns the position of a model declaration by id, or -1.
+func (p *Pigorc) modelIndex(id string) int {
+	for i, def := range p.Models {
+		if def.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// mergeModelConfig layers next over old: an unset field in next keeps old's
+// value, so `model add x --supports-images` does not erase a provider or a
+// display name declared earlier. A nil SupportsImages stays nil (inherit).
+func mergeModelConfig(old, next ModelConfig) ModelConfig {
+	merged := next
+	if merged.Provider == "" {
+		merged.Provider = old.Provider
+	}
+	if merged.DisplayName == "" {
+		merged.DisplayName = old.DisplayName
+	}
+	if merged.SupportsImages == nil {
+		merged.SupportsImages = old.SupportsImages
+	}
+	return merged
 }
 
 // providerIndex returns the position of a provider definition by name, or -1.
@@ -809,7 +908,36 @@ func (p *Pigorc) ApplyToFileConfig(cfg *FileConfig) []string {
 			cfg.Providers = append(cfg.Providers, def)
 		}
 	}
+
+	// Model declarations merge by id, independently of the provider table.
+	for _, id := range p.RemovedModels {
+		cfg.Models = removeModelConfig(cfg.Models, id)
+	}
+	for _, def := range p.Models {
+		replaced := false
+		for i, existing := range cfg.Models {
+			if existing.ID == def.ID {
+				cfg.Models[i] = mergeModelConfig(existing, def)
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.Models = append(cfg.Models, def)
+		}
+	}
 	return p.Warnings[firstNew:]
+}
+
+// removeModelConfig drops the model declaration with this id from defs.
+func removeModelConfig(defs []ModelConfig, id string) []ModelConfig {
+	out := defs[:0]
+	for _, def := range defs {
+		if def.ID != id {
+			out = append(out, def)
+		}
+	}
+	return out
 }
 
 // removeMCPConfig drops the MCP server named name from defs.

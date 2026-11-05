@@ -65,6 +65,13 @@ type FileConfig struct {
 	// like a built-in one: `--provider <name>`, model-id resolution, the preset
 	// picker and /model all see it. Written as [[providers]] tables.
 	Providers []ProviderConfig `toml:"providers"`
+	// Models declares individual models, independently of the provider table.
+	// A provider entry describes an endpoint (protocol, URL, credential); a model
+	// entry describes one servable id and its capabilities, most importantly
+	// whether it is a vision model. Listing the same model here and in a
+	// provider's `models` is harmless: this table carries the attributes.
+	// Written as [[models]] tables or `model add ...` in a pigorc.
+	Models []ModelConfig `toml:"models"`
 	// Memory, Checkpoint, and Compaction are nested TOML tables for the
 	// persistent-memory / infinite-context feature. They are pure config
 	// plumbing here; defaults/parsing live in memory.go (Resolve* helpers) and
@@ -112,14 +119,55 @@ type ProviderConfig struct {
 	Credential string `toml:"credential"`
 	// Auth is the credential attachment scheme: bearer | x-api-key.
 	Auth string `toml:"auth"`
-	// Models lists the model ids this provider serves. The first one is the
-	// default, so `--model <name>` (bare provider name) selects it.
+	// Models lists the model ids this provider serves, as a shorthand. The first
+	// one is the default, so `--model <name>` (bare provider name) selects it.
+	// Declare a model in the [[models]] table instead when it needs attributes
+	// (a display name, or a vision declaration).
 	Models []string `toml:"models"`
-	// SupportsImages declares that this provider's models accept image input.
-	// Hand-configured endpoints cannot be introspected, so image support is
-	// opt-in: the default is false, and an image block is then reported as an
-	// error instead of being sent to a gateway that would reject the request.
+	// SupportsImages declares that this provider's models accept image input by
+	// default. Hand-configured endpoints cannot be introspected, so image support
+	// is opt-in: the default is false, and an image is then reported back to the
+	// model as text instead of being sent to a gateway that would reject the
+	// request. A model-level [[models]] declaration overrides this per id, which
+	// is how one gateway can serve both vision and text-only models.
 	SupportsImages bool `toml:"supports_images"`
+}
+
+// ModelConfig declares one model served by a provider. It is deliberately
+// separate from ProviderConfig: a provider is an endpoint and its credential,
+// while a model is an id with its own capabilities. Splitting them lets one
+// gateway expose a mix of vision and text-only models.
+//
+//	[[models]]
+//	id              = "mycorp-vl"
+//	provider        = "mycorp"
+//	display_name    = "MyCorp Vision"     # optional, defaults to id
+//	supports_images = true                # declare it a vision model
+//
+// SupportsImages is a pointer so "absent" is distinguishable from "false": an
+// absent value falls back to the provider's declaration (itself false by
+// default for a custom endpoint), while an explicit false marks one text-only
+// model inside an otherwise vision-capable provider.
+type ModelConfig struct {
+	// ID is the model id sent on the wire, e.g. "mycorp-large".
+	ID string `toml:"id"`
+	// Provider names the provider that serves it. Required unless the id was
+	// already listed by a provider definition.
+	Provider string `toml:"provider"`
+	// DisplayName is the label in the /model picker; defaults to ID.
+	DisplayName string `toml:"display_name"`
+	// SupportsImages declares whether the model accepts image input. nil means
+	// "not declared": inherit the provider's setting.
+	SupportsImages *bool `toml:"supports_images"`
+}
+
+// Vision reports the declared vision capability and whether it was declared at
+// all. ok=false means the model says nothing and the provider's default applies.
+func (m ModelConfig) Vision() (vision, ok bool) {
+	if m.SupportsImages == nil {
+		return false, false
+	}
+	return *m.SupportsImages, true
 }
 
 // DreamConfig is the [dream] TOML table for /dream memory consolidation.

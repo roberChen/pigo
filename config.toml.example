@@ -88,11 +88,32 @@ no_skills = false
 # credential = "mycorp-work"               # name in ~/.pigo/.credentials.yaml
 # auth       = "bearer"                    # bearer | x-api-key
 # models     = ["mycorp-large", "mycorp-small"]  # first one is the default
-# supports_images = false                  # declare image input; default false
+# supports_images = true                   # default for this provider's models
 #   A hand-configured endpoint cannot be introspected, so image support is
-#   opt-in: with the default, an image block is refused with a clear error
-#   rather than sent to a gateway that would reject the request. Built-in
-#   providers are unaffected (their capability comes from the preset table).
+#   opt-in: with the default (false), view_image/read report an image back as
+#   text instead of sending a block the gateway would reject. Built-in
+#   providers default to true (their capability comes from the preset table).
+#
+# --- Models (array of tables) ---
+# Models are declared separately from providers: a provider is an endpoint, a
+# model is an id with its own capabilities. This is how one gateway serves both
+# a vision model and a text-only one.
+#
+# [[models]]
+# id              = "mycorp-vl"
+# provider        = "mycorp"               # a [[providers]] name or a built-in
+# display_name    = "MyCorp Vision"        # optional, defaults to id
+# supports_images = true                   # declare it a vision model
+#
+# [[models]]
+# id              = "mycorp-text"
+# provider        = "mycorp"
+# supports_images = false                  # override a vision-capable provider
+#
+#   supports_images is what the view_image tool (and read on an image file)
+#   consults: true hands the model the picture, false reports it as text. Omit
+#   the key to inherit the provider's setting. The equivalent pigorc form is
+#   `model add mycorp-vl --provider mycorp --supports-images`.
 
 # --- MCP servers (array of tables) ---
 # Connect external Model Context Protocol servers; their tools are exposed to the

@@ -638,3 +638,106 @@ mcp remove legacy
 		t.Error("unrelated file definitions must survive")
 	}
 }
+
+// TestPigorcModelDeclarations verifies the `model add` / `model remove` DSL: a
+// model is declared separately from the provider that serves it, the vision flag
+// is tri-state (declared true, declared false, or absent to inherit), and the
+// overlay merges by id without disturbing the provider table.
+func TestPigorcModelDeclarations(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, `
+provider add mycorp --type openai --base-url "https://llm.mycorp.test/v1" --model mycorp-large
+model add mycorp-vl --provider mycorp --supports-images --display-name "MyCorp Vision"
+model add mycorp-text --provider mycorp --no-supports-images
+model add mycorp-large --provider mycorp
+model remove legacy-model
+`)
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.Models) != 3 {
+		t.Fatalf("models = %+v, want 3", p.Models)
+	}
+	byID := map[string]ModelConfig{}
+	for _, m := range p.Models {
+		byID[m.ID] = m
+	}
+
+	vl := byID["mycorp-vl"]
+	if vl.Provider != "mycorp" || vl.DisplayName != "MyCorp Vision" {
+		t.Errorf("mycorp-vl = %+v", vl)
+	}
+	if vision, ok := vl.Vision(); !ok || !vision {
+		t.Errorf("mycorp-vl vision = %v,%v; want declared true", vision, ok)
+	}
+
+	text := byID["mycorp-text"]
+	if vision, ok := text.Vision(); !ok || vision {
+		t.Errorf("mycorp-text vision = %v,%v; want declared false", vision, ok)
+	}
+
+	// No flag: the capability is undeclared, so the provider's value applies.
+	if vision, ok := byID["mycorp-large"].Vision(); ok {
+		t.Errorf("mycorp-large vision = %v,%v; want undeclared", vision, ok)
+	}
+
+	if len(p.RemovedModels) != 1 || p.RemovedModels[0] != "legacy-model" {
+		t.Errorf("removed models = %v, want [legacy-model]", p.RemovedModels)
+	}
+
+	// The provider table is unaffected by model declarations.
+	if len(p.Providers) != 1 || len(p.Providers[0].Models) != 1 {
+		t.Errorf("provider table = %+v, want the unchanged mycorp definition", p.Providers)
+	}
+}
+
+// TestPigorcModelOverlay verifies the script's model declarations merge into a
+// config.toml [[models]] set by id: the script wins, a partial re-declaration
+// keeps the fields it did not set, and `model remove` drops a lower-layer entry.
+func TestPigorcModelOverlay(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, `
+model add shared-vl --supports-images
+model remove stale-model
+`)
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	vision := false
+	yes := true
+	cfg := FileConfig{Models: []ModelConfig{
+		{ID: "shared-vl", Provider: "mycorp", DisplayName: "From File", SupportsImages: &vision},
+		{ID: "keep-me", Provider: "other", SupportsImages: &yes},
+		{ID: "stale-model", Provider: "mycorp"},
+	}}
+	if warnings := p.ApplyToFileConfig(&cfg); len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if len(cfg.Models) != 2 {
+		t.Fatalf("models after overlay = %+v, want stale-model dropped", cfg.Models)
+	}
+	byID := map[string]ModelConfig{}
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+	shared := byID["shared-vl"]
+	if v, ok := shared.Vision(); !ok || !v {
+		t.Errorf("shared-vl vision = %v,%v; want the script's true", v, ok)
+	}
+	// The re-declaration only set the flag; the file's other fields must survive.
+	if shared.Provider != "mycorp" || shared.DisplayName != "From File" {
+		t.Errorf("shared-vl = %+v, want the file's provider and display name kept", shared)
+	}
+	if _, ok := byID["stale-model"]; ok {
+		t.Error("model remove did not drop the lower-layer declaration")
+	}
+	if _, ok := byID["keep-me"]; !ok {
+		t.Error("unrelated file declarations must survive")
+	}
+}

@@ -153,11 +153,14 @@ func (t *ReadTool) Execute(ctx context.Context, id string, args json.RawMessage,
 		}
 		// A model that cannot accept image input must not be handed one: the wire
 		// would reject the request. Tell it what the file is instead, so it can
-		// report the picture exists rather than failing the turn.
+		// report the picture exists rather than failing the turn. The hint names
+		// both places a vision model can be declared, since that is the fix.
 		if t.ImagesSupported != nil && !t.ImagesSupported() {
 			return agentcore.AgentToolResult{Content: agentcore.ContentList{
 				agentcore.NewTextContent("read image " + imageload.Describe(a.Path, img) +
-					" (image not shown: the configured model does not accept image input)"),
+					" (image not shown: the configured model is not declared as a vision model; " +
+					"declare one with supports_images = true for this model in the [[models]] table " +
+					"of config.toml, or `model add <id> --supports-images` in the pigorc)"),
 			}}, nil
 		}
 		return agentcore.AgentToolResult{Content: agentcore.ContentList{

@@ -40,6 +40,11 @@ func flagCommandLineChanged(name string) bool { return flag.CommandLine.Changed(
 // so a reload can drop the definitions a deleted config entry used to provide.
 var configuredProviderNames []string
 
+// configuredModelProviders remembers which providers the last load declared
+// [[models]] entries for, so a reload can clear the declarations a deleted entry
+// used to make.
+var configuredModelProviders []string
+
 // loadConfigLayers reads the config files and publishes the process-level state
 // they define: the evaluated pigorc (plus the environment variables it exported),
 // the decoded config.toml, the third-party provider definitions, the custom
@@ -78,7 +83,7 @@ func loadConfigLayers(cwd, buildVersion string, trusted bool) configLayers {
 	// Providers must exist before anything resolves a model: this is what makes
 	// `--provider <name>`, model-id inference and the /model picker treat a
 	// configured provider like a built-in. A bad definition is reported, never fatal.
-	messages = append(messages, registerConfiguredProviders(file.Providers)...)
+	messages = append(messages, registerConfiguredProviders(file.Providers, file.Models)...)
 	// Custom sub-agents come only from the pigorc scripts; the tool assembly
 	// (run.SetupEnv) registers them. MCP servers come from config.toml `[[mcp]]`
 	// and pigorc `mcp add ...`, and are connected there too.

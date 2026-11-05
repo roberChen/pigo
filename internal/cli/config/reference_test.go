@@ -21,7 +21,7 @@ import (
 // option registry entry (and therefore no documentation).
 func TestReferenceCoversEveryFileConfigField(t *testing.T) {
 	// Definitions covered by their own DSL sections and field tables.
-	documented := map[string]bool{"providers": true, "agents": true, "mcp": true}
+	documented := map[string]bool{"providers": true, "models": true, "agents": true, "mcp": true}
 
 	covered := map[string]bool{}
 	for _, spec := range optionSpecs {
@@ -77,6 +77,7 @@ func TestReferenceCoversDefinitionFields(t *testing.T) {
 		rows []fieldDoc
 	}{
 		{"ProviderConfig", reflect.TypeOf(ProviderConfig{}), providerFieldDocs},
+		{"ModelConfig", reflect.TypeOf(ModelConfig{}), modelFieldDocs},
 		{"AgentConfig", reflect.TypeOf(AgentConfig{}), agentFieldDocs},
 		{"mcp.ServerConfig", reflect.TypeOf(mcp.ServerConfig{}), mcpFieldDocs},
 	}

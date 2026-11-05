@@ -204,8 +204,14 @@ func TestViewImageRefusedForTextOnlyModel(t *testing.T) {
 	if img := imageBlockOf(res); img != nil {
 		t.Fatal("view_image returned an image block for a text-only model")
 	}
-	if text := resultText(res); !strings.Contains(text, "does not accept image input") {
+	text := resultText(res)
+	if !strings.Contains(text, "not declared as a vision model") {
 		t.Errorf("text = %q, want the capability explanation", text)
+	}
+	// The corrective message must name the fix, or the model can only switch
+	// models; declaring this one a vision model is the cheaper remedy.
+	if !strings.Contains(text, "supports_images") {
+		t.Errorf("text = %q, want the declaration hint", text)
 	}
 }
 
@@ -250,7 +256,7 @@ func TestReadToolImageBranchTextOnlyModel(t *testing.T) {
 	if !strings.Contains(text, "read image") {
 		t.Errorf("text = %q, want the descriptor preserved", text)
 	}
-	if !strings.Contains(text, "does not accept image input") {
+	if !strings.Contains(text, "not declared as a vision model") {
 		t.Errorf("text = %q, want the omission reason", text)
 	}
 }

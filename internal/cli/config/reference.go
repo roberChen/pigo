@@ -80,6 +80,14 @@ var providerFieldDocs = []fieldDoc{
 	{"supports_images", "bool", "Declare that this provider's models accept image input. Default false: a custom endpoint is assumed text-only, so images are flattened before the request instead of failing the whole turn."},
 }
 
+// modelFieldDocs documents every field of ModelConfig.
+var modelFieldDocs = []fieldDoc{
+	{"id", "string", "Model id sent on the wire. Required."},
+	{"provider", "string", "Provider that serves it; must exist as a built-in or a [[providers]] entry."},
+	{"display_name", "string", "Label in the /model picker; defaults to id."},
+	{"supports_images", "bool", "Declare this id a vision model (true) or text-only (false). Omitted inherits the provider's setting."},
+}
+
 // agentFieldDocs documents every field of AgentConfig.
 var agentFieldDocs = []fieldDoc{
 	{"name", "string", "Tool name the main agent calls; also recorded on the agent's sessions. Required."},
@@ -167,10 +175,14 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("hook add PreToolUse --matcher '^bash$' --timeout 5 --command './.pigo/hooks/no-rm.sh'\n\n")
 	b.WriteString("# shell-function hook: the function name is the event (case/_-insensitive)\n")
 	b.WriteString("PreToolUse() { grep -q 'rm -rf /' && { echo blocked >&2; exit 2; }; return 0; }\n\n")
-	b.WriteString("# third-party provider\n")
+	b.WriteString("# third-party provider (the endpoint)\n")
 	b.WriteString("provider add mycorp --type openai --base-url \"https://llm.mycorp.com/v1\" \\\n")
 	b.WriteString("  --env-var MYCORP_API_KEY --model mycorp-large\n")
 	b.WriteString("provider remove mycorp\n\n")
+	b.WriteString("# models (declared separately from the provider; --supports-images marks a vision model)\n")
+	b.WriteString("model add mycorp-large --provider mycorp\n")
+	b.WriteString("model add mycorp-vl --provider mycorp --supports-images --display-name \"MyCorp Vision\"\n")
+	b.WriteString("model remove mycorp-vl\n\n")
 	b.WriteString("# custom sub-agent (agents are defined in the pigorc only)\n")
 	b.WriteString("agent add researcher --description \"Read-only researcher\" --prompt-file ./researcher.md \\\n")
 	b.WriteString("  --tools read,grep --model claude-haiku-4 --thinking off --timeout 300\n")
@@ -208,8 +220,19 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 
 	b.WriteString("## Third-party providers (`provider add` / `[[providers]]`)\n\n")
 	b.WriteString("A defined provider behaves like a built-in one: `--provider <name>`, model-id inference,\n")
-	b.WriteString("a bare `--model <name>` (first listed model), `/model` and the preset picker all see it.\n\n")
+	b.WriteString("a bare `--model <name>` (first listed model), `/model` and the preset picker all see it.\n")
+	b.WriteString("A provider describes an endpoint; declare models separately to give one id its own\n")
+	b.WriteString("capabilities. `supports_images` here is the default for the provider's models.\n\n")
 	writeFieldTable(&b, "field", providerFieldDocs)
+	b.WriteString("\n")
+
+	b.WriteString("## Models (`model add` / `[[models]]`)\n\n")
+	b.WriteString("Models are declared independently of the provider table, so one gateway can serve both\n")
+	b.WriteString("vision and text-only models. A model-level `supports_images` overrides the provider's\n")
+	b.WriteString("setting and decides whether `view_image` (and `read` on an image file) hands the picture\n")
+	b.WriteString("to the model or reports it back as text. Omitting the key inherits the provider default:\n")
+	b.WriteString("`false` for a custom endpoint, `true` for a built-in one.\n\n")
+	writeFieldTable(&b, "field", modelFieldDocs)
 	b.WriteString("\n")
 
 	b.WriteString("## Custom sub-agents (`agent add`)\n\n")
