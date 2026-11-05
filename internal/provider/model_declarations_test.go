@@ -1,25 +1,22 @@
 package provider
 
 // Tests for per-model declarations: a model's image capability is declared on
-// its own entry ([[models]] / `model add`), overriding the provider's coarse
-// setting so one gateway can serve both vision and text-only models. This is the
-// declaration that gates view_image.
+// its own entry ([[models]] / `model add`). It is the only such setting — a
+// provider carries none — so one gateway can serve both vision and text-only
+// models. This is the declaration that gates view_image.
 
 import (
 	"testing"
 )
 
 // TestModelSupportsImagesUsesModelDeclaration verifies a per-model declaration
-// wins over the provider's setting in both directions, and that an undeclared
-// model still falls back to the provider default.
+// decides the capability in both directions, and that an undeclared model still
+// falls back to the provider kind's default.
 func TestModelSupportsImagesUsesModelDeclaration(t *testing.T) {
 	registerTestProvider(t, ProviderSpec{
 		Name:           "decltest-gw",
 		Protocol:       ProtocolOpenAI,
 		DefaultBaseURL: "https://gw.decltest.test/v1",
-		// The provider itself is text-only: a model declaration must be able to
-		// opt one id in without flipping the whole endpoint.
-		SupportsImages: false,
 	}, nil, "")
 	vision := true
 	text := false
@@ -110,13 +107,12 @@ func TestRegisterDeclaredModelsMakesModelSelectable(t *testing.T) {
 
 // TestResolveNamedProviderHonorsModelDeclaration: the resolved Model's
 // SupportsImages (what checkImageSupport enforces on the wire) follows the
-// per-model declaration, not just the provider flag.
+// per-model declaration, not just the provider-kind default.
 func TestResolveNamedProviderHonorsModelDeclaration(t *testing.T) {
 	registerTestProvider(t, ProviderSpec{
 		Name:           "decltest-resolve",
 		Protocol:       ProtocolOpenAI,
 		DefaultBaseURL: "https://gw.decltest.test/v1",
-		SupportsImages: false,
 	}, nil, "")
 	vision := true
 	RegisterDeclaredModels("decltest-resolve", []DeclaredModel{{ID: "decltest-vl", SupportsImages: &vision}})
@@ -138,5 +134,42 @@ func TestResolveNamedProviderHonorsModelDeclaration(t *testing.T) {
 	}
 	if models := p.Models(); len(models) > 0 && models[0].SupportsImages {
 		t.Errorf("resolved models = %+v, want the provider's text-only default", models)
+	}
+}
+
+// TestModelImageSupportDeclared separates "the user said so" from "pigo assumes
+// so": the runtime image fallback is disabled only for an explicit declaration.
+func TestModelImageSupportDeclared(t *testing.T) {
+	// (a) A per-model declaration on a built-in provider is the user's statement.
+	vision := true
+	RegisterDeclaredModels("openai", []DeclaredModel{{ID: "decltest-explicit-vl", SupportsImages: &vision}})
+	t.Cleanup(func() { RegisterDeclaredModels("openai", nil) })
+	if !ModelImageSupportDeclared("openai", "decltest-explicit-vl") {
+		t.Error("a model declared with supports_images = true is not reported as declared")
+	}
+	// (b) A built-in model with no declaration only has pigo's default.
+	if ModelImageSupportDeclared("openai", "gpt-4o") {
+		t.Error("a built-in provider's default was reported as a user declaration")
+	}
+	// (c) An unresolvable provider has no declaration either.
+	if ModelImageSupportDeclared("decltest-nowhere", "x") {
+		t.Error("an unknown provider was reported as declared")
+	}
+	// (d) A custom endpoint carries no image setting of its own: only a model
+	// declaration states the capability, so its text-only default is not one.
+	registerTestProvider(t, ProviderSpec{
+		Name:           "decltest-provider-text",
+		Protocol:       ProtocolOpenAI,
+		DefaultBaseURL: "https://gw.decltest.test/v1",
+	}, nil, "")
+	if ModelImageSupportDeclared("decltest-provider-text", "any-model") {
+		t.Error("a custom provider's default was reported as a declaration")
+	}
+	RegisterDeclaredModels("decltest-provider-text", []DeclaredModel{
+		{ID: "decltest-provider-vl", SupportsImages: &vision},
+	})
+	t.Cleanup(func() { RegisterDeclaredModels("decltest-provider-text", nil) })
+	if !ModelImageSupportDeclared("decltest-provider-text", "decltest-provider-vl") {
+		t.Error("a model declared on a custom provider was not reported as declared")
 	}
 }

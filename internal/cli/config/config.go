@@ -124,13 +124,6 @@ type ProviderConfig struct {
 	// Declare a model in the [[models]] table instead when it needs attributes
 	// (a display name, or a vision declaration).
 	Models []string `toml:"models"`
-	// SupportsImages declares that this provider's models accept image input by
-	// default. Hand-configured endpoints cannot be introspected, so image support
-	// is opt-in: the default is false, and an image is then reported back to the
-	// model as text instead of being sent to a gateway that would reject the
-	// request. A model-level [[models]] declaration overrides this per id, which
-	// is how one gateway can serve both vision and text-only models.
-	SupportsImages bool `toml:"supports_images"`
 }
 
 // ModelConfig declares one model served by a provider. It is deliberately
@@ -144,9 +137,10 @@ type ProviderConfig struct {
 //	display_name    = "MyCorp Vision"     # optional, defaults to id
 //	supports_images = true                # declare it a vision model
 //
-// SupportsImages is a pointer so "absent" is distinguishable from "false": an
-// absent value falls back to the provider's declaration (itself false by
-// default for a custom endpoint), while an explicit false marks one text-only
+// Image support is declared per model and only here; a provider has no such
+// setting. The pointer keeps "absent" distinguishable from "false": absent means
+// "take pigo's default for the provider kind" (text-only for a custom endpoint,
+// vision-capable for a built-in one), while an explicit false marks one text-only
 // model inside an otherwise vision-capable provider.
 type ModelConfig struct {
 	// ID is the model id sent on the wire, e.g. "mycorp-large".
@@ -157,7 +151,7 @@ type ModelConfig struct {
 	// DisplayName is the label in the /model picker; defaults to ID.
 	DisplayName string `toml:"display_name"`
 	// SupportsImages declares whether the model accepts image input. nil means
-	// "not declared": inherit the provider's setting.
+	// "not declared": take pigo's default for the provider kind.
 	SupportsImages *bool `toml:"supports_images"`
 }
 
@@ -199,21 +193,55 @@ func FileConfigPath() string {
 // LoadFileConfig reads and decodes config.toml. A missing file (or an empty
 // path) returns a zero config with no error; a malformed file is an error.
 func LoadFileConfig(path string) (FileConfig, error) {
+	cfg, _, err := LoadFileConfigWithWarnings(path)
+	return cfg, err
+}
+
+// LoadFileConfigWithWarnings is LoadFileConfig plus the non-fatal notices about
+// keys that are no longer read. Startup and reload use it so a stale key becomes
+// a visible hint instead of a setting that silently does nothing; callers with no
+// message channel keep using LoadFileConfig.
+func LoadFileConfigWithWarnings(path string) (FileConfig, []string, error) {
 	if path == "" {
-		return FileConfig{}, nil
+		return FileConfig{}, nil, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return FileConfig{}, nil
+			return FileConfig{}, nil, nil
 		}
-		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+		return FileConfig{}, nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg FileConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return FileConfig{}, fmt.Errorf("parse config %s: %w", path, err)
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return FileConfig{}, nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, retiredKeyNotices(md), nil
+}
+
+// retiredKeyNotices turns keys the decoder did not recognise into hints for ones
+// pigo used to read. TOML decoding ignores unknown keys, so a retired setting
+// otherwise vanishes without a word — the worst outcome for a capability, since
+// the user's models quietly fall back to a default.
+func retiredKeyNotices(md toml.MetaData) []string {
+	var notices []string
+	seen := map[string]bool{}
+	for _, key := range md.Undecoded() {
+		parts := []string(key)
+		if len(parts) != 2 || parts[0] != "providers" || parts[1] != "supports_images" {
+			continue
+		}
+		if seen[key.String()] {
+			continue
+		}
+		seen[key.String()] = true
+		notices = append(notices, "config: [[providers]] supports_images is no longer read — image support is "+
+			"declared per model; move it to a [[models]] entry (supports_images = true) or use "+
+			"`model add <id> --provider <name> --supports-images`. Run /status or /model to see the "+
+			"capability pigo currently assumes.")
+	}
+	return notices
 }
 
 // GenericBaseURLEnvVar derives the generic base-url override env var name for a

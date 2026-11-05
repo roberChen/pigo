@@ -8,6 +8,12 @@
 // Stripping is a request-assembly concern, not a persistence one: the session
 // keeps its images so switching back to a vision model (or exporting) still
 // shows them. Only the copy bound for the LLM is flattened.
+//
+// The same file implements the repair side: removing images from the
+// conversation itself (StripImagesInHistory) for the one failure shape the loop
+// repairs (runtime/image_fallback.go) — a request that added a picture through a
+// tool call, in a conversation that had none before it, for a model the user did
+// not declare vision-capable, so the run can retry the turn without the picture.
 package agentcore
 
 // ImageOmittedNotice replaces an image block the target model cannot accept. It
@@ -110,4 +116,91 @@ func StripImagesFromContent(list ContentList) (ContentList, bool) {
 		out = append(out, c)
 	}
 	return out, true
+}
+
+// MessagesHaveImage reports whether any message in msgs carries an image block.
+func MessagesHaveImage(msgs MessageList) bool {
+	for _, m := range msgs {
+		if messageHasImage(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// ImageStrippedNoticeText explains, to the model, why the picture it was given
+// earlier is gone: the request carrying it failed, and pigo removed it to rule
+// that out. It is deliberately error-agnostic — the fallback never reads the
+// provider's error text (see runtime/image_fallback.go), so the notice must not
+// claim the provider named images as the cause.
+const ImageStrippedNoticeText = "the conversation contained an image when a request failed, so the image was removed to rule it out and the turn was retried without it; the tool call that produced it is reported as failed"
+
+// StripImagesInHistory removes every image block from msgs *in place*, which is
+// the persistent counterpart of StripImages: StripImages flattens only the copy
+// bound for the wire, this repairs the conversation itself so a later run (whose
+// request assembly has no memory of the failure) cannot resend the same picture
+// and fail the same way.
+//
+// Tool results that carried an image are rewritten as failed calls — the image
+// is dropped, the remaining text is kept (so the model still learns which file
+// it was), a notice quoting the provider error is appended, and IsError is set.
+// User and assistant messages merely lose the picture: a prompt is not the
+// model's mistake, so it is replaced by the omission notice rather than being
+// turned into an error. The loop only calls this when the conversation had no
+// image before the failed request, so in practice the stripped images are the
+// tool-produced ones.
+//
+// The rewritten tool results are returned so the caller can re-emit their
+// ToolExecutionEndEvent, flipping the cards the UI already rendered.
+func StripImagesInHistory(msgs MessageList, providerErr string) []ToolResultMessage {
+	notice := ImageStrippedNoticeText
+	if providerErr != "" {
+		notice += " (the failed request reported: " + providerErr + ")"
+	}
+	var repaired []ToolResultMessage
+	for i, m := range msgs {
+		switch v := m.(type) {
+		case ToolResultMessage:
+			if !ContentHasImage(v.Content) {
+				continue
+			}
+			kept := make(ContentList, 0, len(v.Content)+1)
+			for _, c := range v.Content {
+				if _, isImage := c.(ImageContent); isImage {
+					continue
+				}
+				kept = append(kept, c)
+			}
+			v.Content = append(kept, NewTextContent("["+notice+"]"))
+			v.IsError = true
+			msgs[i] = v
+			repaired = append(repaired, v)
+		case UserMessage:
+			if !ContentHasImage(v.Content) {
+				continue
+			}
+			v.Content = replaceImagesWithNotice(v.Content, "["+notice+"]")
+			msgs[i] = v
+		case AssistantMessage:
+			if !ContentHasImage(v.Content) {
+				continue
+			}
+			v.Content = replaceImagesWithNotice(v.Content, "["+notice+"]")
+			msgs[i] = v
+		}
+	}
+	return repaired
+}
+
+// replaceImagesWithNotice swaps every image block for text, leaving the other
+// blocks in order. list is assumed to carry at least one image.
+func replaceImagesWithNotice(list ContentList, text string) ContentList {
+	out := make(ContentList, 0, len(list))
+	for _, c := range list {
+		if _, isImage := c.(ImageContent); isImage {
+			continue
+		}
+		out = append(out, c)
+	}
+	return append(out, NewTextContent(text))
 }

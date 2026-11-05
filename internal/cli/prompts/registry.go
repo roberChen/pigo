@@ -241,7 +241,8 @@ func fetchModelCatalog(live *cli.LiveConfig, creds *provider.CredentialStore) st
 func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
 	id := strings.TrimSpace(args)
 	if id == "" {
-		return fmt.Sprintf("model: %s (provider: %s)\nrun /models to see presets, or /model <id> to switch", live.Model, live.ProviderName)
+		return fmt.Sprintf("model: %s (provider: %s)\nimage input: %s\nrun /models to see presets, or /model <id> to switch",
+			live.Model, live.ProviderName, imageSupportSummary(live.ProviderName, live.Model))
 	}
 	// A bare provider name ("zai") selects that provider's default model
 	// (issue #564): carry the canonical id into live.Model so the wire request
@@ -257,7 +258,8 @@ func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
 		live.Model = id
 		live.ProviderName = name
 		live.Provider = prov
-		return fmt.Sprintf("model switched to %s (provider: %s, from fetched catalog)", id, name)
+		return fmt.Sprintf("model switched to %s (provider: %s, from fetched catalog)\nimage input: %s",
+			id, name, imageSupportSummary(name, id))
 	}
 	model := provider.CanonicalizeModel(id)
 	prov, providerName, err := provider.ResolveProvider(model, live.BaseURL, live.Protocol, "", os.Getenv)
@@ -267,7 +269,29 @@ func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
 	live.Model = model
 	live.ProviderName = providerName
 	live.Provider = prov
-	return fmt.Sprintf("model switched to %s (provider: %s)", model, providerName)
+	return fmt.Sprintf("model switched to %s (provider: %s)\nimage input: %s",
+		model, providerName, imageSupportSummary(providerName, model))
+}
+
+// imageSupportSummary renders the active model's image capability for /model.
+// The capability is declared per model and nowhere else (a provider table has no
+// such field), so the line names the source: a built-in model is assumed
+// vision-capable, a custom endpoint is text-only until its vision ids are
+// declared, and a declaration wins either way.
+func imageSupportSummary(providerName, model string) string {
+	supported, source := provider.ImageSupport(providerName, model)
+	if supported {
+		return fmt.Sprintf("supported (%s)", source)
+	}
+	switch source {
+	case provider.ImageSupportDeclared:
+		return "not supported (declared text-only): view_image/read report the image as text"
+	case provider.ImageSupportCustomDefault:
+		return "not supported (custom endpoint default): declare the vision ids with " +
+			"`model add <id> --provider <name> --supports-images`"
+	default:
+		return fmt.Sprintf("not supported (%s)", source)
+	}
 }
 
 // ModelChoice is one selectable row of the interactive model picker: the id to
@@ -495,6 +519,12 @@ func presetListing(filter string) string {
 			if m.DisplayName != "" {
 				b.WriteString("  — ")
 				b.WriteString(m.DisplayName)
+			}
+			// Image support is per model, so it belongs on the line that names the
+			// model. Only a text-only id is marked: marking every vision-capable
+			// one would add noise to a list where that is the norm.
+			if ok, _ := provider.ImageSupport(m.Provider, m.ID); !ok {
+				b.WriteString("  [text only]")
 			}
 		}
 	}

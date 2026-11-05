@@ -17,6 +17,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
 	"github.com/smallnest/pigo/internal/trust"
 )
@@ -71,11 +72,36 @@ func printRuntimeConfig(out io.Writer, color bool, host cli.Host) {
 	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "provider:"), providerName)
 	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "base URL:"), baseURL)
 	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "protocol:"), protocol)
+	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "images:"), imageSupportLine(model, providerName))
 	fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Dim, "thinking:"), thinkingLevel)
 	if contextWindow > 0 {
 		fmt.Fprintf(out, "  %s %d tokens\n", ui.Colorize(color, ui.Dim, "context window:"), contextWindow)
 	} else {
 		fmt.Fprintf(out, "  %s unknown\n", ui.Colorize(color, ui.Dim, "context window:"))
+	}
+}
+
+// imageSupportLine explains whether the active model can receive pictures, and
+// why. Image support is declared per model ([[models]] / `model add
+// --supports-images`); a provider has no such setting, because one gateway
+// serves both vision and text-only ids. The source is reported alongside the
+// answer so "no" is actionable: a custom endpoint is text-only until its vision
+// ids are declared, while a built-in model is assumed vision-capable.
+func imageSupportLine(model, providerName string) string {
+	if model == "" {
+		model = "(unknown)"
+	}
+	supported, source := provider.ImageSupport(providerName, model)
+	switch {
+	case supported:
+		return fmt.Sprintf("supported (%s)", source)
+	case source == provider.ImageSupportDeclared:
+		return "not supported (declared text-only); view_image/read report the image as text"
+	case source == provider.ImageSupportCustomDefault:
+		return "not supported (custom endpoint default); declare the vision ids with " +
+			"`model add <id> --provider <name> --supports-images` in the pigorc"
+	default:
+		return fmt.Sprintf("not supported (%s)", source)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
 )
 
@@ -250,5 +251,42 @@ func TestMaskKey(t *testing.T) {
 		if got := maskKey(c.in); got != c.want {
 			t.Errorf("maskKey(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestRunStatusShowsImageSupport: /status names the active model's image
+// capability and its source. A provider has no image setting, so the line must
+// be attributable to the model — a declaration, a built-in default, or a custom
+// endpoint's text-only default (with the way to declare vision ids).
+func TestRunStatusShowsImageSupport(t *testing.T) {
+	host := newFakeHost()
+	host.live.Model = "glm-5.2"
+	host.live.ProviderName = "zai"
+
+	var buf bytes.Buffer
+	RunStatus(&buf, host)
+	if out := buf.String(); !strings.Contains(out, "images: supported (built-in default)") {
+		t.Errorf("output missing the built-in default image line:\n%s", out)
+	}
+
+	if err := provider.RegisterCustomProvider(provider.ProviderSpec{
+		Name:           "statustest-custom",
+		Protocol:       provider.ProtocolOpenAI,
+		DefaultBaseURL: "https://gw.statustest.test/v1",
+	}, nil, ""); err != nil {
+		t.Fatalf("register custom provider: %v", err)
+	}
+	t.Cleanup(func() { provider.UnregisterCustomProvider("statustest-custom") })
+
+	host.live.Model = "custom-text-model"
+	host.live.ProviderName = "statustest-custom"
+	buf.Reset()
+	RunStatus(&buf, host)
+	out := buf.String()
+	if !strings.Contains(out, "images: not supported (custom endpoint default)") {
+		t.Errorf("output missing the custom endpoint image line:\n%s", out)
+	}
+	if !strings.Contains(out, "--supports-images") {
+		t.Errorf("output does not say how to declare vision ids:\n%s", out)
 	}
 }

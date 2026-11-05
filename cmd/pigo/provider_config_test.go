@@ -78,9 +78,8 @@ func TestRegisterConfiguredProvidersDeclaredModels(t *testing.T) {
 			Name:     "maintest-models",
 			Protocol: "openai",
 			BaseURL:  "https://gw.maintest.test/v1",
-			// The provider is text-only by default; the model declaration below
-			// opts one id in without changing the endpoint.
-			SupportsImages: false,
+			// A custom endpoint is text-only by default; the model declaration
+			// below opts one id in without changing the endpoint.
 		}},
 		[]config.ModelConfig{
 			{ID: "maintest-vl", Provider: "maintest-models", DisplayName: "VL", SupportsImages: &vision},

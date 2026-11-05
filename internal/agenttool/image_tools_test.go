@@ -260,3 +260,40 @@ func TestReadToolImageBranchTextOnlyModel(t *testing.T) {
 		t.Errorf("text = %q, want the omission reason", text)
 	}
 }
+
+// TestImageToolsIgnoreProviderFailures: a failed request must not arm a run-wide
+// block. The loop repairs that one turn by removing its image, but a later
+// view_image/read still hands the model a picture — the model decides from the
+// provider's error whether to try again, and a silent ban would take that
+// decision away.
+func TestImageToolsIgnoreProviderFailures(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	ctx := t.Context()
+
+	res := runViewImage(t, &ViewImageTool{Root: dir}, map[string]any{"path": "shot.png"})
+	if img := imageBlockOf(res); img == nil {
+		t.Fatal("view_image stopped returning images: no run-wide image ban should exist")
+	}
+
+	read := &ReadTool{Root: dir}
+	raw, _ := json.Marshal(map[string]any{"path": "shot.png"})
+	readRes, err := read.Execute(ctx, "call-1", raw, nil)
+	if err != nil {
+		t.Fatalf("execute returned go error: %v", err)
+	}
+	if imageBlockOf(readRes) == nil {
+		t.Fatal("read stopped attaching images: no run-wide image ban should exist")
+	}
+}
+
+// TestImageToolsStayPermissiveWithoutGate: a context with no gate (a tool called
+// outside the loop, e.g. by a test or a future SDK harness) must keep the old
+// permissive behavior.
+func TestImageToolsStayPermissiveWithoutGate(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	if res := runViewImage(t, &ViewImageTool{Root: dir}, map[string]any{"path": "shot.png"}); imageBlockOf(res) == nil {
+		t.Fatal("an ungated view_image stopped returning images")
+	}
+}

@@ -50,14 +50,6 @@ type ProviderSpec struct {
 	// variables (e.g. AZURE_OPENAI_BASE_URL), in precedence order. May be empty;
 	// the generic <PROVIDER>_BASE_URL convention is handled by callers.
 	BaseURLEnvVars []string
-	// SupportsImages declares that this provider's models accept image input.
-	// It is only meaningful for a user-defined provider (see
-	// RegisterCustomProvider): a hand-configured endpoint cannot be introspected,
-	// so image support must be opted into explicitly and is false by default.
-	// Built-in providers ignore it — their capability is fixed by the built-in
-	// preset table (see ResolveProvider), so a config entry can never downgrade
-	// them.
-	SupportsImages bool
 }
 
 // Protocol values.
@@ -395,9 +387,11 @@ var customProviderKeys = map[string]string{}
 var customProviders = map[string]bool{}
 
 // modelImageSupport records per-model image declarations made by a user. It is
-// keyed by provider name and then model id, and it overrides the provider's
-// coarse SupportsImages flag: one gateway can serve both a vision model and a
-// text-only one. Absent entries fall back to the provider's setting.
+// keyed by provider name and then model id. Image support is a *model* property
+// only: an endpoint cannot be introspected, and a gateway routinely serves both
+// vision and text-only ids, so a provider-level flag would be a guess about every
+// model behind it. Absent entries take pigo's default for the provider kind (see
+// ModelSupportsImages).
 var modelImageSupport = map[string]map[string]bool{}
 
 // LookupProviderSpec returns the ProviderSpec for a provider name and whether it
@@ -424,31 +418,85 @@ func IsCustomProvider(name string) bool {
 
 // ModelSupportsImages reports whether the selected model accepts image input.
 //
-// A manually configured provider must opt in: its endpoint cannot be
-// introspected, and sending an image block to a text-only gateway fails the
-// whole request, so the default is "no". Built-in providers are unaffected by
-// that rule — their capability comes from the built-in preset table and stays as
-// it always was, so a config entry can neither downgrade nor widen them.
+// Image support is declared per model and nowhere else: one gateway routinely
+// serves both a vision model and a text-only one, so a provider-wide flag would
+// have to be wrong for half of its ids. A declaration is therefore the only
+// statement that can be trusted, and it applies to built-in and custom providers
+// alike (so a newly released vision model works without waiting for the preset
+// table).
 //
-// A per-model declaration wins over the provider's coarse setting: [[models]]
-// (or `model add ... --supports-images`) lets one gateway serve a vision model
-// and a text-only one at the same time. It is consulted for every provider,
-// built-in included, so a user can pin a built-in provider's newly added
-// vision model without waiting for the preset table.
+// Without a declaration the default follows the provider kind:
+//
+//   - a built-in provider is assumed vision-capable. Its curated models are
+//     multimodal as a rule, and pigo's built-in presets have always said so;
+//   - a user-defined endpoint is assumed text-only. Its capability cannot be
+//     introspected, and a gateway is more likely to serve text-only ids; sending
+//     an image block there fails the whole request, so the safe default is "no".
+//     Declare the vision ids with [[models]] / `model add --supports-images`.
+//
+// An unresolvable provider name (e.g. a routed OpenRouter id) keeps the
+// permissive default: unknown capability defers to the wire.
 func ModelSupportsImages(providerName, model string) bool {
 	spec, ok := LookupProviderSpec(providerName)
 	if !ok {
-		// An unresolvable name (e.g. a routed OpenRouter id) keeps the
-		// permissive built-in default: unknown capability defers to the wire.
 		return true
 	}
 	if declared, ok := declaredModelImageSupport(spec.Name, model); ok {
 		return declared
 	}
-	if !IsCustomProvider(spec.Name) {
+	return !IsCustomProvider(spec.Name)
+}
+
+// ImageSupportSource names where a model's image capability comes from, so a UI
+// can explain the answer instead of printing a bare yes/no.
+type ImageSupportSource string
+
+const (
+	// ImageSupportDeclared means the user's [[models]] / `model add` statement
+	// decided it (either way).
+	ImageSupportDeclared ImageSupportSource = "declared"
+	// ImageSupportBuiltinDefault means no declaration exists and the model is on a
+	// built-in provider, which pigo assumes vision-capable.
+	ImageSupportBuiltinDefault ImageSupportSource = "built-in default"
+	// ImageSupportCustomDefault means no declaration exists and the provider is a
+	// user-defined endpoint, which pigo assumes text-only.
+	ImageSupportCustomDefault ImageSupportSource = "custom default"
+	// ImageSupportUnknownProvider means the provider name could not be resolved
+	// (e.g. a routed OpenRouter id), so the capability defers to the wire.
+	ImageSupportUnknownProvider ImageSupportSource = "unknown provider"
+)
+
+// ImageSupport reports whether the model accepts image input and where that answer
+// came from. It is the single place status-style UIs read, so /status, /model and
+// the picker cannot disagree with the gate on view_image.
+func ImageSupport(providerName, model string) (bool, ImageSupportSource) {
+	spec, ok := LookupProviderSpec(providerName)
+	if !ok {
+		return true, ImageSupportUnknownProvider
+	}
+	if declared, ok := declaredModelImageSupport(spec.Name, model); ok {
+		return declared, ImageSupportDeclared
+	}
+	if IsCustomProvider(spec.Name) {
+		return false, ImageSupportCustomDefault
+	}
+	return true, ImageSupportBuiltinDefault
+}
+
+// ModelImageSupportDeclared reports whether the user's own configuration states
+// this model's image capability, as opposed to pigo assuming a default. Only a
+// model-level declaration counts ([[models]] `supports_images`, or `model add ...
+// --supports-images`); pigo's built-in default is not the user's statement, and a
+// provider no longer carries one.
+//
+// The runtime image fallback consults this: when the user explicitly declared a
+// model vision-capable, a failing request is left to fail rather than having its
+// images removed behind the user's back.
+func ModelImageSupportDeclared(providerName, model string) bool {
+	if _, declared := declaredModelImageSupport(providerName, model); declared {
 		return true
 	}
-	return spec.SupportsImages
+	return false
 }
 
 // declaredModelImageSupport returns the image capability a user declared for one

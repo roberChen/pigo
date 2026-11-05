@@ -88,11 +88,8 @@ no_skills = false
 # credential = "mycorp-work"               # name in ~/.pigo/.credentials.yaml
 # auth       = "bearer"                    # bearer | x-api-key
 # models     = ["mycorp-large", "mycorp-small"]  # first one is the default
-# supports_images = true                   # default for this provider's models
-#   A hand-configured endpoint cannot be introspected, so image support is
-#   opt-in: with the default (false), view_image/read report an image back as
-#   text instead of sending a block the gateway would reject. Built-in
-#   providers default to true (their capability comes from the preset table).
+#   Image support is NOT a provider setting: one gateway routinely serves both
+#   vision and text-only ids, so it is declared per model (see [[models]] below).
 #
 # --- Models (array of tables) ---
 # Models are declared separately from providers: a provider is an endpoint, a
@@ -108,12 +105,16 @@ no_skills = false
 # [[models]]
 # id              = "mycorp-text"
 # provider        = "mycorp"
-# supports_images = false                  # override a vision-capable provider
+# supports_images = false                  # pin one id text-only
 #
-#   supports_images is what the view_image tool (and read on an image file)
-#   consults: true hands the model the picture, false reports it as text. Omit
-#   the key to inherit the provider's setting. The equivalent pigorc form is
+#   supports_images is the only image-capability setting and is what the
+#   view_image tool (and read on an image file) consults: true hands the model
+#   the picture, false reports it as text. Omit the key for pigo's default for
+#   the provider kind: text-only for a hand-configured endpoint (so declare its
+#   vision ids explicitly), vision-capable for a built-in provider. The
+#   equivalent pigorc form is
 #   `model add mycorp-vl --provider mycorp --supports-images`.
+#   `/model` and `/status` always print which of the three applies.
 
 # --- MCP servers (array of tables) ---
 # Connect external Model Context Protocol servers; their tools are exposed to the

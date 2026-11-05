@@ -12,9 +12,10 @@
 // Per-turn hooks after each turn_end: getSteeringMessages (pulled after tool
 // execution and injected before the next turn), prepareNextTurn (may swap
 // context / model / thinkingLevel), shouldStopAfterTurn (true ⇒ agent_end +
-// exit). Two stop reasons are handled specially: length (the response was
+// exit). Three stop reasons are handled specially: length (the response was
 // truncated by the token cap) fails every tool call so the model resends
-// (failToolCallsFromTruncatedMessage); error / aborted end the run immediately.
+// (failToolCallsFromTruncatedMessage); error ends the run, after the narrow
+// image-degradation repair (image_fallback.go); aborted ends the run immediately.
 //
 // agentLoop starts a fresh run from a prompt already appended to the context.
 package runtime
@@ -146,6 +147,15 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 		cfg.TransformContext = cfg.Reminders.wrapTransform(cfg.TransformContext)
 	}
 	startIdx := len(agentCtx.Messages)
+	// Image degradation: see image_fallback.go for the (narrow) scenario in which
+	// a failed turn has its images removed and is retried. The policy touches only
+	// that turn: it installs nothing on the context, so later image calls behave as
+	// they always did.
+	imagePolicy := newImageFallback(provider.ModelImageSupportDeclared(cfg.Provider, cfg.Model))
+	// lastReqLen tracks how many messages the most recent request carried. The
+	// repair needs the delta between two requests to tell "this request added a
+	// view_image picture" from "the conversation already had one".
+	lastReqLen := startIdx
 	// tel accumulates structured telemetry (turn count, per-tool durations,
 	// truncation count, compaction count, latest context-utilization ratio) from
 	// the events emitted below, surfaced as a TelemetryEvent at run end.
@@ -195,6 +205,11 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 				return
 			}
 
+			// The request about to be sent carries everything up to lastReqLen; the
+			// messages appended after it are what this request adds. Snapshot the
+			// boundary before the stream appends its partial assistant message.
+			prevReqLen := lastReqLen
+			lastReqLen = len(agentCtx.Messages)
 			assistant, err := streamAssistantResponse(ctx, agentCtx, cfg.LoopConfig, emitFrom)
 			if err != nil {
 				// emit was cancelled mid-stream; end the run.
@@ -216,8 +231,23 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 					return
 				}
 				continue
-			case agentcore.StopReasonError, agentcore.StopReasonAborted:
+			case agentcore.StopReasonError:
+				// The error text is not trusted to say whether the picture caused the
+				// failure. Instead the narrow scenario in image_fallback.go decides:
+				// the previous request carried no image, this one added one through a
+				// tool call, the model was not explicitly declared vision-capable, and
+				// the run has not been repaired yet. Then the image is removed (its
+				// tool result becomes a failed call) and this turn is retried, once
+				// per run. Anything else keeps the error terminal.
+				if imagePolicy.recover(ctx, agentCtx, prevReqLen, assistant, emit) {
+					continue
+				}
 				// Terminal failure: emit the turn end and stop.
+				_ = emit(agentcore.TurnEndEvent{Message: assistant})
+				finish()
+				return
+			case agentcore.StopReasonAborted:
+				// Terminal: emit the turn end and stop.
 				_ = emit(agentcore.TurnEndEvent{Message: assistant})
 				finish()
 				return

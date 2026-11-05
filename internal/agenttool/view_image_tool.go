@@ -78,16 +78,15 @@ func (t *ViewImageTool) ExecutionMode() agentcore.ToolExecutionMode {
 // Execute implements AgentTool. Read/format failures are encoded as error results
 // so the model can correct its path; the Go error is reserved for decode
 // failures.
-func (t *ViewImageTool) Execute(_ context.Context, _ string, args json.RawMessage, _ agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+func (t *ViewImageTool) Execute(ctx context.Context, _ string, args json.RawMessage, _ agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
 	a, bad := decodeArgs[viewImageToolArgs](args, "view_image")
 	if bad != nil {
 		return *bad, nil
 	}
-	if t.ImagesSupported != nil && !t.ImagesSupported() {
-		return errorResult("view_image: the configured model is not declared as a vision model, so it " +
-			"cannot accept image input; describe the file by path instead, or switch to a vision model " +
-			"(declare one with `model add <id> --supports-images` in the pigorc, or a [[models]] table " +
-			"with supports_images = true in config.toml)"), nil
+	// Refuse before loading the file: a model that is not declared vision-capable
+	// cannot act on a picture, so loading one would only waste the read.
+	if reason := imageUnavailableReason(t.ImagesSupported); reason != "" {
+		return errorResult("view_image: " + reason + "; describe the file by path instead"), nil
 	}
 	if a.Path == "" {
 		return errorResult("view_image: path is required"), nil

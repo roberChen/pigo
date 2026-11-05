@@ -79,6 +79,10 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 	// land on a text-only one; either way the wire would reject the whole request
 	// and take the turn down instead of the picture. The session keeps its images
 	// — only this LLM-bound copy is flattened, so switching back still sees them.
+	//
+	// A repair does not arm a run-wide latch: images a later request brings are
+	// left alone, and the model decides from the provider's error (see
+	// runtime/image_fallback.go for the one repaired case).
 	if !provider.ModelSupportsImages(cfg.Provider, cfg.Model) {
 		msgs = agentcore.StripImages(msgs)
 	}

@@ -12,6 +12,27 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **A failed request no longer leaves an image behind to break every later
+  turn, without second-guessing the conversation**: declaring
+  `supports_images = true` (or relying on a built-in provider's default) is a
+  promise pigo cannot verify, and a gateway that refuses the image used to turn
+  the whole run into an error — worse, the picture stayed in the history, so
+  every later request (this run and every run after it) failed the same way. The
+  repair now has narrow, explicit conditions and never reads the error text (a
+  vendor may answer with a bare `400 Bad Request`, and a missed classification is
+  unrecoverable). A turn is repaired only when the conversation had **no image
+  before the request**, the request itself **added one through a tool call**
+  (`view_image`, or `read` on an image file), the model was **not explicitly
+  declared vision-capable** in the user's config, and the run has not been
+  repaired yet. Then the tool call becomes a failed result quoting the provider
+  error (keeping which file it saw) and the turn is retried once without the
+  picture. The repair is scoped to that one turn: it installs no run-wide
+  "no images" gate, because deciding that an endpoint can never see images is the
+  model's call once the API error is in front of it — a later `view_image`/`read`
+  still hands over the picture and a persistent refusal is visible to the model
+  there. A history that already carried an image, a user-attached image, a
+  failure with no new image, a declared-vision model, a cancelled run, and a run
+  with no images keep the terminal behavior; a second failure stops too.
 - **The TUI composer no longer collapses lines once it fills the screen**: past
   six lines (and past the terminal height in full screen) the editor silently
   stopped accepting newlines, so every further line was appended to the last row
@@ -136,6 +157,21 @@ interactive REPL/TUI.
   checkpoint attaches to the last summarized entry and the retained tail follows it,
   so `/tree`, export and a later resume still have the full history. A second
   compaction attaches at the right node when the session was resumed first.
+
+### Changed
+- **Image support is declared on the model, never on the provider**: a gateway
+  routinely serves both vision and text-only ids behind one endpoint, so
+  `supports_images` on `[[providers]]` had to be wrong for half of its models.
+  The key now exists only on `[[models]]` (and `model add ... --supports-images`),
+  and an undeclared model falls back to pigo's default *for the provider kind*:
+  text-only for a hand-configured endpoint (the safe side, since an image block
+  it rejects fails the whole request) and vision-capable for a built-in
+  provider. Because a wrong guess is easy to make silently, the answer is now
+  visible: `/status` prints an `images:` line and `/model` an `image input:`
+  line naming whether a declaration, a custom default or a built-in default
+  decided it (with the `model add` command to fix the custom case), and
+  `/models` marks text-only rows `[text only]`. A `supports_images` key still
+  found under a provider is rejected with a message saying where it belongs.
 
 ### Added
 - **Images are first-class in the agent loop, not just in the prompt**: a vision

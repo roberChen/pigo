@@ -72,10 +72,11 @@ func loadConfigLayers(cwd, buildVersion string, trusted bool) configLayers {
 		_ = os.Unsetenv(k)
 	}
 
-	file, err := config.LoadFileConfig(config.FileConfigPath())
+	file, retired, err := config.LoadFileConfigWithWarnings(config.FileConfigPath())
 	if err != nil {
 		messages = append(messages, err.Error())
 	}
+	messages = append(messages, retired...)
 	// The pigorc's options are folded into the decoded file first, so a script
 	// option beats the file's value while an explicit CLI flag still beats both.
 	messages = append(messages, pigorc.ApplyToFileConfig(&file)...)

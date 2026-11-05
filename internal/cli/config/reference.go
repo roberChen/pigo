@@ -77,7 +77,6 @@ var providerFieldDocs = []fieldDoc{
 	{"credential", "string", "Named credential in $PIGO_HOME/.credentials.yaml."},
 	{"auth", "string", "Credential attachment: bearer (default) or x-api-key."},
 	{"models", "[]string", "Model ids this provider serves; the first is the bare-name default."},
-	{"supports_images", "bool", "Declare that this provider's models accept image input. Default false: a custom endpoint is assumed text-only, so images are flattened before the request instead of failing the whole turn."},
 }
 
 // modelFieldDocs documents every field of ModelConfig.
@@ -85,7 +84,7 @@ var modelFieldDocs = []fieldDoc{
 	{"id", "string", "Model id sent on the wire. Required."},
 	{"provider", "string", "Provider that serves it; must exist as a built-in or a [[providers]] entry."},
 	{"display_name", "string", "Label in the /model picker; defaults to id."},
-	{"supports_images", "bool", "Declare this id a vision model (true) or text-only (false). Omitted inherits the provider's setting."},
+	{"supports_images", "bool", "Declare this id a vision model (true) or text-only (false). This is the only image-capability setting: a provider has none, because one gateway serves both kinds. Omitted means pigo's default for the provider kind (text-only for a custom endpoint, vision-capable for a built-in one)."},
 }
 
 // agentFieldDocs documents every field of AgentConfig.
@@ -222,16 +221,18 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("A defined provider behaves like a built-in one: `--provider <name>`, model-id inference,\n")
 	b.WriteString("a bare `--model <name>` (first listed model), `/model` and the preset picker all see it.\n")
 	b.WriteString("A provider describes an endpoint; declare models separately to give one id its own\n")
-	b.WriteString("capabilities. `supports_images` here is the default for the provider's models.\n\n")
+	b.WriteString("capabilities. Image support is declared on the model, never on the provider: one gateway\n")
+	b.WriteString("routinely serves both vision and text-only ids.\n\n")
 	writeFieldTable(&b, "field", providerFieldDocs)
 	b.WriteString("\n")
 
 	b.WriteString("## Models (`model add` / `[[models]]`)\n\n")
 	b.WriteString("Models are declared independently of the provider table, so one gateway can serve both\n")
-	b.WriteString("vision and text-only models. A model-level `supports_images` overrides the provider's\n")
-	b.WriteString("setting and decides whether `view_image` (and `read` on an image file) hands the picture\n")
-	b.WriteString("to the model or reports it back as text. Omitting the key inherits the provider default:\n")
-	b.WriteString("`false` for a custom endpoint, `true` for a built-in one.\n\n")
+	b.WriteString("vision and text-only models. `supports_images` is the only image-capability setting and\n")
+	b.WriteString("decides whether `view_image` (and `read` on an image file) hands the picture to the model\n")
+	b.WriteString("or reports it back as text. Omitting the key leaves pigo's default for the provider kind:\n")
+	b.WriteString("`false` for a custom endpoint, `true` for a built-in one. Declare the vision ids of a\n")
+	b.WriteString("custom gateway explicitly, since its default is text-only.\n\n")
 	writeFieldTable(&b, "field", modelFieldDocs)
 	b.WriteString("\n")
 

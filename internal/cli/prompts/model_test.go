@@ -143,3 +143,75 @@ func TestModelsFetchDegrades(t *testing.T) {
 		t.Errorf("live.Model = %q, want unchanged", live.Model)
 	}
 }
+
+// TestModelCommandShowsImageSupport: /model reports the active model's image
+// capability and where it came from. Image support is declared per model, so the
+// line must distinguish a declaration from pigo's default instead of printing a
+// bare yes/no — a "no" on a custom endpoint is actionable (declare the vision
+// ids), a "no" from a declaration is deliberate.
+func TestModelCommandShowsImageSupport(t *testing.T) {
+	live := &cli.LiveConfig{Model: "glm-5.2", ProviderName: "zai"}
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, provider.NewCredentialStore(nil))
+
+	out, err := reg.ResolveOutcome("/model")
+	if err != nil {
+		t.Fatalf("ResolveOutcome /model: %v", err)
+	}
+	if !strings.Contains(out.Message, "image input: supported (built-in default)") {
+		t.Errorf("message = %q, want a built-in default to read as supported", out.Message)
+	}
+
+	// A switch reports the new model's capability in the same breath.
+	live.FetchedModels = nil
+	out, err = reg.ResolveOutcome("/model deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("ResolveOutcome /model deepseek-v4-pro: %v", err)
+	}
+	if !strings.Contains(out.Message, "image input: supported") {
+		t.Errorf("message = %q, want the switched model's image capability", out.Message)
+	}
+}
+
+// TestModelCommandReportsDeclaredTextOnly: an explicit declaration is echoed as
+// such, with the way out (declare another model or use a vision one).
+func TestModelCommandReportsDeclaredTextOnly(t *testing.T) {
+	text := false
+	provider.RegisterDeclaredModels("openai", []provider.DeclaredModel{
+		{ID: "decltest-text-only-toggle", SupportsImages: &text},
+	})
+	t.Cleanup(func() { provider.RegisterDeclaredModels("openai", nil) })
+
+	live := &cli.LiveConfig{Model: "decltest-text-only-toggle", ProviderName: "openai"}
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, provider.NewCredentialStore(nil))
+
+	out, err := reg.ResolveOutcome("/model")
+	if err != nil {
+		t.Fatalf("ResolveOutcome /model: %v", err)
+	}
+	if !strings.Contains(out.Message, "image input: not supported (declared text-only)") {
+		t.Errorf("message = %q, want the declaration named as the source", out.Message)
+	}
+}
+
+// TestImageSupportSummaryCustomEndpoint: an undeclared model on a user-defined
+// endpoint is text-only by default, and the message says how to opt in.
+func TestImageSupportSummaryCustomEndpoint(t *testing.T) {
+	if err := provider.RegisterCustomProvider(provider.ProviderSpec{
+		Name:           "imgsummary-custom",
+		Protocol:       provider.ProtocolOpenAI,
+		DefaultBaseURL: "https://gw.imgsummary.test/v1",
+	}, nil, ""); err != nil {
+		t.Fatalf("register custom provider: %v", err)
+	}
+	t.Cleanup(func() { provider.UnregisterCustomProvider("imgsummary-custom") })
+
+	got := imageSupportSummary("imgsummary-custom", "some-text-model")
+	if !strings.Contains(got, "not supported (custom endpoint default)") {
+		t.Errorf("summary = %q, want the custom default named", got)
+	}
+	if !strings.Contains(got, "--supports-images") {
+		t.Errorf("summary = %q, want the way to declare vision ids", got)
+	}
+}

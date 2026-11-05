@@ -316,7 +316,26 @@ model add mycorp-text --provider mycorp --no-supports-images
 model remove mycorp-vl                     # 取消
 ```
 
-`supports_images` 正是 `view_image` 工具（以及 `read` 读图片文件时）的拦截依据：为 `true` 时把图片交给模型；为 `false` 时不发送图片，而是把"图片存在但未展示"的说明文字返回给模型（避免整轮请求被网关拒绝）。省略该键则继承 Provider 的 `supports_images`：自定义端点默认 `false`，内置 Provider 默认 `true`。模型级声明优先于 Provider 级声明，因此也能为**内置 Provider** 声明新增的 vision 模型，无需等 pigo 更新预置目录。指向不存在的 Provider 的 `[[models]]` 会在启动时告警并跳过。
+`supports_images` 是**唯一的**图像能力开关，它只存在于模型级：Provider 级没有这个设置，因为一个网关通常同时提供 vision 和纯文本 id，任何"整个端点支持/不支持"的声明都会对其中一半说错。它为 `true` 时把图片交给模型；为 `false` 时不发送图片，而是把"图片存在但未展示"的说明文字返回给模型（避免整轮请求被网关拒绝）。
+
+省略该键时按 Provider 种类取默认值：**自定义端点默认 `false`**（无法探测，且图像块被拒会让整轮失败，所以它的 vision 模型需要显式声明），**内置 Provider 默认 `true`**（预置目录里的模型本来就按多模态处理）。因此也能为**内置 Provider** 声明新增的 vision 模型，无需等 pigo 更新预置目录。指向不存在的 Provider 的 `[[models]]` 会在启动时告警并跳过。
+
+旧的 Provider 级 `supports_images` 不再生效（TOML 会静默忽略未知键，所以 pigo 会主动提示它该搬去哪），启动时看到这条提示就把它移到 `[[models]]` 里。
+
+当前模型到底能不能看图，不必翻配置：`/model` 和 `/status` 会直接打印结论与来源，例如 `image input: supported (built-in default)`、`image input: not supported (custom endpoint default)`（并提示用 `model add ... --supports-images` 声明）、`image input: not supported (declared text-only)`（你自己钉死的）。`/models` 列表里也会给纯文本模型标上 `[text only]`。
+
+声明只是"相信"：网关可能把一个 model id 挂在纯文本部署上，悄悄把请求转到别的后端，或者直接用一个看不懂的错误（`400 Bad Request`、非英文提示、pigo 没见过的错误结构）拒掉请求。**靠错误文本判断"是不是图片的问题"会漏判**，而漏判的代价很大：图片留在 history 里，之后每一次请求（包括下一轮对话、下次启动的会话）都会以同样方式失败。
+
+因此 pigo 有一个运行时兜底，但它的作用场景很窄，且**完全不读错误文本**——满足下面全部条件才修复：
+
+1. **本次请求之前会话里没有任何图片**（不剥夺模型已经看过的上下文）；
+2. **本次请求通过工具调用新增了图片**（`view_image`，或 `read` 读图片文件）——这是唯一会被怀疑的对象；
+3. **模型不是用户在 `[[models]]` 里显式声明为视觉的**（显式声明以用户为准，pigo 不去推翻）；
+4. 本次运行还没有修复过（每个运行最多一次）。
+
+命中时：这些工具调用被改写为失败（保留"看过哪个文件"的文字并引用上游错误），随后**不带图片重试这一轮**。修复只作用于这一轮——**不会**给本次运行装一个"禁止图片"的闸门：之后的 `view_image`/`read` 照常把图片交给模型，如果端点仍然拒绝，模型会从 API 返回的错误里自己看到并决定下一步（换模型、让你贴文字、或者放弃）。是否"这个端点根本不能看图"由模型判断，pigo 不在背后替它做决定。
+
+以下情况错误照旧终止：会话之前已有图片、用户自己贴的图（`--image` 或粘贴）、失败的那次请求没新增图片、显式声明 vision 的模型、已取消的运行、以及本来就没有图片的运行。重试仍失败时同样终止。
 
 **使用例子：**
 
