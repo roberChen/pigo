@@ -484,9 +484,7 @@ func encodeResponsesRequest(req CompletionRequest) ([]byte, error) {
 	}
 
 	items := make([]map[string]any, 0, len(req.Context.Messages))
-	for _, m := range repairToolCallHistory(req.Context.Messages) {
-		items = append(items, encodeResponsesMessage(m)...)
-	}
+	items = appendResponsesHistory(items, repairToolCallHistory(req.Context.Messages))
 	body["input"] = items
 	return json.Marshal(body)
 }
@@ -520,6 +518,35 @@ func encodeResponsesTools(tools []agentcore.AgentTool) []map[string]any {
 		out = append(out, tool)
 	}
 	return out
+}
+
+// appendResponsesHistory encodes a history onto the Responses input, keeping the
+// function_call_output items of one batch adjacent.
+//
+// A tool result can expand into the output item plus a follow-up message carrying
+// images the tool returned (see encodeResponsesMessage). Emitting that message
+// immediately would place it between the outputs of a parallel batch; the
+// carry-ins are deferred until the batch ends so every call keeps its output.
+func appendResponsesHistory(items []map[string]any, history agentcore.MessageList) []map[string]any {
+	var carry []map[string]any
+	flush := func() {
+		if len(carry) > 0 {
+			items = append(items, carry...)
+			carry = nil
+		}
+	}
+	for _, m := range history {
+		if tr, ok := m.(agentcore.ToolResultMessage); ok {
+			parts := encodeResponsesMessage(tr)
+			items = append(items, parts[0])
+			carry = append(carry, parts[1:]...)
+			continue
+		}
+		flush()
+		items = append(items, encodeResponsesMessage(m)...)
+	}
+	flush()
+	return items
 }
 
 // encodeResponsesMessage replays one pigo message as its Responses input item(s).

@@ -114,9 +114,7 @@ func encodeOpenAIRequest(req CompletionRequest) ([]byte, error) {
 	if sp := req.Context.SystemPrompt; sp != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": sp})
 	}
-	for _, m := range repairToolCallHistory(req.Context.Messages) {
-		msgs = append(msgs, encodeOpenAIMessage(m)...)
-	}
+	msgs = appendOpenAIHistory(msgs, repairToolCallHistory(req.Context.Messages))
 	body := map[string]any{
 		"model":          req.Model,
 		"messages":       msgs,
@@ -134,6 +132,44 @@ func encodeOpenAIRequest(req CompletionRequest) ([]byte, error) {
 		body["tools"] = tools
 	}
 	return json.Marshal(body)
+}
+
+// appendOpenAIHistory encodes a history onto the Chat Completions wire, keeping
+// the tool messages of one batch contiguous.
+//
+// A tool result can expand into two wire entries: the role:"tool" message and a
+// follow-up user message carrying images the tool returned (see
+// encodeOpenAIMessage). Emitting the follow-up immediately would place it
+// *between* the tool messages of a parallel batch, and this wire pairs results
+// positionally — an assistant tool_calls turn must be followed directly by one
+// tool message per call. The calls after the image would then be reported as
+// having no output ("No tool output found for tool call …") and the whole
+// request would fail, permanently, because replays hit the same ordering.
+//
+// The carry-ins are therefore deferred until the batch ends. A user message
+// after the last tool message is still valid; one in the middle is not.
+func appendOpenAIHistory(msgs []map[string]any, history agentcore.MessageList) []map[string]any {
+	var carry []map[string]any
+	flush := func() {
+		if len(carry) > 0 {
+			msgs = append(msgs, carry...)
+			carry = nil
+		}
+	}
+	for _, m := range history {
+		// Every tool result keeps its tool entry in the batch, whether or not it
+		// also produces a carry-in; only a non-tool message ends the batch.
+		if tr, ok := m.(agentcore.ToolResultMessage); ok {
+			parts := encodeOpenAIMessage(tr)
+			msgs = append(msgs, parts[0])
+			carry = append(carry, parts[1:]...)
+			continue
+		}
+		flush()
+		msgs = append(msgs, encodeOpenAIMessage(m)...)
+	}
+	flush()
+	return msgs
 }
 
 // openAIReasoningEffort maps the unified ThinkingLevel onto the OpenAI
@@ -197,10 +233,18 @@ func encodeOpenAIMessage(m agentcore.Message) []map[string]any {
 		}
 		return []map[string]any{entry}
 	case agentcore.ToolResultMessage:
+		imgs := imageOnlyList(msg.Content)
+		text := agentcore.ContentToText(msg.Content)
+		if text == "" && len(imgs) > 0 {
+			// The tool returned a picture and nothing else. An empty tool message
+			// reads as a missing output to some gateways, so leave the descriptor
+			// that names where the picture came from.
+			text = "Image output from " + displayToolName(msg.ToolName)
+		}
 		tool := map[string]any{
 			"role":         "tool",
 			"tool_call_id": msg.ToolCallID,
-			"content":      agentcore.ContentToText(msg.Content),
+			"content":      text,
 		}
 		// The Chat Completions tool role carries text only, so an image a tool
 		// returned (view_image, a read of a screenshot) would otherwise vanish
@@ -208,7 +252,7 @@ func encodeOpenAIMessage(m agentcore.Message) []map[string]any {
 		// a follow-up user message right after the tool result: the pairing with
 		// tool_call_id stays intact and the image reaches the model as ordinary
 		// multimodal input, which every VL gateway accepts.
-		if imgs := imageOnlyList(msg.Content); len(imgs) > 0 {
+		if len(imgs) > 0 {
 			return []map[string]any{tool, {
 				"role":    "user",
 				"content": openAIUserContent(withImageNote(imgs, msg.ToolName)),
@@ -624,12 +668,18 @@ func imageOnlyList(content agentcore.ContentList) agentcore.ContentList {
 // from, so the follow-up user message is self-describing instead of a bare
 // picture the model must guess the provenance of.
 func withImageNote(imgs agentcore.ContentList, toolName string) agentcore.ContentList {
-	if toolName == "" {
-		toolName = "a tool"
-	}
 	out := make(agentcore.ContentList, 0, len(imgs)+1)
-	out = append(out, agentcore.NewTextContent("Image output from "+toolName+":"))
+	out = append(out, agentcore.NewTextContent("Image output from "+displayToolName(toolName)+":"))
 	return append(out, imgs...)
+}
+
+// displayToolName names the tool a picture came from in a sentence, falling back
+// to "a tool" when the result carries no name.
+func displayToolName(toolName string) string {
+	if toolName == "" {
+		return "a tool"
+	}
+	return toolName
 }
 
 // contextHasImage reports whether any message in the context carries an image

@@ -8,6 +8,7 @@ package provider
 // or a text-only model would silently accept a call whose point was the picture.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -234,5 +235,160 @@ func TestImageOnlyListFindsImages(t *testing.T) {
 	}
 	if _, ok := got[0].(agentcore.ImageContent); !ok {
 		t.Errorf("block = %T, want ImageContent", got[0])
+	}
+}
+
+// parallelImageBatch builds the history of one assistant turn that dispatched two
+// calls in parallel, the first of which returned a picture. The image carry-in
+// must not be spliced between the two tool results: both wires pair a call with
+// its output positionally, so an interleaved user message makes the second call
+// look unanswered ("No tool output found for tool call …") and fails the request.
+func parallelImageBatch() agentcore.MessageList {
+	return agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("look at the shot")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{
+			agentcore.ToolCallContent{ID: "call_img", Name: "view_image", Arguments: json.RawMessage(`{"path":"shot.png"}`)},
+			agentcore.ToolCallContent{ID: "call_txt", Name: "read", Arguments: json.RawMessage(`{"path":"main.go"}`)},
+		}},
+		imageToolResult("view_image"),
+		agentcore.ToolResultMessage{
+			RoleField:  agentcore.RoleToolResult,
+			ToolCallID: "call_txt",
+			ToolName:   "read",
+			Content:    agentcore.ContentList{agentcore.NewTextContent("package main")},
+		},
+	}
+}
+
+// TestOpenAIParallelToolResultsStayContiguous pins the ordering invariant for the
+// Chat Completions wire: the tool entries of one batch are adjacent, and the image
+// carry-in follows the whole batch rather than splitting it.
+func TestOpenAIParallelToolResultsStayContiguous(t *testing.T) {
+	body, err := encodeOpenAIRequest(CompletionRequest{Context: LlmContext{Messages: parallelImageBatch()}})
+	if err != nil {
+		t.Fatalf("encodeOpenAIRequest: %v", err)
+	}
+	var parsed struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var toolStart, toolEnd = -1, -1
+	var toolIDs []any
+	for i, m := range parsed.Messages {
+		if m["role"] != "tool" {
+			continue
+		}
+		if toolStart < 0 {
+			toolStart = i
+		}
+		if toolEnd >= 0 && i != toolEnd+1 {
+			t.Fatalf("tool entries are not contiguous: %d follows %d\n%#v", i, toolEnd, parsed.Messages)
+		}
+		toolEnd = i
+		toolIDs = append(toolIDs, m["tool_call_id"])
+	}
+	if len(toolIDs) != 2 || toolIDs[0] != "call_img" || toolIDs[1] != "call_txt" {
+		t.Fatalf("tool entries = %#v, want both calls in order", toolIDs)
+	}
+
+	// The carry-in must still be present, after the batch so the pairing holds.
+	carryAt := -1
+	for i, m := range parsed.Messages {
+		if m["role"] != "user" {
+			continue
+		}
+		if parts, ok := m["content"].([]any); ok {
+			for _, p := range parts {
+				if part, ok := p.(map[string]any); ok && part["type"] == "image_url" {
+					carryAt = i
+				}
+			}
+		}
+	}
+	if carryAt < 0 {
+		t.Fatal("the image carry-in disappeared from the request")
+	}
+	if carryAt <= toolEnd {
+		t.Fatalf("image carry-in at %d splits the tool batch ending at %d\n%#v", carryAt, toolEnd, parsed.Messages)
+	}
+}
+
+// TestResponsesParallelToolResultsStayContiguous pins the same invariant for the
+// Responses wire.
+func TestResponsesParallelToolResultsStayContiguous(t *testing.T) {
+	body, err := encodeResponsesRequest(CompletionRequest{Context: LlmContext{Messages: parallelImageBatch()}})
+	if err != nil {
+		t.Fatalf("encodeResponsesRequest: %v", err)
+	}
+	var parsed struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var outStart, outEnd = -1, -1
+	var outputIDs []any
+	for i, item := range parsed.Input {
+		if item["type"] != "function_call_output" {
+			continue
+		}
+		if outStart < 0 {
+			outStart = i
+		}
+		if outEnd >= 0 && i != outEnd+1 {
+			t.Fatalf("output items are not contiguous: %d follows %d\n%#v", i, outEnd, parsed.Input)
+		}
+		outEnd = i
+		outputIDs = append(outputIDs, item["call_id"])
+	}
+	if len(outputIDs) != 2 || outputIDs[0] != "call_img" || outputIDs[1] != "call_txt" {
+		t.Fatalf("output items = %#v, want both calls in order", outputIDs)
+	}
+	if outStart < 0 || outEnd < 0 {
+		t.Fatal("no function_call_output items in the request")
+	}
+
+	carryAt := -1
+	for i, item := range parsed.Input {
+		if item["type"] != "message" || item["role"] != agentcore.RoleUser {
+			continue
+		}
+		parts, ok := item["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, p := range parts {
+			if part, ok := p.(map[string]any); ok && part["type"] == "input_image" {
+				carryAt = i
+			}
+		}
+	}
+	if carryAt < 0 {
+		t.Fatal("the image carry-in disappeared from the request")
+	}
+	if carryAt <= outEnd {
+		t.Fatalf("image carry-in at %d splits the output batch ending at %d\n%#v", carryAt, outEnd, parsed.Input)
+	}
+}
+
+// TestOpenAIImageOnlyToolResultIsNotEmpty: a result holding only a picture still
+// carries a descriptor, so the tool entry never looks like a missing output.
+func TestOpenAIImageOnlyToolResultIsNotEmpty(t *testing.T) {
+	msg := agentcore.ToolResultMessage{
+		RoleField:  agentcore.RoleToolResult,
+		ToolCallID: "call_img",
+		ToolName:   "view_image",
+		Content:    agentcore.ContentList{agentcore.NewImageContent("QUJD", "image/png")},
+	}
+	out := encodeOpenAIMessage(msg)
+	if len(out) != 2 {
+		t.Fatalf("entries = %d, want the tool entry plus a carry-in", len(out))
+	}
+	if s, ok := out[0]["content"].(string); !ok || s == "" {
+		t.Fatalf("tool content = %#v, want a non-empty descriptor", out[0]["content"])
 	}
 }
