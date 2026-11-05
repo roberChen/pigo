@@ -220,7 +220,16 @@ func ResolveNamedProvider(name, model, baseURL, protocol string, env func(string
 	// Base-URL precedence (US-004 / FR-8, FR-9): --base-url flag > provider-
 	// specific base-url env var(s) > generic <PROVIDER>_BASE_URL > spec default.
 	url := ResolveBaseURL(spec, baseURL, env)
-	models := []Model{{Provider: spec.Name, ID: model, SupportsImages: true}}
+	// A custom provider's image capability is whatever the user declared (default
+	// off, see ProviderSpec.SupportsImages); a built-in provider keeps its
+	// historical permissive default. That flag reaches checkImageSupport, so an
+	// undeclared text-only gateway fails with a clear message instead of a wire
+	// error.
+	supportsImages := true
+	if IsCustomProvider(spec.Name) {
+		supportsImages = spec.SupportsImages
+	}
+	models := []Model{{Provider: spec.Name, ID: model, SupportsImages: supportsImages}}
 	// Note: spec.ExtraHeaders would be attached here, but the exported generic
 	// constructors do not yet accept custom headers; all built-in specs currently
 	// carry no ExtraHeaders, so this is a no-op today (refined alongside #188).

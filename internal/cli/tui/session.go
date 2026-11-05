@@ -114,6 +114,11 @@ type runSession struct {
 	// before the first run and after a run is cancelled.
 	cancelRun context.CancelFunc
 
+	// pendingNotice is a note startRun queues onto the run's event channel just
+	// before the first event (currently: the prompt attached an image the model
+	// cannot accept). It is set while assembling the turn and cleared once queued.
+	pendingNotice string
+
 	// lastBtw is the /btw side thread's context from this process and
 	// lastBtwBase the background-message index it diverged from. Both are
 	// carried on the Host contract for parity with the REPL; the TUI does not
@@ -220,6 +225,12 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
 	}
+	// Bind the tools' image gate to the live model rather than a snapshot, so a
+	// /model switch to a text-only model stops read/view_image handing it a
+	// picture (which the wire would reject) without rebuilding the tool set.
+	run.AttachImageCapability(opts.Tools, func() bool {
+		return provider.ModelSupportsImages(live.ProviderName, live.Model)
+	})
 
 	// Project trust (US-018, #134): load the persisted trust store for the
 	// launch directory, mirroring the REPL. A load failure (or an unresolvable
@@ -496,6 +507,15 @@ func (s *runSession) startRun(prompt string) (chan tea.Msg, tea.Cmd) {
 		// raw prompt as plain text so the run still starts.
 		content = agentcore.ContentList{agentcore.NewTextContent(prompt)}
 	}
+	// Tell the user up front when their prompt attached an image the selected
+	// model cannot accept: the request layer strips it, so without this notice a
+	// normal answer would look like the picture had been read.
+	if agentcore.ContentHasImage(content) &&
+		!provider.ModelSupportsImages(s.live.ProviderName, s.live.Model) {
+		s.pendingNotice = s.live.Model + " does not accept image input; the attached image was not sent"
+	} else {
+		s.pendingNotice = ""
+	}
 	// UserPromptSubmit runs before the prompt is committed to the context: a block
 	// aborts the turn (emitting a runEndMsg carrying the reason) without leaving a
 	// dangling user message; additionalContext is injected into this turn only.
@@ -517,7 +537,14 @@ func (s *runSession) startRun(prompt string) (chan tea.Msg, tea.Cmd) {
 	// runEndMsg and the model returns to idle.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancelRun = cancel
-	return startRun(ctx, s.agentCtx, s.buildConfig(), s.onEvent)
+	ch, cmd := startRun(ctx, s.agentCtx, s.buildConfig(), s.onEvent)
+	if s.pendingNotice != "" {
+		// Queued before the pump's first event so the note precedes the answer in
+		// the transcript; the channel is buffered, so this cannot block.
+		ch <- noticeMsg{text: s.pendingNotice}
+		s.pendingNotice = ""
+	}
+	return ch, cmd
 }
 
 // interrupt cancels the in-flight run, if any. It is bound to Model.interruptFn

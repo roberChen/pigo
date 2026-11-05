@@ -83,6 +83,13 @@ func Run(ctx context.Context, p RunParams, out, errOut io.Writer) int {
 	// An explicit --api-key overrides env/config for the resolved provider.
 	creds := provider.NewCredentialStore(nil)
 	creds.SetOverride(env.ProviderName, p.APIKey)
+	// A headless run has one fixed model, so a snapshot is enough (unlike the
+	// interactive drivers, where /model can switch mid-session). It keeps
+	// read/view_image from returning an image block a text-only model's wire
+	// would reject, and tells the model what the file was instead.
+	run.AttachImageCapability(env.Tools, func() bool {
+		return provider.ModelSupportsImages(env.ProviderName, p.Model)
+	})
 	runCfg := run.NewConfig(p.Model, env.ProviderName, thinking, env.Provider, creds, run.ToolRegistry(env.Tools), run.TodoReminders(env.Tools), env.Schedule, env.SubAgentJobs, env.MCP)
 	runCfg.SessionID = hs.header.ID
 	// Route auto-compaction checkpoints to the shared memory root so a rebuild can

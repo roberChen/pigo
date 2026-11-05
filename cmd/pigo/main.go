@@ -429,6 +429,7 @@ func registerConfiguredProviders(defs []config.ProviderConfig) []string {
 			Protocol:       strings.TrimSpace(def.Protocol),
 			DefaultBaseURL: strings.TrimSpace(def.BaseURL),
 			AuthScheme:     strings.TrimSpace(def.Auth),
+			SupportsImages: def.SupportsImages,
 		}
 		if envVar := strings.TrimSpace(def.EnvVar); envVar != "" {
 			spec.EnvVars = []string{envVar}

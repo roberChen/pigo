@@ -88,6 +88,11 @@ no_skills = false
 # credential = "mycorp-work"               # name in ~/.pigo/.credentials.yaml
 # auth       = "bearer"                    # bearer | x-api-key
 # models     = ["mycorp-large", "mycorp-small"]  # first one is the default
+# supports_images = false                  # declare image input; default false
+#   A hand-configured endpoint cannot be introspected, so image support is
+#   opt-in: with the default, an image block is refused with a clear error
+#   rather than sent to a gateway that would reject the request. Built-in
+#   providers are unaffected (their capability comes from the preset table).
 
 # --- MCP servers (array of tables) ---
 # Connect external Model Context Protocol servers; their tools are exposed to the

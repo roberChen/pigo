@@ -115,6 +115,11 @@ type ProviderConfig struct {
 	// Models lists the model ids this provider serves. The first one is the
 	// default, so `--model <name>` (bare provider name) selects it.
 	Models []string `toml:"models"`
+	// SupportsImages declares that this provider's models accept image input.
+	// Hand-configured endpoints cannot be introspected, so image support is
+	// opt-in: the default is false, and an image block is then reported as an
+	// error instead of being sent to a gateway that would reject the request.
+	SupportsImages bool `toml:"supports_images"`
 }
 
 // DreamConfig is the [dream] TOML table for /dream memory consolidation.

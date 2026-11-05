@@ -180,6 +180,12 @@ func Run(opts Options) error {
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
 	}
+	// Bind the tools' image gate to the live model rather than a snapshot, so a
+	// /model switch to a text-only model stops read/view_image handing it a
+	// picture (which the wire would reject) without rebuilding the tool set.
+	run.AttachImageCapability(opts.Tools, func() bool {
+		return provider.ModelSupportsImages(live.ProviderName, live.Model)
+	})
 
 	// Project trust (US-018, #134): load the persisted trust store for the
 	// launch directory. A load failure (e.g. a corrupted trust.json) is

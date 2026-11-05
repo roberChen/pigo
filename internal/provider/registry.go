@@ -50,6 +50,14 @@ type ProviderSpec struct {
 	// variables (e.g. AZURE_OPENAI_BASE_URL), in precedence order. May be empty;
 	// the generic <PROVIDER>_BASE_URL convention is handled by callers.
 	BaseURLEnvVars []string
+	// SupportsImages declares that this provider's models accept image input.
+	// It is only meaningful for a user-defined provider (see
+	// RegisterCustomProvider): a hand-configured endpoint cannot be introspected,
+	// so image support must be opted into explicitly and is false by default.
+	// Built-in providers ignore it — their capability is fixed by the built-in
+	// preset table (see ResolveProvider), so a config entry can never downgrade
+	// them.
+	SupportsImages bool
 }
 
 // Protocol values.
@@ -395,6 +403,37 @@ func LookupProviderSpec(name string) (ProviderSpec, bool) {
 	defer registryMu.RUnlock()
 	spec, ok := providerRegistryByName[name]
 	return spec, ok
+}
+
+// IsCustomProvider reports whether name was registered from a user definition
+// (config.toml [[providers]] or a pigorc) rather than the built-in table. Only
+// custom providers can be reconfigured, so only their capabilities are
+// declarable.
+func IsCustomProvider(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return customProviders[name]
+}
+
+// ModelSupportsImages reports whether the selected model accepts image input.
+//
+// A manually configured provider must opt in: its endpoint cannot be
+// introspected, and sending an image block to a text-only gateway fails the
+// whole request, so the default is "no". Built-in providers are unaffected by
+// that rule — their capability comes from the built-in preset table and stays as
+// it always was, so a config entry can neither downgrade nor widen them.
+func ModelSupportsImages(providerName, model string) bool {
+	spec, ok := LookupProviderSpec(providerName)
+	if !ok {
+		// An unresolvable name (e.g. a routed OpenRouter id) keeps the
+		// permissive built-in default: unknown capability defers to the wire.
+		return true
+	}
+	if !IsCustomProvider(spec.Name) {
+		return true
+	}
+	return spec.SupportsImages
 }
 
 // RegisterCustomProvider adds a user-defined provider to the registry so it

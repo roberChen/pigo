@@ -52,7 +52,17 @@ type ReadTool struct {
 	// to read it, so the read tool must permit those paths (they are otherwise
 	// outside the workspace and rejected).
 	ExtraRoots []string
+	// ImagesSupported reports whether the active model accepts image input. It is
+	// called per execution rather than captured at assembly, so a /model switch
+	// takes effect immediately. Nil means "assume supported": the permissive
+	// default each built-in model has always had.
+	ImagesSupported func() bool
 }
+
+// SetImagesSupported installs the capability probe used by Execute. It exists so
+// a driver that rebuilds its tool set can attach the current model's capability
+// without knowing the concrete type.
+func (t *ReadTool) SetImagesSupported(f func() bool) { t.ImagesSupported = f }
 
 // readToolArgs is the decoded argument shape for ReadTool.
 type readToolArgs struct {
@@ -140,6 +150,15 @@ func (t *ReadTool) Execute(ctx context.Context, id string, args json.RawMessage,
 		img, err := imageload.Load(full)
 		if err != nil {
 			return errorResult("read: " + err.Error()), nil
+		}
+		// A model that cannot accept image input must not be handed one: the wire
+		// would reject the request. Tell it what the file is instead, so it can
+		// report the picture exists rather than failing the turn.
+		if t.ImagesSupported != nil && !t.ImagesSupported() {
+			return agentcore.AgentToolResult{Content: agentcore.ContentList{
+				agentcore.NewTextContent("read image " + imageload.Describe(a.Path, img) +
+					" (image not shown: the configured model does not accept image input)"),
+			}}, nil
 		}
 		return agentcore.AgentToolResult{Content: agentcore.ContentList{
 			img,

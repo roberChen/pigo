@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/smallnest/pigo/internal/agentcore"
@@ -172,5 +173,118 @@ func TestStreamResponseEarlyBuildFailure(t *testing.T) {
 	msg, _ := runStream(t, &agentcore.AgentContext{}, cfg)
 	if msg.StopReason != agentcore.StopReasonError {
 		t.Errorf("early build failure should yield error message, got %+v", msg)
+	}
+}
+
+// TestStreamResponseStripsImagesForTextOnlyModel covers Issue 3c: a resumed
+// session (or a mid-session /model switch) may hold images the current model
+// cannot accept. They must be flattened on the way to the provider — otherwise
+// the whole request fails at the wire — while the session's own message list
+// keeps them, so switching back to a vision model still sees the picture.
+func TestStreamResponseStripsImagesForTextOnlyModel(t *testing.T) {
+	const name = "runtime-image-test"
+	if err := provider.RegisterCustomProvider(provider.ProviderSpec{
+		Name:           name,
+		Protocol:       provider.ProtocolOpenAI,
+		DefaultBaseURL: "https://example.invalid/v1",
+		// SupportsImages deliberately left false: a custom endpoint is text-only
+		// unless it opts in.
+	}, nil, ""); err != nil {
+		t.Fatalf("register custom provider: %v", err)
+	}
+	t.Cleanup(func() { provider.UnregisterCustomProvider(name) })
+
+	img := agentcore.NewImageContent("aGk=", "image/png")
+	agentCtx := &agentcore.AgentContext{
+		Messages: agentcore.MessageList{
+			agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{
+				agentcore.NewTextContent("what is this?"),
+				img,
+			}},
+			agentcore.ToolResultMessage{Content: agentcore.ContentList{img}},
+		},
+	}
+
+	var sent provider.LlmContext
+	cfg := LoopConfig{
+		Model:    "text-only",
+		Provider: name,
+		Stream: func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+			sent = llm
+			s := provider.NewAssistantMessageEventStream(0)
+			go func() {
+				_ = s.Emit(ctx, provider.StreamDoneEvent{Message: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonEndTurn}})
+				s.Close()
+			}()
+			return s, nil
+		},
+	}
+
+	runStream(t, agentCtx, cfg)
+
+	if sent.Messages == nil {
+		t.Fatal("provider was never called")
+	}
+	for _, m := range sent.Messages {
+		switch v := m.(type) {
+		case agentcore.UserMessage:
+			if agentcore.ContentHasImage(v.Content) {
+				t.Error("user message still carried an image for a text-only model")
+			}
+		case agentcore.ToolResultMessage:
+			if agentcore.ContentHasImage(v.Content) {
+				t.Error("tool result still carried an image for a text-only model")
+			}
+		}
+	}
+	// The notice must be present so the model knows something was omitted.
+	found := false
+	if u, ok := sent.Messages[0].(agentcore.UserMessage); ok {
+		for _, c := range u.Content {
+			if tc, ok := c.(agentcore.TextContent); ok && strings.Contains(tc.Text, "image omitted") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("stripped message lacks the omission notice")
+	}
+
+	// The session keeps its images: only the LLM-bound copy was flattened.
+	if !agentcore.ContentHasImage(agentCtx.Messages[0].(agentcore.UserMessage).Content) {
+		t.Error("session history lost its image; switching back to a vision model would not recover it")
+	}
+}
+
+// TestStreamResponseKeepsImagesForVisionModel is the contrast case: a model that
+// accepts images receives them untouched.
+func TestStreamResponseKeepsImagesForVisionModel(t *testing.T) {
+	img := agentcore.NewImageContent("aGk=", "image/png")
+	agentCtx := &agentcore.AgentContext{
+		Messages: agentcore.MessageList{
+			agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{
+				agentcore.NewTextContent("what is this?"),
+				img,
+			}},
+		},
+	}
+	var sent provider.LlmContext
+	cfg := LoopConfig{
+		// An unresolvable provider/model pair keeps the permissive default, which
+		// is what every built-in model does.
+		Model: "fake",
+		Stream: func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+			sent = llm
+			s := provider.NewAssistantMessageEventStream(0)
+			go func() {
+				_ = s.Emit(ctx, provider.StreamDoneEvent{Message: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonEndTurn}})
+				s.Close()
+			}()
+			return s, nil
+		},
+	}
+	runStream(t, agentCtx, cfg)
+	if !agentcore.ContentHasImage(sent.Messages[0].(agentcore.UserMessage).Content) {
+		t.Error("vision model did not receive the image")
 	}
 }

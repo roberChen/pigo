@@ -28,7 +28,17 @@ type ViewImageTool struct {
 	// ExtraRoots are additional trusted directories (the skills dir), matching
 	// ReadTool so the model can view images referenced from a skill.
 	ExtraRoots []string
+	// ImagesSupported reports whether the active model accepts image input. It is
+	// called per execution rather than captured at assembly, so a /model switch
+	// takes effect immediately. Nil means "assume supported": the permissive
+	// default every built-in model has always had.
+	ImagesSupported func() bool
 }
+
+// SetImagesSupported installs the capability probe used by Execute. It exists so
+// a driver that rebuilds its tool set can attach the current model's capability
+// without knowing the concrete type.
+func (t *ViewImageTool) SetImagesSupported(f func() bool) { t.ImagesSupported = f }
 
 // viewImageToolArgs is the decoded argument shape for ViewImageTool.
 type viewImageToolArgs struct {
@@ -72,6 +82,10 @@ func (t *ViewImageTool) Execute(_ context.Context, _ string, args json.RawMessag
 	a, bad := decodeArgs[viewImageToolArgs](args, "view_image")
 	if bad != nil {
 		return *bad, nil
+	}
+	if t.ImagesSupported != nil && !t.ImagesSupported() {
+		return errorResult("view_image: the configured model does not accept image input; " +
+			"describe the file by path instead, or switch to a vision model"), nil
 	}
 	if a.Path == "" {
 		return errorResult("view_image: path is required"), nil

@@ -192,3 +192,65 @@ func TestReadToolTextFileStillText(t *testing.T) {
 		t.Errorf("text = %q, want the file contents", resultText(res))
 	}
 }
+
+// TestViewImageRefusedForTextOnlyModel: when the active model cannot accept image
+// input the tool must return a corrective message, not a block the wire would
+// reject. This is the tool-level gate from Issue 3b.
+func TestViewImageRefusedForTextOnlyModel(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	tool := &ViewImageTool{Root: dir, ImagesSupported: func() bool { return false }}
+	res := runViewImage(t, tool, map[string]any{"path": "shot.png"})
+	if img := imageBlockOf(res); img != nil {
+		t.Fatal("view_image returned an image block for a text-only model")
+	}
+	if text := resultText(res); !strings.Contains(text, "does not accept image input") {
+		t.Errorf("text = %q, want the capability explanation", text)
+	}
+}
+
+// TestViewImageProbeIsLive: the gate is a function, so a /model switch takes
+// effect on the next call without rebuilding the tool.
+func TestViewImageProbeIsLive(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	vision := false
+	tool := &ViewImageTool{Root: dir, ImagesSupported: func() bool { return vision }}
+	if res := runViewImage(t, tool, map[string]any{"path": "shot.png"}); imageBlockOf(res) != nil {
+		t.Fatal("image returned while the model was text-only")
+	}
+	vision = true
+	if res := runViewImage(t, tool, map[string]any{"path": "shot.png"}); imageBlockOf(res) == nil {
+		t.Fatal("no image returned after switching to a vision model")
+	}
+}
+
+// TestViewImageNilProbeKeepsDefault: a nil probe (a tool assembled without a
+// capability resolver) must keep the permissive behavior built-in models had.
+func TestViewImageNilProbeKeepsDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	res := runViewImage(t, &ViewImageTool{Root: dir}, map[string]any{"path": "shot.png"})
+	if imageBlockOf(res) == nil {
+		t.Fatal("a nil probe suppressed the image")
+	}
+}
+
+// TestReadToolImageBranchTextOnlyModel: read keeps the descriptor text (so the
+// model can report the file exists) but omits the picture.
+func TestReadToolImageBranchTextOnlyModel(t *testing.T) {
+	dir := t.TempDir()
+	writeToolPNG(t, dir, "shot.png")
+	tool := &ReadTool{Root: dir, ImagesSupported: func() bool { return false }}
+	res, _ := runRead(t, tool, map[string]any{"path": "shot.png"})
+	if img := imageBlockOf(res); img != nil {
+		t.Fatal("read attached an image block for a text-only model")
+	}
+	text := resultText(res)
+	if !strings.Contains(text, "read image") {
+		t.Errorf("text = %q, want the descriptor preserved", text)
+	}
+	if !strings.Contains(text, "does not accept image input") {
+		t.Errorf("text = %q, want the omission reason", text)
+	}
+}

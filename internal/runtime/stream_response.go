@@ -74,6 +74,14 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 	if cfg.ConvertToLlm != nil {
 		msgs = cfg.ConvertToLlm(msgs)
 	}
+	// 2.5 Drop images the selected model cannot accept. A resumed session may have
+	// been recorded against a vision model, and a mid-session /model switch can
+	// land on a text-only one; either way the wire would reject the whole request
+	// and take the turn down instead of the picture. The session keeps its images
+	// — only this LLM-bound copy is flattened, so switching back still sees them.
+	if !provider.ModelSupportsImages(cfg.Provider, cfg.Model) {
+		msgs = agentcore.StripImages(msgs)
+	}
 	// 3. shape the LLM context.
 	llm := provider.LlmContext{
 		SystemPrompt: agentCtx.SystemPrompt,

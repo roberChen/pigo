@@ -454,6 +454,25 @@ func ToolRegistry(tools []agentcore.AgentTool) *agenttool.ToolRegistry {
 	return reg
 }
 
+// AttachImageCapability installs the active model's image capability on the tools
+// that can hand the model a picture. The probe is a function, not a snapshot, so
+// a /model switch takes effect on the next tool call without rebuilding the tool
+// set. A nil probe leaves each tool's permissive default in place (built-in
+// models, which have always accepted images).
+func AttachImageCapability(tools []agentcore.AgentTool, supports func() bool) {
+	if supports == nil {
+		return
+	}
+	for _, t := range tools {
+		switch tool := t.(type) {
+		case *agenttool.ReadTool:
+			tool.SetImagesSupported(supports)
+		case *agenttool.ViewImageTool:
+			tool.SetImagesSupported(supports)
+		}
+	}
+}
+
 // TodoReminders builds the per-turn system-reminder registry for a tool set
 // (US-002): it locates the stateful TodoTool and registers a TodoReminderProvider
 // over its shared store, so the model is reminded of unfinished tasks each turn.

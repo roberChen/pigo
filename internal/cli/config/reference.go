@@ -77,6 +77,7 @@ var providerFieldDocs = []fieldDoc{
 	{"credential", "string", "Named credential in $PIGO_HOME/.credentials.yaml."},
 	{"auth", "string", "Credential attachment: bearer (default) or x-api-key."},
 	{"models", "[]string", "Model ids this provider serves; the first is the bare-name default."},
+	{"supports_images", "bool", "Declare that this provider's models accept image input. Default false: a custom endpoint is assumed text-only, so images are flattened before the request instead of failing the whole turn."},
 }
 
 // agentFieldDocs documents every field of AgentConfig.
