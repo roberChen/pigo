@@ -674,11 +674,11 @@ func (t *transcript) renderCurrent(i int) bool {
 		t.blocks[i].renderRev == t.renderRev(i)
 }
 
-// userPreviewLines / thinkingPreviewLines cap how much of a user turn and of a
-// thinking block the transcript shows. Both can be arbitrarily long (a pasted file,
-// a long chain of thought) and neither is the answer, so both are budgeted.
+// thinkingPreviewLines caps how much of a thinking block the transcript shows.
+// Reasoning can be arbitrarily long and is not the answer, so it is budgeted
+// (and clickable to reveal more). A user turn is deliberately *not* budgeted:
+// see renderUserTurn.
 const (
-	userPreviewLines     = 12
 	thinkingPreviewLines = 6
 	// thinkingExpandedLines is the ceiling once a thinking block is opened. It
 	// matches a tool card's ceiling: reasoning can run to thousands of rows, and
@@ -718,31 +718,27 @@ func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) st
 }
 
 // renderUserTurn renders a human turn behind a "▌ you" gutter: the label on the
-// first row, then one bar-prefixed row per wrapped line, capped at userPreviewLines
-// with a count of what is hidden. The gutter is what visually separates the human's
-// words from the model's, which matters most in a transcript where both are plain
-// text and a pasted block can look like an answer.
+// first row, then one bar-prefixed row per wrapped line. The gutter is what
+// visually separates the human's words from the model's, which matters most in a
+// transcript where both are plain text and a pasted block can look like an answer.
+//
+// The turn is rendered in full, however long it is. It used to be capped at a
+// dozen rows with a "… N more lines (see /export)" marker, which hid exactly the
+// content the human had just supplied and forced a detour through /export to read
+// their own paste back. Thinking blocks and tool output remain budgeted because
+// they are model/program output rather than the user's own input.
 func renderUserTurn(theme Theme, text string, width int) string {
 	bar := theme.User.Render("▌")
 	inner := width - 2 // the gutter takes a bar plus a space
 	if inner < 1 {
 		inner = 1
 	}
-	var rows []string
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		for _, row := range strings.Split(WrapToWidth(line, inner), "\n") {
-			rows = append(rows, row)
-		}
-	}
-	shown, hidden := clampStrings(rows, userPreviewLines, false)
-
 	var b strings.Builder
 	b.WriteString(bar + " " + theme.Accent.Render("you"))
-	for _, row := range shown {
-		b.WriteString("\n" + bar + " " + theme.User.Render(row))
-	}
-	if hidden > 0 {
-		b.WriteString("\n" + bar + " " + theme.System.Render(fmt.Sprintf("… %d more lines (see /export)", hidden)))
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		for _, row := range strings.Split(WrapToWidth(line, inner), "\n") {
+			b.WriteString("\n" + bar + " " + theme.User.Render(row))
+		}
 	}
 	return b.String()
 }

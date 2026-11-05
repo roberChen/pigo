@@ -1,6 +1,6 @@
 // Tests for the transcript's per-content display rules: a user turn carries its
-// "▌ you" gutter and is capped, reasoning renders as a dim capped block, and both
-// replay and live streaming produce the same shapes.
+// "▌ you" gutter and renders in full, reasoning renders as a dim capped block, and
+// both replay and live streaming produce the same shapes.
 package tui
 
 import (
@@ -39,26 +39,26 @@ func TestUserTurnHasGutter(t *testing.T) {
 	}
 }
 
-// TestUserTurnCapsLongInput verifies a huge paste (or pasted file) cannot flood the
-// transcript: the cap keeps the first rows and reports how many were hidden.
-func TestUserTurnCapsLongInput(t *testing.T) {
+// TestUserTurnRendersLongInputInFull verifies a long paste is shown in full: no
+// row is dropped and no "… N more lines" marker replaces the user's own input.
+func TestUserTurnRendersLongInputInFull(t *testing.T) {
 	tr := newTranscript(DefaultTheme())
 	tr.setSize(40, 60)
 	var b strings.Builder
-	for i := 0; i < userPreviewLines+5; i++ {
-		b.WriteString("line-")
-		b.WriteByte(byte('a' + i))
-		b.WriteByte('\n')
+	const lines = 40
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&b, "line-%02d\n", i)
 	}
 	tr.addUser(b.String())
 
 	out := stripANSI(tr.vp.GetContent())
-	last := "line-" + string(byte('a'+userPreviewLines+4)) // the final source line
-	if strings.Contains(out, last) {
-		t.Errorf("input past the cap should not render (%q found):\n%s", last, out)
+	for _, want := range []string{"line-00", fmt.Sprintf("line-%02d", lines-1)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("long input is missing %q; the turn must render in full:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(out, "more lines") {
-		t.Errorf("a capped input should say how much is hidden:\n%s", out)
+	if strings.Contains(out, "more lines") {
+		t.Errorf("long input still carries an elision marker:\n%s", out)
 	}
 }
 
