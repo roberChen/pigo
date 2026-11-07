@@ -89,7 +89,7 @@ func TestTaskEmitsSubAgentProgress(t *testing.T) {
 	ctx := agentcore.WithProgressEmitter(context.Background(), emit)
 
 	const parentID = "parent-call-id"
-	res, err := tool.Execute(ctx, parentID, json.RawMessage(`{"description":"read the file","prompt":"do the work"}`), nil)
+	res, err := tool.Execute(ctx, parentID, json.RawMessage(`{"description":"read the file","prompt":"do the work","mode":"sync"}`), nil)
 	if err != nil {
 		t.Fatalf("Execute err = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestTaskNilEmitterNoPanic(t *testing.T) {
 	tool := NewTaskTool(factory, nil, nil)
 
 	// Plain ctx: no WithProgressEmitter, so ProgressEmitterFromContext is nil.
-	res, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	res, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 	if err != nil {
 		t.Fatalf("Execute err = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestSubAgentEmitsEndEvent(t *testing.T) {
 		ctx := agentcore.WithProgressEmitter(context.Background(), emit)
 
 		const parentID = "parent-call"
-		if _, err := tool.Execute(ctx, parentID, json.RawMessage(`{"prompt":"work"}`), nil); err != nil {
+		if _, err := tool.Execute(ctx, parentID, json.RawMessage(`{"prompt":"work","mode":"sync"}`), nil); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 
@@ -215,7 +215,7 @@ func TestSubAgentEmitsEndEvent(t *testing.T) {
 		}
 		ctx = agentcore.WithProgressEmitter(ctx, emit)
 
-		if _, err := tool.Execute(ctx, "call-bg", json.RawMessage(`{"prompt":"work","background":true}`), nil); err != nil {
+		if _, err := tool.Execute(ctx, "call-bg", json.RawMessage(`{"prompt":"work","mode":"async"}`), nil); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		select {

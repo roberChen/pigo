@@ -1,8 +1,8 @@
-// This file implements background sub-agent jobs: a sub-agent dispatched with
-// `background: true` starts on its own goroutine, the tool call returns at once
+// This file implements async sub-agent jobs: a sub-agent dispatched with
+// `mode: "async"` starts on its own goroutine, the tool call returns at once
 // with a job id, and the child's report is delivered as a follow-up user turn when
-// it finishes (RunConfig.GetFollowUpMessages). The model can also poll or wait for
-// a job explicitly with the task_output tool.
+// it finishes (RunConfig.GetFollowUpMessages). The model can also poll, or wait for
+// one job or a whole batch, explicitly with the task_output tool.
 //
 // Lifetime: a job runs on the parent RUN's context, not the tool call's. It keeps
 // running while the parent does other work, and is cancelled when the run is
@@ -11,9 +11,9 @@
 // never silently dropped: the run ends only once every background job has been
 // reported (or the run is cancelled).
 //
-// Persistence is unchanged: a background child still writes its own session
-// (parented to this conversation), and its report carries the session id so the
-// parent can continue it later.
+// Persistence is unchanged: an async child still writes its own session (parented
+// to this conversation), and its report carries the session id so the parent can
+// continue it later.
 package runtime
 
 import (
@@ -200,6 +200,59 @@ func (j *subAgentJob) wait(ctx context.Context) bool {
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+// waitJobs waits until every job in jobs has settled or ctx is done, and reports
+// whether all of them settled. The jobs are awaited together, not one after the
+// other: the loop wakes on any registry state change, so a batch barrier returns
+// as soon as the last job finishes, whatever order they complete in. The caller's
+// slice is a snapshot - a job started after the call is not part of this barrier.
+func (r *SubAgentJobs) waitJobs(ctx context.Context, jobs []*subAgentJob) bool {
+	for {
+		// Capture the change channel before inspecting the jobs: a completion
+		// broadcasts by closing the captured channel, so a finish that races this
+		// check either leaves the job settled (loop exits) or closes the channel we
+		// are about to wait on (loop re-checks) - never a missed wakeup.
+		r.mu.Lock()
+		changed := r.changed
+		r.mu.Unlock()
+		pending := false
+		for _, job := range jobs {
+			if job == nil {
+				continue
+			}
+			job.mu.Lock()
+			running := job.status == JobRunning
+			job.mu.Unlock()
+			if running {
+				pending = true
+				break
+			}
+		}
+		if !pending {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// markRead marks settled jobs as delivered so their report is not injected again as
+// a follow-up turn. A job still running stays eligible: the caller only saw status.
+func (r *SubAgentJobs) markRead(jobs []*subAgentJob) {
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		job.mu.Lock()
+		if job.status != JobRunning {
+			job.delivered = true
+		}
+		job.mu.Unlock()
 	}
 }
 

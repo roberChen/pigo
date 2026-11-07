@@ -117,9 +117,12 @@ hooks and isolation. Sub-agents are complete agents — own context, own persist
 session (parented to the calling conversation, hidden from `/resume`), automatic
 compaction — and they never get the `question` tool. When a child needs a decision
 it says so in its report; ask the user yourself, then continue that child with the
-`session_id` its result reported. Add `"background": true` to a call to run it in
-the background: the report arrives as a follow-up message and `task_output` lists
-or waits for jobs.
+`session_id` its result reported. Every call must pass `"mode": "sync"` (the tool
+call blocks until the child reports) or `"mode": "async"` (the call returns a job
+id at once). Async reports arrive as follow-up messages; `task_output` reads or
+waits for one job (`job_id`), a batch of jobs (`job_ids` + `wait`, a fan-in
+barrier), or everything running at call time (`wait_all`). Process isolation
+supports `sync` only.
 
 **MCP servers.** `mcp add <name> --command CMD [--arg A ...] [--env K V ...]` for a
 stdio server, or `mcp add <name> --url URL [--header K V ...]` for an HTTP one

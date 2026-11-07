@@ -52,7 +52,7 @@ func TestSubAgentParentChildParent(t *testing.T) {
 		name:   "faux-parent",
 		models: []provider.Model{{Provider: "faux-parent", ID: "parent"}},
 		turns: []fauxTurn{
-			toolCallTurn("call-sub", "researcher", `{"prompt":"find the answer"}`),
+			toolCallTurn("call-sub", "researcher", `{"prompt":"find the answer","mode":"sync"}`),
 			textTurn("final: incorporated child result"),
 		},
 	}
@@ -122,12 +122,12 @@ func TestSubAgentConcurrent(t *testing.T) {
 	twoCall := fauxTurn{
 		provider.StreamStartEvent{Partial: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant}},
 		provider.StreamToolCallEvent{Partial: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{
-			agentcore.NewToolCallContent("c1", "agent-alpha", json.RawMessage(`{"prompt":"go"}`)),
-			agentcore.NewToolCallContent("c2", "agent-beta", json.RawMessage(`{"prompt":"go"}`)),
+			agentcore.NewToolCallContent("c1", "agent-alpha", json.RawMessage(`{"prompt":"go","mode":"sync"}`)),
+			agentcore.NewToolCallContent("c2", "agent-beta", json.RawMessage(`{"prompt":"go","mode":"sync"}`)),
 		}}},
 		provider.StreamDoneEvent{Message: agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
-			agentcore.NewToolCallContent("c1", "agent-alpha", json.RawMessage(`{"prompt":"go"}`)),
-			agentcore.NewToolCallContent("c2", "agent-beta", json.RawMessage(`{"prompt":"go"}`)),
+			agentcore.NewToolCallContent("c1", "agent-alpha", json.RawMessage(`{"prompt":"go","mode":"sync"}`)),
+			agentcore.NewToolCallContent("c2", "agent-beta", json.RawMessage(`{"prompt":"go","mode":"sync"}`)),
 		}}},
 	}
 	parent := &fauxProvider{
@@ -198,7 +198,7 @@ func TestSubAgentFailedChildErrors(t *testing.T) {
 			}
 		},
 	})
-	_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 	if err == nil {
 		t.Fatal("a child that stopped on error must surface as a tool error")
 	}

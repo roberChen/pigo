@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
@@ -162,29 +163,61 @@ type SubAgentSpec struct {
 	// cancelled and the call returns an error result, so a runaway sub-agent
 	// cannot hold the parent turn forever.
 	Timeout time.Duration
-	// Jobs, when non-nil, enables background execution for this agent: a call with
-	// `background: true` starts the run as a job and returns at once, and the job's
-	// report is delivered as a follow-up user turn. Nil means background calls are
+	// Jobs, when non-nil, enables async dispatch for this agent: a call with
+	// `mode: "async"` starts the run as a job and returns at once, and the job's
+	// report is delivered as a follow-up user turn. Nil means async calls are
 	// rejected with an explanatory error.
 	Jobs *SubAgentJobs
 }
 
 // subAgentArgs is the JSON argument shape for a sub-agent tool call: a
-// free-form prompt describing the delegated task, plus an optional short
-// description used for status display (accepted by the generic task tool;
-// ignored by prompt-only specs).
+// free-form prompt describing the delegated task, an explicit sync/async mode,
+// plus an optional short description used for status display (accepted by the
+// generic task tool; ignored by prompt-only specs).
 type subAgentArgs struct {
 	Prompt      string `json:"prompt"`
 	Description string `json:"description,omitempty"`
 	// SessionID continues an earlier run of the same sub-agent (the id its result
 	// reported). It must belong to this conversation and this agent.
 	SessionID string `json:"session_id,omitempty"`
-	// Background runs the child on its own goroutine and returns a job id at once;
-	// the report arrives later as a follow-up message.
-	Background bool `json:"background,omitempty"`
+	// Mode says how this dispatch relates to the parent turn: sync blocks for the
+	// report, async returns a job handle. It is required - there is no default,
+	// because "waited or not" changes how the model must collect the result.
+	Mode string `json:"mode,omitempty"`
 }
 
-// subAgentSchema is the JSON Schema validating a sub-agent invocation.
+// Dispatch modes for a sub-agent call. The model must name one explicitly: a
+// default would silently pick a collection strategy (block, or poll a job id the
+// model was never told to expect) on the model's behalf.
+const (
+	// SubAgentModeSync runs the child inside the tool call and returns its report
+	// when the call settles. Several sync calls in one assistant message still run
+	// in parallel and are awaited together by the batch executor.
+	SubAgentModeSync = "sync"
+	// SubAgentModeAsync starts the child on its own goroutine and returns a job id
+	// at once; the report arrives as a follow-up turn and can be collected with
+	// task_output (job_id/job_ids + wait, or wait_all).
+	SubAgentModeAsync = "async"
+)
+
+// parseSubAgentMode validates the required `mode` argument. An omitted mode is an
+// error rather than a default; the message names both accepted values so the model
+// can correct itself in one retry.
+func parseSubAgentMode(toolName, raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case SubAgentModeSync, SubAgentModeAsync:
+		return mode, nil
+	case "":
+		return "", fmt.Errorf("sub-agent %q: mode is required: pass %q to block until the sub-agent's report is returned, "+
+			"or %q to get a job id immediately and collect it later with task_output", toolName, SubAgentModeSync, SubAgentModeAsync)
+	default:
+		return "", fmt.Errorf("sub-agent %q: unknown mode %q (use %q or %q)", toolName, raw, SubAgentModeSync, SubAgentModeAsync)
+	}
+}
+
+// subAgentSchema is the JSON Schema validating a sub-agent invocation. `mode` is
+// required so every dispatch states whether it is synchronous or asynchronous.
 var subAgentSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -192,16 +225,17 @@ var subAgentSchema = json.RawMessage(`{
       "type": "string",
       "description": "The task for the sub-agent to perform, described in full since the sub-agent runs with a fresh context."
     },
+    "mode": {
+      "type": "string",
+      "enum": ["sync", "async"],
+      "description": "Required. \"sync\" runs the sub-agent inside this tool call and returns its report when it finishes; several sync calls in one message run in parallel and are awaited together. \"async\" starts it in the background and returns a job id immediately - collect the result with task_output (job_id or job_ids with wait, or wait_all)."
+    },
     "session_id": {
       "type": "string",
       "description": "Optional: continue an earlier run of this sub-agent by passing the session id its result reported, instead of starting from a fresh context."
-    },
-    "background": {
-      "type": "boolean",
-      "description": "Optional: run the sub-agent in the background and return a job id immediately. Its report arrives as a follow-up message; use task_output to check or wait for it."
     }
   },
-  "required": ["prompt"],
+  "required": ["prompt", "mode"],
   "additionalProperties": false
 }`)
 
@@ -247,8 +281,10 @@ func (t *SubAgentTool) ExecutionMode() agentcore.ToolExecutionMode {
 	return agentcore.ToolExecutionParallel
 }
 
-// Execute spawns the child agent run and blocks until it settles, then returns
-// the child's final assistant text as the tool result. The parent's ctx governs
+// Execute spawns the child agent run and waits for it (sync mode) or starts it as
+// a background job (async mode). The required `mode` argument makes that choice
+// explicit on every call. In sync mode it blocks until the child settles and
+// returns its final assistant text as the tool result. The parent's ctx governs
 // the child, so cancelling the parent run cancels in-flight sub-agents (in
 // goroutine mode via ctx; in process mode via ctx cancelling the JSON-RPC call
 // and Close killing the child).
@@ -270,6 +306,13 @@ func (t *SubAgentTool) Execute(ctx context.Context, id string, args json.RawMess
 	if a.Prompt == "" {
 		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: empty prompt", t.spec.Name)
 	}
+	// The dispatch mode is never inferred. A call without one is rejected here as
+	// well as by the schema, because Execute is also reachable without registry
+	// validation (direct callers, tests).
+	mode, err := parseSubAgentMode(t.spec.Name, a.Mode)
+	if err != nil {
+		return agentcore.AgentToolResult{}, err
+	}
 
 	if a.SessionID != "" {
 		// Continuation is a goroutine-mode feature: the in-process loop owns the
@@ -280,15 +323,15 @@ func (t *SubAgentTool) Execute(ctx context.Context, id string, args json.RawMess
 		}
 	}
 	if t.spec.Isolation == SubAgentIsolationProcess {
-		if a.Background {
-			return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: background execution is not supported in process isolation", t.spec.Name)
+		if mode == SubAgentModeAsync {
+			return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: async mode is not supported in process isolation; use mode %q", t.spec.Name, SubAgentModeSync)
 		}
 		// Process mode returns only the child's final text (the JSON-RPC protocol
 		// does not stream partial updates), so onUpdate is intentionally not
 		// forwarded here; a caller supplying a sink gets no deltas in this mode.
 		return t.executeProcess(ctx, a.Prompt)
 	}
-	if a.Background {
+	if mode == SubAgentModeAsync {
 		return t.startBackground(ctx, a.Prompt, a.Description, a.SessionID)
 	}
 	return t.executeGoroutine(ctx, id, a.Prompt, a.Description, a.SessionID, onUpdate)
@@ -324,7 +367,7 @@ func (t *SubAgentTool) executeGoroutine(ctx context.Context, id, prompt, descrip
 // with the run.
 func (t *SubAgentTool) startBackground(ctx context.Context, prompt, description, continueID string) (agentcore.AgentToolResult, error) {
 	if t.spec.Jobs == nil {
-		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: background execution is not configured for this run", t.spec.Name)
+		return agentcore.AgentToolResult{}, fmt.Errorf("sub-agent %q: mode %q is not configured for this run (no job registry wired)", t.spec.Name, SubAgentModeAsync)
 	}
 	job := t.spec.Jobs.Start(t.spec.Name, description, prompt, ctx, func(jctx context.Context, jobID string) (string, string, error) {
 		onActivity := func(activity string) {
@@ -336,12 +379,12 @@ func (t *SubAgentTool) startBackground(ctx context.Context, prompt, description,
 		// status panel can show a background child after its launch returned.
 		return t.runChild(jctx, jobID, prompt, description, continueID, nil, onActivity)
 	})
-	text := fmt.Sprintf("Started background sub-agent %q as %s.\n"+
-		"It keeps running while you continue; its report is delivered as a follow-up message when it finishes.\n"+
-		"Use task_output (job_id %q, wait true to block) to check on it.", t.spec.Name, job.ID(), job.ID())
+	text := fmt.Sprintf("Started sub-agent %q in the background (mode: async) as %s.\n"+
+		"It keeps running while you continue; its report is also delivered as a follow-up message when it finishes.\n"+
+		"Collect it with task_output: job_id %q (wait true to block), or job_ids with wait to await a batch, or wait_all for every running job.", t.spec.Name, job.ID(), job.ID())
 	return agentcore.AgentToolResult{
 		Content: agentcore.ContentList{agentcore.NewTextContent(text)},
-		Details: map[string]any{"jobId": job.ID(), "agent": t.spec.Name, "background": true},
+		Details: map[string]any{"jobId": job.ID(), "agent": t.spec.Name, "mode": SubAgentModeAsync},
 	}, nil
 }
 

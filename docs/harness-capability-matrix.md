@@ -134,7 +134,7 @@ steering 的触发/来源较薄；无标准化的运行时中断—引导 UX。
 
 ### 现有实现（已验证）
 
-`internal/runtime/subagent.go`：`SubAgentTool` 将 `SubAgentSpec` 适配为普通 `AgentTool`；支持 **goroutine**（默认，进程内）与 **process**（`pigo --subagent-rpc` 子进程 + stdio JSON-RPC）两种隔离；`RunSubAgentOnce` 为两者共享的执行核心；子 Agent 作为并行工具可并发运行，失败作为 tool error 回传父循环。
+`internal/runtime/subagent.go`：`SubAgentTool` 将 `SubAgentSpec` 适配为普通 `AgentTool`；支持 **goroutine**（默认，进程内）与 **process**（`pigo --subagent-rpc` 子进程 + stdio JSON-RPC）两种隔离；`RunSubAgentOnce` 为两者共享的执行核心；子 Agent 作为并行工具可并发运行，失败作为 tool error 回传父循环。派发必须声明 `mode`：`sync` 就地等待报告，`async` 立即返回 job id 并由 `task_output` 收取/等待（`job_ids`+`wait` 批次屏障、`wait_all`），报告也作为 follow-up 消息回灌；process 隔离仅支持 `sync`。
 
 ### 状态
 

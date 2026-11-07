@@ -174,6 +174,22 @@ interactive REPL/TUI.
   found under a provider is rejected with a message saying where it belongs.
 
 ### Added
+- **A sub-agent dispatch must now say what it wants: `mode: "sync"` or
+  `mode: "async"`, and batches can be awaited in one call**: `task` and every
+  custom agent tool used to take an optional `background: true`, which meant the
+  model silently picked a collection strategy — synchronous callers lost the
+  ability to parallelize, and async callers could fat-finger a flag they never
+  re-checked. `mode` is required in the schema (the registry rejects a call
+  without it) and it is also what decides the result: `sync` runs the child inside
+  the call and returns its report, `async` starts it as a job and returns the
+  job id. Two batch selectors joined `task_output`: `job_ids` with `wait: true` is
+  a fan-in barrier that returns every report at once, and `wait_all` awaits
+  everything running at call time — so a fan-out no longer costs one follow-up
+  model turn per child. A failed job in a batch is reported inline beside the
+  successful ones instead of turning the whole call into a tool error, and a
+  collected report counts as delivered (the follow-up seam no longer injects a
+  second copy). Process isolation supports only `sync` and says so when asked for
+  `async`.
 - **Images are first-class in the agent loop, not just in the prompt**: a vision
   model can now *see* a screenshot a tool produced, and a screenshot can be
   attached without typing reference syntax. `view_image` (new, read-only) loads a

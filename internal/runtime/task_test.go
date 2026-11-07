@@ -22,7 +22,8 @@ import (
 )
 
 // TestTaskToolContract pins the tool identity, parallel execution mode, and the
-// {description?, prompt} schema with prompt required.
+// {description?, prompt, mode} schema with prompt and mode required: a dispatch
+// must say whether it is synchronous or asynchronous.
 func TestTaskToolContract(t *testing.T) {
 	tool := NewTaskTool(func() RunConfig { return RunConfig{} }, nil, nil)
 	if tool.Name() != "task" {
@@ -35,6 +36,10 @@ func TestTaskToolContract(t *testing.T) {
 		Properties struct {
 			Description json.RawMessage `json:"description"`
 			Prompt      json.RawMessage `json:"prompt"`
+			Mode        struct {
+				Type string   `json:"type"`
+				Enum []string `json:"enum"`
+			} `json:"mode"`
 		} `json:"properties"`
 		Required []string `json:"required"`
 	}
@@ -44,8 +49,14 @@ func TestTaskToolContract(t *testing.T) {
 	if len(schema.Properties.Prompt) == 0 || len(schema.Properties.Description) == 0 {
 		t.Errorf("schema must declare both prompt and description properties")
 	}
-	if len(schema.Required) != 1 || schema.Required[0] != "prompt" {
-		t.Errorf("required = %v, want [prompt]", schema.Required)
+	if schema.Properties.Mode.Type != "string" {
+		t.Errorf("mode property type = %q, want string", schema.Properties.Mode.Type)
+	}
+	if got := strings.Join(schema.Properties.Mode.Enum, ","); got != "sync,async" {
+		t.Errorf("mode enum = %v, want [sync async]", schema.Properties.Mode.Enum)
+	}
+	if got := strings.Join(schema.Required, ","); got != "prompt,mode" {
+		t.Errorf("required = %v, want [prompt mode]", schema.Required)
 	}
 }
 
@@ -64,7 +75,7 @@ func TestTaskReturnsChildText(t *testing.T) {
 		}
 	}
 	tool := NewTaskTool(factory, nil, nil)
-	res, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"description":"do x","prompt":"do the work"}`), nil)
+	res, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"description":"do x","prompt":"do the work","mode":"sync"}`), nil)
 	if err != nil {
 		t.Fatalf("Execute err = %v", err)
 	}
@@ -105,7 +116,7 @@ func TestTaskFailedChildErrors(t *testing.T) {
 		}
 	}
 	tool := NewTaskTool(factory, nil, nil)
-	_, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	_, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 	if err == nil {
 		t.Fatal("a child that stopped on error must surface as a tool error")
 	}
@@ -167,7 +178,7 @@ func TestTaskSemaphoreBoundsConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+			_, _ = tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 		}()
 	}
 	// Give the admitted children time to reach the barrier, then let them go.
@@ -220,7 +231,7 @@ func TestTaskAdvertisesRegistryTools(t *testing.T) {
 		}
 	}
 	tool := NewTaskTool(factory, nil, nil)
-	if _, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil); err != nil {
+	if _, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil); err != nil {
 		t.Fatalf("Execute err = %v", err)
 	}
 	if len(gotTools) != 2 {
@@ -229,5 +240,56 @@ func TestTaskAdvertisesRegistryTools(t *testing.T) {
 	names := map[string]bool{gotTools[0].Name(): true, gotTools[1].Name(): true}
 	if !names["read"] || !names["bash"] {
 		t.Errorf("child tools = %v, want read+bash from the registry", names)
+	}
+}
+
+// TestTaskModeRequired verifies a dispatch without a mode is rejected rather than
+// silently defaulting to one collection strategy, and that the error names both
+// accepted values so the model can correct itself in one retry.
+func TestTaskModeRequired(t *testing.T) {
+	tool := NewTaskTool(func() RunConfig { return RunConfig{} }, nil, nil)
+
+	_, err := tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	if err == nil {
+		t.Fatal("a task call without mode must error")
+	}
+	for _, want := range []string{"mode is required", `"sync"`, `"async"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	_, err = tool.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sometimes"}`), nil)
+	if err == nil {
+		t.Fatal("an unknown mode must error")
+	}
+	if !strings.Contains(err.Error(), `unknown mode "sometimes"`) {
+		t.Errorf("error = %v, want an unknown-mode error", err)
+	}
+}
+
+// TestTaskSchemaRequiresMode verifies the model-facing contract: the registry
+// rejects a task call that omits mode before Execute ever runs.
+func TestTaskSchemaRequiresMode(t *testing.T) {
+	reg := agenttool.NewToolRegistry()
+	if err := reg.Register(NewTaskTool(func() RunConfig { return RunConfig{} }, nil, nil)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	errs := reg.Validate("task", json.RawMessage(`{"prompt":"go"}`))
+	if len(errs) == 0 {
+		t.Fatal("schema must reject a call without mode")
+	}
+	joined := ""
+	for _, e := range errs {
+		joined += e.Field + ": " + e.Message + "\n"
+	}
+	if !strings.Contains(joined, "mode") {
+		t.Errorf("validation errors should name the missing mode, got:\n%s", joined)
+	}
+	if errs := reg.Validate("task", json.RawMessage(`{"prompt":"go","mode":"sync"}`)); len(errs) != 0 {
+		t.Errorf("mode sync must validate, got %+v", errs)
+	}
+	if errs := reg.Validate("task", json.RawMessage(`{"prompt":"go","mode":"async"}`)); len(errs) != 0 {
+		t.Errorf("mode async must validate, got %+v", errs)
 	}
 }

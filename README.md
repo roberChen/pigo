@@ -376,7 +376,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `websearch` | 联网搜索并返回标题/URL/摘要，按凭证自动选后端（`TAVILY_API_KEY`→Tavily，`BRAVE_API_KEY`→Brave，否则回落无 key 的 DuckDuckGo），支持 `allowed_domains`/`blocked_domains` 过滤 |
 | `memory_search` | 检索持久化记忆（`memory.enabled = false` 或 `--no-tools` 时不注册） |
 | `pigo_config` | 回显当前运行的生效配置：实际读取的配置文件（config.toml、全局/项目 config.json、pigorc、skills/plugins/memory 目录）、model/provider/endpoint、thinking 与输出格式、启用的工具及准入边界、skills、MCP 服务器（配置项 vs 实际连接）、hooks、自定义 sub-agent、memory/checkpoint/compaction。可用 `{"section": "hooks"}` 只看一节；只读，`--no-tools` 时不注册 |
-| `task` | 派发通用子 Agent，子 Agent 继承父级工具边界且不能再次派发 |
+| `task` | 派发通用子 Agent，子 Agent 继承父级工具边界且不能再次派发。必填 `mode`：`"sync"` 阻塞到报告返回，`"async"` 立即返回 job id（用 `task_output` 收取） |
 
 > `bash` / `write` / `edit` 属于"副作用工具"，在未信任目录下需确认（见[项目信任](#项目信任)）。
 
@@ -732,7 +732,7 @@ agent hook researcher PreToolUse --matcher '^bash$' --command './.pigo/hooks/no-
 agent remove researcher      # 取消（例如在项目文件里屏蔽全局定义）
 ```
 
-定义完成后，主 agent 会像调用 `task` 一样按名字调用它（`researcher` 出现在工具列表里，`description` 决定它何时被选中）；传 `background: true` 可后台执行（见下）。
+定义完成后，主 agent 会像调用 `task` 一样按名字调用它（`researcher` 出现在工具列表里，`description` 决定它何时被选中）；`mode` 必须声明 `sync` 或 `async`（见下）。
 
 ### Hooks：默认独立，可继承
 
@@ -740,25 +740,29 @@ agent remove researcher      # 取消（例如在项目文件里屏蔽全局定�
 - `--inherit-hooks` 时，额外运行全局/项目层解析出的 hook（`$PIGO_HOME/config.json`、被信任项目的 `./.pigo/config.json`、以及 pigorc 的 hook），本 agent 自己的 hook 先执行。
 - 子 agent 的结束事件走 `SubagentStop`（不是 `Stop`），工具执行前后仍是 `PreToolUse` / `PostToolUse`。
 
-### 后台 sub-agent（`background: true`）
+### 同步与后台 sub-agent（`mode`）
 
-默认派发是**同步**的：父 turn 等子 agent 跑完再继续。需要并行做别的事时，让子 agent 在后台跑：
+每次派发都必须声明 `mode`——`"sync"` 在本 turn 内等子 agent 跑完并拿到报告，`"async"` 让它在后台跑、立即返回 job id。必填是刻意的：同步派发能拿到结果但会占住父 turn，异步派发能并行却必须显式收取；让模型自己选，比藏一个默认值更不容易走偏。
 
 ```jsonc
 // 模型侧调用（task 或自定义 agent 都一样）
-{"prompt": "把整个仓库的 API 用法整理成文档", "background": true}
-// → 立即返回：Started background sub-agent "task" as job-1.
+{"prompt": "把整个仓库的 API 用法整理成文档", "mode": "sync"}   // 本 turn 内拿到报告
+{"prompt": "把整个仓库的 API 用法整理成文档", "mode": "async"}  // → 立即返回：Started sub-agent "task" in the background (mode: async) as job-1.
 ```
 
-- **立即返回**：工具调用马上拿到 job 句柄（`job-1`…），父 agent 继续做自己的事；同一消息里的多个后台 job 会并发启动（仍受 `PIGO_MAX_SUBAGENTS` 排队约束）。
+- **`sync`**：父 turn 等子 agent 跑完再继续；同一消息里的多个 `sync` 调用会被工具执行器并发跑、一起等待（仍受 `PIGO_MAX_SUBAGENTS` 排队约束）。
+- **`async`**：工具调用马上拿到 job 句柄（`job-1`…），父 agent 继续做自己的事；同一消息里的多个 job 会并发启动。
 - **完成回灌**：job 结束后，报告作为一条 **follow-up 用户消息**注入（含 job id、agent、耗时、报告正文与子会话 id）。只要还有后台 job 在跑，run 就不会自然结束——但到下一个 turn 边界时最多等“下一个完成”，不会阻塞多轮对话；被 Esc/Ctrl+C 中断时等待立即结束（job 随 run 一起取消）。
-- **显式收取**：新工具 `task_output`
+- **显式收取**：工具 `task_output`
   - `{"job_id":"job-1"}` → 已完成返回报告，仍在跑返回状态（activity/耗时）；
   - `{"job_id":"job-1","wait":true}` → 等到完成再返回（父 agent 想“等这个结果”时用）；
-  - 省略 `job_id` → 列出所有 job（id、agent、状态、耗时、任务摘要）。
+  - `{"job_ids":["job-1","job-2"],"wait":true}` → **批次屏障**：等这批 job 全部结束，一次返回全部报告；其中某个 job 失败只作为结果里的一项（`error:`），不会让整个调用变成工具错误；
+  - `{"wait_all":true}` → 等调用时刻所有在跑的 job 全部结束并一次返回（扇出后不想记 id 时用）；
+  - 省略选择器 → 列出所有 job（id、agent、状态、耗时、任务摘要）。`job_id` 与 `job_ids` / `wait_all` 互斥，混用会返回可执行的错误。
+  - **读到即视为已投递**：从 `task_output` 读到已结束 job 的报告后，它不会再作为 follow-up 消息重复注入（仍在跑的 job 只是查看状态，之后照常回灌）。
 - **生命周期**：job 绑定**父 run 的 context**，不是 tool call 的。run 结束（或被中断）时仍存活的后台 job 会被取消，不会留下孤儿 goroutine；正常结束时报告一定已投递（或可在 run 内用 `task_output` 取回）。
 - **持久化与续跑**：后台子 agent 与同步子 agent 一致——独立会话文件（`parentSession`/`subAgent`），报告里带 `[sub-agent session: <id>]`，之后用 `session_id` 续跑。
-- **不支持的组合**：process 隔离模式下后台执行会被拒绝（子进程协议只回传最终文本，且没有可续跑的会话）；`/btw` 这类一次性旁路会话不接后台报告。
+- **不支持的组合**：process 隔离模式只接受 `mode: "sync"`（子进程协议只回传最终文本，没有可续跑的会话，也没有 job 通道），传 `async` 会返回解释性错误；`/btw` 这类一次性旁路会话不接后台报告。
 
 > 后台报告会触发新一轮模型调用（和定时提醒一样），所以适合“长任务 + 我能先做别的”的场景，而不是用来逃逸父 turn 的上下文。
 

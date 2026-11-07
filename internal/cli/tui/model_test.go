@@ -530,7 +530,7 @@ func TestModelSubagentBackgroundJobRetires(t *testing.T) {
 	m.running = true
 	m.spinner.begin(time.Now(), "")
 
-	m = apply(t, m, toolStartMsg{id: "call-bg", name: "task", input: map[string]any{"description": "bg work", "background": true}})
+	m = apply(t, m, toolStartMsg{id: "call-bg", name: "task", input: map[string]any{"description": "bg work", "mode": "async"}})
 	m = apply(t, m, toolEndMsg{id: "call-bg", ok: true, result: "Started background sub-agent"})
 
 	m = apply(t, m, subagentProgressMsg{id: "job-1", desc: "bg work", activity: "Thinking", tokens: 120})

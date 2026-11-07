@@ -89,14 +89,14 @@ const todoGuide = "When a task has multiple steps or is non-trivial, use the tod
 // sub-agents in parallel, letting skills like /graph achieve real concurrency.
 const taskGuide = "When work splits into independent subtasks, delegate them with the task tool (or a " +
 	"named agent from the user's configuration): each call dispatches an independent sub-agent that " +
-	"completes its subtask on a fresh context and returns its final report. To fan out, emit MULTIPLE " +
-	"task calls in a single message — they run in parallel. Give each a complete, self-contained prompt, " +
-	"since a sub-agent shares none of this conversation's context. A sub-agent cannot question the user: " +
-	"if it reports that a decision is blocked, ask the user with the question tool and then continue the " +
-	"same sub-agent by passing the session id its result reported, rather than starting over. Set " +
-	"background true when the delegation can run while you do something else: you get a job id at once and " +
-	"the report arrives as a follow-up message (task_output lists jobs, or waits for one). Do the work " +
-	"directly for a single, sequential, or trivial task."
+	"completes its subtask on a fresh context and returns its final report. Every dispatch must name its " +
+	"mode: \"sync\" blocks the call until the report comes back (emit MULTIPLE sync calls in a single message " +
+	"to fan out - they run in parallel and are awaited together), while \"async\" returns a job id at once and " +
+	"delivers the report as a follow-up message, which you collect with task_output (job_ids + wait for a batch, " +
+	"or wait_all). Give each a complete, self-contained prompt, since a sub-agent shares none of this " +
+	"conversation's context. A sub-agent cannot question the user: if it reports that a decision is blocked, " +
+	"ask the user with the question tool and then continue the same sub-agent by passing the session id its " +
+	"result reported, rather than starting over. Do the work directly for a single, sequential, or trivial task."
 
 // questionGuide instructs the model on the question tool: the one way to ask the
 // operator something mid-run. It is deliberately narrow — an agent that stops to

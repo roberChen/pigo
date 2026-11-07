@@ -53,7 +53,7 @@ func runSubAgent(t *testing.T, tool *SubAgentTool, ctx context.Context, args str
 func TestSubAgentSessionPersistedAndContinued(t *testing.T) {
 	tool, ctx := newSessionedTask(t, textTurn("first report"), textTurn("second report"))
 
-	res := runSubAgent(t, tool, ctx, `{"prompt":"do the first half"}`)
+	res := runSubAgent(t, tool, ctx, `{"prompt":"do the first half","mode":"sync"}`)
 	text := agentcore.ContentToText(res.Content)
 	details, ok := res.Details.(map[string]any)
 	if !ok {
@@ -86,7 +86,7 @@ func TestSubAgentSessionPersistedAndContinued(t *testing.T) {
 	}
 
 	// Continue the same conversation: the child keeps its transcript and appends.
-	res = runSubAgent(t, tool, ctx, `{"prompt":"do the second half","session_id":"`+sessionID+`"}`)
+	res = runSubAgent(t, tool, ctx, `{"prompt":"do the second half","mode":"sync","session_id":"`+sessionID+`"}`)
 	if got := agentcore.ContentToText(res.Content); !strings.Contains(got, "second report") {
 		t.Errorf("continuation result = %q, want the second report", got)
 	}
@@ -105,13 +105,13 @@ func TestSubAgentSessionPersistedAndContinued(t *testing.T) {
 func TestSubAgentSessionContinueValidation(t *testing.T) {
 	tool, ctx := newSessionedTask(t, textTurn("r1"), textTurn("r2"), textTurn("r3"))
 
-	res := runSubAgent(t, tool, ctx, `{"prompt":"work"}`)
+	res := runSubAgent(t, tool, ctx, `{"prompt":"work","mode":"sync"}`)
 	details := res.Details.(map[string]any)
 	sessionID := details["sessionId"].(string)
 
 	// Wrong parent conversation.
 	otherParent := agentcore.WithSessionID(context.Background(), "parent-session-2")
-	if _, err := tool.Execute(otherParent, "c", json.RawMessage(`{"prompt":"x","session_id":"`+sessionID+`"}`), nil); err == nil {
+	if _, err := tool.Execute(otherParent, "c", json.RawMessage(`{"prompt":"x","mode":"sync","session_id":"`+sessionID+`"}`), nil); err == nil {
 		t.Error("continuing a session from another conversation must fail")
 	} else if !strings.Contains(err.Error(), "another conversation") {
 		t.Errorf("error = %v, want a wrong-conversation error", err)
@@ -129,7 +129,7 @@ func TestSubAgentSessionContinueValidation(t *testing.T) {
 			}
 		},
 	})
-	if _, err := otherAgent.Execute(ctx, "c", json.RawMessage(`{"prompt":"x","session_id":"`+sessionID+`"}`), nil); err == nil {
+	if _, err := otherAgent.Execute(ctx, "c", json.RawMessage(`{"prompt":"x","mode":"sync","session_id":"`+sessionID+`"}`), nil); err == nil {
 		t.Error("continuing another agent's session must fail")
 	} else if !strings.Contains(err.Error(), `belongs to sub-agent "task"`) {
 		t.Errorf("error = %v, want an agent-mismatch error", err)
@@ -144,7 +144,7 @@ func TestSubAgentSessionContinueValidation(t *testing.T) {
 	if err := store.Save(top, agentcore.MessageList{agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("hi")}}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if _, err := tool.Execute(ctx, "c", json.RawMessage(`{"prompt":"x","session_id":"20260101-000000-000001"}`), nil); err == nil {
+	if _, err := tool.Execute(ctx, "c", json.RawMessage(`{"prompt":"x","mode":"sync","session_id":"20260101-000000-000001"}`), nil); err == nil {
 		t.Error("continuing a top-level session must fail")
 	} else if !strings.Contains(err.Error(), "not a sub-agent session") {
 		t.Errorf("error = %v, want a not-a-subagent-session error", err)
@@ -163,7 +163,7 @@ func TestSubAgentWithoutParentSessionIsNotPersisted(t *testing.T) {
 		}
 	}, nil, nil)
 
-	res := runSubAgent(t, tool, context.Background(), `{"prompt":"work"}`)
+	res := runSubAgent(t, tool, context.Background(), `{"prompt":"work","mode":"sync"}`)
 	if got := agentcore.ContentToText(res.Content); got != "report" {
 		t.Errorf("result = %q, want the child report", got)
 	}

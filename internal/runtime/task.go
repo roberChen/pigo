@@ -26,10 +26,11 @@ const DefaultMaxSubagents = 4
 const taskDescription = "Dispatch a general-purpose sub-agent to autonomously complete a delegated task. " +
 	"The sub-agent runs its own agent loop with a fresh context and the standard tool set, then returns its final report. " +
 	"Provide a complete, self-contained prompt since the sub-agent shares none of this conversation's context. " +
-	"Multiple task calls in one message run in parallel. A sub-agent cannot ask the user anything: if it needs a " +
-	"decision it says so in its report. Ask the user yourself (question), then continue that sub-agent with " +
-	"session_id set to the id its result reported. Set background true to start it and keep working: you get a " +
-	"job id immediately and its report arrives as a follow-up message (task_output can check or wait for it)."
+	"Every call must state its mode: \"sync\" waits for the report inside the tool call (multiple sync calls in one " +
+	"message run in parallel and are awaited together), while \"async\" returns a job id immediately and delivers the " +
+	"report as a follow-up message (collect a batch with task_output job_ids + wait, or wait_all). " +
+	"A sub-agent cannot ask the user anything: if it needs a decision it says so in its report. Ask the user yourself " +
+	"with question, then continue that sub-agent with session_id set to the id its result reported."
 
 // taskSystemPrompt seeds every generic sub-agent's context. It is intentionally
 // generic (the actual work arrives as the runtime prompt) and mirrors the
@@ -42,7 +43,8 @@ const taskSystemPrompt = "You are a focused sub-agent working on one delegated t
 	"Finish with a concise report of what you did and any key findings; your final message is returned verbatim to the agent that dispatched you."
 
 // taskSchema is the JSON Schema for a task invocation: a required self-contained
-// prompt plus an optional short description used for status display.
+// prompt plus the required sync/async mode and an optional short description used
+// for status display.
 var taskSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -54,16 +56,17 @@ var taskSchema = json.RawMessage(`{
       "type": "string",
       "description": "The full task for the sub-agent to perform. It must be self-contained since the sub-agent runs with a fresh context and shares none of this conversation."
     },
+    "mode": {
+      "type": "string",
+      "enum": ["sync", "async"],
+      "description": "Required. \"sync\" blocks this tool call until the sub-agent finishes and returns its report; several sync calls in one message run in parallel and are awaited together. \"async\" returns a job id immediately and delivers the report as a follow-up message - collect a batch with task_output job_ids + wait, or wait_all."
+    },
     "session_id": {
       "type": "string",
       "description": "Optional: continue an earlier sub-agent run by passing the session id its result reported, instead of starting from a fresh context."
-    },
-    "background": {
-      "type": "boolean",
-      "description": "Optional: start the sub-agent in the background and return a job id immediately; its report arrives as a follow-up message. Use task_output to check or wait for it."
     }
   },
-  "required": ["prompt"],
+  "required": ["prompt", "mode"],
   "additionalProperties": false
 }`)
 
@@ -71,7 +74,7 @@ var taskSchema = json.RawMessage(`{
 // child RunConfig per spawn (reusing the parent's provider stream/model and a
 // child tool registry that must exclude `task` for the nesting guard); sem is a
 // shared buffered channel bounding concurrent task runs (nil disables limiting);
-// jobs is the run's background-job registry (nil disables `background: true`). The
+// jobs is the run's background-job registry (nil disables `mode: "async"`). The
 // child prompt comes from the call arguments at runtime, so a single generic spec
 // serves every delegated task.
 func NewTaskTool(factory func() RunConfig, sem chan struct{}, jobs *SubAgentJobs) *SubAgentTool {

@@ -54,7 +54,7 @@ func TestSubAgentGoroutineModeUnchanged(t *testing.T) {
 	if sub.spec.Isolation != SubAgentIsolationGoroutine {
 		t.Errorf("default Isolation = %v, want goroutine", sub.spec.Isolation)
 	}
-	res, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	res, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 	if err != nil {
 		t.Fatalf("goroutine Execute err = %v", err)
 	}
@@ -73,7 +73,7 @@ func TestSubAgentGoroutineModeUnchanged(t *testing.T) {
 // the empty-prompt check on the goroutine path.
 func TestSubAgentGoroutineNilRunConfigErrors(t *testing.T) {
 	sub := NewSubAgentTool(SubAgentSpec{Name: "x"}) // no NewRunConfig, default goroutine
-	_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go"}`), nil)
+	_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"go","mode":"sync"}`), nil)
 	if err == nil || !strings.Contains(err.Error(), "no run configuration") {
 		t.Errorf("err = %v, want 'no run configuration'", err)
 	}
@@ -101,7 +101,7 @@ func TestSubAgentProcessModeFake(t *testing.T) {
 			got = params
 			return "process result: 99", nil
 		}
-		res, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"find it"}`), nil)
+		res, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"find it","mode":"sync"}`), nil)
 		if err != nil {
 			t.Fatalf("Execute err = %v", err)
 		}
@@ -124,7 +124,7 @@ func TestSubAgentProcessModeFake(t *testing.T) {
 		sub.processCall = func(context.Context, SubAgentProcessConfig, SubAgentRunParams) (string, error) {
 			return "", errors.New("subprocess exited: signal: killed")
 		}
-		_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x"}`), nil)
+		_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x","mode":"sync"}`), nil)
 		if err == nil {
 			t.Fatal("expected tool error on subprocess crash, got nil")
 		}
@@ -136,9 +136,26 @@ func TestSubAgentProcessModeFake(t *testing.T) {
 			Isolation: SubAgentIsolationProcess,
 			// Process.Model intentionally empty.
 		})
-		_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x"}`), nil)
+		_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x","mode":"sync"}`), nil)
 		if err == nil {
 			t.Fatal("expected error when Process.Model is missing")
+		}
+	})
+
+	t.Run("async rejected", func(t *testing.T) {
+		// A process child returns only its final text, so there is no job seam to
+		// deliver a report through; the call must say so instead of starting one.
+		sub := NewSubAgentTool(SubAgentSpec{
+			Name:      "proc",
+			Isolation: SubAgentIsolationProcess,
+			Process:   SubAgentProcessConfig{Model: "faux"},
+		})
+		_, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x","mode":"async"}`), nil)
+		if err == nil || !strings.Contains(err.Error(), "async mode is not supported in process isolation") {
+			t.Fatalf("err = %v, want an async-not-supported error", err)
+		}
+		if !strings.Contains(err.Error(), `mode "sync"`) {
+			t.Errorf("error should point at sync mode, got %v", err)
 		}
 	})
 
@@ -156,7 +173,7 @@ func TestSubAgentProcessModeFake(t *testing.T) {
 			got = params
 			return "ok", nil
 		}
-		if _, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x"}`), nil); err != nil {
+		if _, err := sub.Execute(context.Background(), "id", json.RawMessage(`{"prompt":"x","mode":"sync"}`), nil); err != nil {
 			t.Fatalf("Execute err = %v", err)
 		}
 		if len(got.Tools) != 2 || got.Tools[0] != "read" || got.Tools[1] != "grep" {
