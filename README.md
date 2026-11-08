@@ -25,6 +25,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [模型与 Provider](#模型与-provider)
 - [内置工具](#内置工具)
 - [运行模式](#运行模式)
+- [Host 守护进程（`pigo serve` / `pigo attach`）](#host-守护进程pigo-serve--pigo-attach)
 - [作为 SDK 嵌入](#作为-sdk-嵌入)
 - [系统提示词组装](#系统提示词组装)
 - [项目信任](#项目信任)
@@ -435,6 +436,40 @@ pigo --continue                   # 续跑最近一次会话
 # 交互式：/resume 列出会话并选取（TUI 弹层 ↑/↓ 选择，Enter 载入；REPL 用 /resume <n> 或 /resume <id>）
 # 交互式：/new 就地开一个新空会话（当前会话已保存到磁盘，可随时 /resume 回来）
 ```
+
+### Host 守护进程（`pigo serve` / `pigo attach`）
+
+pigo 可以把「执行」与「界面」拆成两个进程：一个常驻的 **host** 持有 provider、工具、会话与磁盘持久化，任意多个 **client** 通过 unix socket 连上去驱动它。这是 TUI / Web UI / 脚本共用同一条链路的入口，接口定义在 `internal/hostapi`，设计见 `docs/architecture.md` 第六节。
+
+```bash
+# 前台启动 host（Ctrl-C 退出）
+pigo serve
+
+# 后台启动：脱离终端、输出写入 $PIGO_HOME/server.log，就绪后返回
+pigo serve --daemon
+
+# 查看 / 停止
+pigo serve status                 # pid、启动时间、活跃会话数、socket 路径
+pigo serve stop                   # 优雅退出并清理 socket/token/state
+
+# 客户端：新会话 / 续跑 / 列出本连接的会话
+pigo attach
+pigo attach 20260720-1530-abcd
+pigo attach --list
+```
+
+`attach` 是行式客户端：输入提问回车即跑一轮，回答流式打印；`/sessions` 列出本连接的会话，`/exit` 或 Ctrl-D 断开（会话历史留在磁盘上，随时可以 `attach <id>` 或 `--resume` 回来），Ctrl-C 取消正在跑的那一轮。
+
+几个契约值得记住：
+
+- **一个 host 一个进程**：socket、token（0600）与状态文件都在 `--dir`／`$PIGO_HOME` 下；重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
+- **会话属于创建它的连接**：另一条连接既看不到也驱动不了你的会话（`session.list` 只返回自己的），所以两个 UI 同时 attach 不会互相打断。
+- **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
+- **host 拥有 turn**：客户端断开不会中断正在跑的轮次；重连后 resume 能拿回完整历史（含压缩点之后的上下文）。
+- **取消是一轮正常的结局，不是故障**：`cancel`（`attach` 里的 Ctrl-C）让这一轮以 `aborted` 结束，已经流式输出给客户端的文字留在结果里、也写进磁盘上的历史，`error` 字段保持为空——客户端据此渲染中止提示而不是报错。还没产出任何文字就被取消时，host 同样补一条 `aborted` 的空轮次，否则 resume 会停在一句没人回答的提问上。取消后会话照常可用。
+- **host 组装真实 run**：`pigo serve` 接受与普通运行相同的 `-m/--provider/--base-url/-n/--allowed-tools/--system-prompt` 等参数，`run.SetupEnvIn` 以会话的 cwd 为根装配工具与系统提示词，因此同一个 host 可以服务不同目录下的会话。
+
+`serve`/`attach` 目前都不取代 TUI：它们证明拆分可行，并给 Web UI 与 `-p --server` 留好了接口。
 
 ### GitHub PR Review Webhook
 
@@ -1172,6 +1207,8 @@ git push origin v0.2.0
 | `PIGO_HOME` | 覆盖 `~/.pigo` 基础目录（影响 plugins、commands、prompts） |
 | `PIGO_SKILLS_DIR` | 覆盖技能目录（默认 `~/.agents/skills`） |
 | `~/.pigo/sessions` | 会话存储（JSONL） |
+| `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 unix socket、bearer token（0600）与状态文件 |
+| `~/.pigo/server.log` | `pigo serve --daemon` 的 stdout/stderr |
 | `~/.pigo/plugins` | 外部插件 |
 | `~/.pigo/prompts` | 提示词模板（pi 对齐；`pigo install` 的安装目标） |
 | `~/.pigo/commands` | 用户自定义命令模板（legacy，仍加载） |

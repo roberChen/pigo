@@ -191,6 +191,26 @@ interactive REPL/TUI.
   found under a provider is rejected with a message saying where it belongs.
 
 ### Added
+- **`pigo serve` / `pigo attach`: the agent can now run in a host daemon and be
+  driven by any client**: execution and UI were welded together — the REPL and
+  TUI each assembled providers, tools and sessions in-process, so a second
+  front-end (a web UI, a script, another terminal) had no way to drive a running
+  conversation, and closing the UI killed the turn with it. `pigo serve` starts a
+  single host per machine that owns providers, tools, sessions and persistence
+  behind a newline-delimited JSON protocol over a unix socket
+  (`internal/hostapi`). `pigo serve --daemon` detaches with its own session and
+  logs to `$PIGO_HOME/server.log`; `serve status` / `serve stop` are the
+  lifecycle verbs. `pigo attach` is a line client that proves the split: it
+  streams deltas, resumes persisted sessions, and — the part that forces the
+  design — answers permission questions **while a turn is running**, since the
+  host turns an untrusted directory's tool confirmation into a
+  `permission_request` event instead of a terminal prompt, and treats "no
+  answer" (timeout, cancel, disconnect) as denial. Sessions belong to the
+  connection that created them, a disconnected client does not stop the turn,
+  and `run.SetupEnvIn(cwd, …)` lets one host serve sessions rooted in different
+  directories. Scripted-factory tests cover the socket protocol end to end, and
+  the CLI tests re-exec the test binary so the real `--daemon` fork path is
+  exercised rather than mocked.
 - **A sub-agent dispatch must now say what it wants: `mode: "sync"` or
   `mode: "async"`, and batches can be awaited in one call**: `task` and every
   custom agent tool used to take an optional `background: true`, which meant the

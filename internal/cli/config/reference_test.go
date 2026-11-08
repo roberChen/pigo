@@ -168,6 +168,9 @@ func TestReferenceDocumentsEveryPIGOEnvVar(t *testing.T) {
 		if name == "PIGO_RC_RECORDS" || name == "PIGO_RC_HOOKS" || name == "PIGO_RC_ENV_BEFORE" || name == "PIGO_RC_ENV_AFTER" || name == "PIGO_VERSION" {
 			continue // pigorc evaluation scaffolding, not user configuration
 		}
+		if name == "PIGO_HOST_READY" {
+			continue // `serve --daemon` parent→child readiness pipe; never set by a user
+		}
 		if !documented[name] {
 			t.Errorf("environment variable %s is read by the code but missing from the reference", name)
 		}

@@ -229,6 +229,15 @@ func registerFlags(fs *flag.FlagSet, opts *cliOptions) {
 }
 
 func main() {
+	// Host subcommands (pigo serve / pigo attach, docs/architecture.md §6) are
+	// standalone: they own their flag surface (registerFlags plus --daemon/--dir)
+	// and never enter the agent-mode dispatch below. They are peeled off first
+	// because `attach` takes a positional session id and `serve` takes positional
+	// actions (status/stop), which the global pflag set would reject.
+	if isHostSubcommand(os.Args) {
+		os.Exit(runHostSubcommand(os.Args, version, os.Stdout, os.Stderr))
+	}
+
 	// Session subcommands (pigo session export|list, issue #570) dispatch early
 	// like the package-management ones: they are standalone actions that never
 	// touch the interactive/headless flag surface.

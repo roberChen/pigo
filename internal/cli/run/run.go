@@ -96,7 +96,24 @@ type Env struct {
 // error rather than a silently ineffective boundary. It returns an error rather
 // than exiting so the caller owns exit-code mapping.
 func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy) (Env, error) {
-	return setupEnv(model, baseURL, protocol, providerName, apiKey, noTools, noSkills, systemPrompt, appendSystemPrompt, memEnabled, policy, nil)
+	cwd, _ := os.Getwd()
+	return setupEnv(cwd, model, baseURL, protocol, providerName, apiKey, noTools, noSkills, systemPrompt, appendSystemPrompt, memEnabled, policy, nil)
+}
+
+// SetupEnvIn is SetupEnv with an explicit working directory instead of the
+// process's own. It is the seam the host daemon needs: one process serves
+// sessions whose cwd differ, and the cwd determines where the built-in file and
+// shell tools are rooted, which AGENTS.md layers are injected into the prompt,
+// and which project config layer applies. An empty cwd falls back to os.Getwd()
+// so a caller can pass a session header's (possibly empty) cwd straight through.
+//
+// Note that cwd is a property of the assembly, not of the process: it does not
+// chdir, so two sessions in different directories can run concurrently.
+func SetupEnvIn(cwd, model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy) (Env, error) {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	return setupEnv(cwd, model, baseURL, protocol, providerName, apiKey, noTools, noSkills, systemPrompt, appendSystemPrompt, memEnabled, policy, nil)
 }
 
 // setupEnv is SetupEnv plus the session state a rebuild must carry over. state is
@@ -104,8 +121,10 @@ func SetupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, no
 // the previous run's ToolState so the rebuilt tool set keeps its background bash
 // jobs, todo list, schedule, sub-agent registry, memory database and plugins
 // instead of orphaning them.
-func setupEnv(model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy, state *ToolState) (Env, error) {
-	cwd, _ := os.Getwd()
+func setupEnv(cwd, model, baseURL, protocol, providerName, apiKey string, noTools, noSkills bool, systemPrompt string, appendSystemPrompt []string, memEnabled bool, policy ToolPolicy, state *ToolState) (Env, error) {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	prov, resolvedName, err := provider.ResolveProvider(model, baseURL, protocol, providerName, os.Getenv)
 	if err != nil {
 		return Env{}, err

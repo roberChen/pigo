@@ -170,7 +170,10 @@ func (r *Reloader) Reload() (*ReloadResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Rebuild in the assembly's own cwd, not the process's: under the host daemon
+	// the two differ, and a reload must not move a session to another directory.
 	next, err := setupEnv(
+		env.Cwd,
 		settings.Model, settings.BaseURL, settings.Protocol, settings.ProviderName, settings.APIKey,
 		settings.NoTools, settings.NoSkills, settings.SystemPrompt, settings.AppendSystemPrompt,
 		settings.MemoryEnabled, settings.Policy, ToolStateFromEnv(env),
