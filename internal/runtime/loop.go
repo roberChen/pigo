@@ -186,6 +186,15 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 	// once. Telemetry is emitted first so a consumer sees the run's structured
 	// metrics immediately before the terminal event.
 	finish := func() {
+		// A run cancelled by the caller still owes the transcript a terminal
+		// assistant turn: without one, a resume sees a question that was never
+		// answered, and the partial text the user already watched stream in would
+		// vanish from the history. recordCancelledTurn is idempotent (it leaves an
+		// already-terminal assistant message untouched) and is a no-op while the
+		// context is alive.
+		if ctx.Err() != nil {
+			recordCancelledTurn(agentCtx, cfg.LoopConfig)
+		}
 		_ = emit(tel.summary())
 		msgs := newMessages()
 		_ = emit(agentcore.AgentEndEvent{Messages: msgs})
@@ -212,7 +221,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 			lastReqLen = len(agentCtx.Messages)
 			assistant, err := streamAssistantResponse(ctx, agentCtx, cfg.LoopConfig, emitFrom)
 			if err != nil {
-				// emit was cancelled mid-stream; end the run.
+				// emit was cancelled mid-stream; finish records the terminal turn.
 				finish()
 				return
 			}

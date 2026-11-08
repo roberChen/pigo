@@ -12,6 +12,23 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **Cancelling a turn no longer reports it as a provider failure or loses the
+  partial answer**: a user cancel surfaced as `stop_reason: "error"` — and with
+  a blank `error`, which made "I stopped it" indistinguishable from "the
+  provider broke" — while the transport's own error event replaced the partial
+  assistant message that the client had already watched stream in. Aborts are
+  now recorded where they happen: a cancelled turn ends with
+  `stop_reason: "aborted"`, keeps the streamed text, and is reported in-band
+  (empty `error`) by the host, so `pigo attach` prints `[aborted]` instead of a
+  failure and the persisted history matches what the user saw. A cancel that
+  lands after the terminal message was already recorded no longer appends an
+  empty ghost turn, and the loop's final drain reads the stream result without
+  racing the cancelled context (a lost race used to drop every message the run
+  had produced). `hostclient.Prompt` now waits for the aborted turn's reply after
+  sending `cancel`, so its result carries the partial text too. Also fixed while
+  wiring this: `attach`'s renderer took its write lock and then called the
+  lock-taking printer on a turn-end/tool-start line, deadlocking the event
+  dispatcher (the turn hung with the mutex held and no output arriving).
 - **A failed request no longer leaves an image behind to break every later
   turn, without second-guessing the conversation**: declaring
   `supports_images = true` (or relying on a built-in provider's default) is a

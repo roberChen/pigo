@@ -75,7 +75,11 @@ func DrainStream(ctx context.Context, stream *LoopEventStream, h StreamHandler) 
 		}
 	}
 
-	msgs, resErr := stream.Result(ctx)
+	// The channel is closed here, so the outcome is already recorded. Use a
+	// non-cancelled context: otherwise a cancelled run can lose the messages the
+	// loop already produced (the random select with ctx.Done()), and the caller
+	// loses the aborted turn's partial text along with its stop reason.
+	msgs, resErr := stream.Result(context.WithoutCancel(ctx))
 	if resErr != nil {
 		return lastTurn, resErr
 	}

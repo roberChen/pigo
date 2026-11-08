@@ -151,18 +151,44 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 			}
 			return e.Message, nil
 		case provider.StreamErrorEvent:
-			finalizeMessage(agentCtx, e.Message, &addedPartial)
-			if err := emit(ctx, agentcore.MessageEndEvent{Message: e.Message}); err != nil {
+			msg := abortedIfCanceled(ctx, e.Message)
+			// The transport builds its failure message from scratch. Keep the text
+			// the user already saw (and that would otherwise vanish from the
+			// persisted turn) without adopting half-finished tool calls, which would
+			// leave an unanswered tool_call in the transcript.
+			if addedPartial {
+				if prev, ok := agentCtx.Messages[len(agentCtx.Messages)-1].(agentcore.AssistantMessage); ok {
+					msg.Content = mergePartialText(msg.Content, prev.Content)
+				}
+			}
+			finalizeMessage(agentCtx, msg, &addedPartial)
+			if err := emit(ctx, agentcore.MessageEndEvent{Message: msg}); err != nil {
 				return agentcore.AssistantMessage{}, err
 			}
-			return e.Message, nil
+			return msg, nil
 		}
 	}
 
-	// 7. stream ended without done/error: fall back to the stream result.
-	final, resErr := stream.Result(ctx)
+	// 7. stream ended without done/error: fall back to the stream result. The
+	// event channel is closed at this point, which means the producer has already
+	// recorded its outcome, so read it without racing the run's (possibly
+	// cancelled) context: a plain Result(ctx) picks randomly between the closed
+	// result channel and ctx.Done(), and losing that race turns a run that did
+	// record messages into a bare "context canceled".
+	final, resErr := stream.Result(context.WithoutCancel(ctx))
 	if resErr != nil {
-		return newErrorAssistantMessage(cfg, resErr), nil
+		msg := abortedIfCanceled(ctx, newErrorAssistantMessage(cfg, resErr))
+		// A cancelled context makes the transport's error event itself
+		// undeliverable (Emit drops it), so this is the common cancel path: keep
+		// the text the consumer already received instead of reporting an empty turn.
+		if addedPartial {
+			if prev, ok := agentCtx.Messages[len(agentCtx.Messages)-1].(agentcore.AssistantMessage); ok {
+				msg.Content = mergePartialText(msg.Content, prev.Content)
+			}
+		}
+		finalizeMessage(agentCtx, msg, &addedPartial)
+		_ = emit(ctx, agentcore.MessageEndEvent{Message: msg})
+		return msg, nil
 	}
 	finalizeMessage(agentCtx, final, &addedPartial)
 	if err := emit(ctx, agentcore.MessageEndEvent{Message: final}); err != nil {
@@ -180,6 +206,64 @@ func finalizeMessage(agentCtx *agentcore.AgentContext, final agentcore.Assistant
 		agentCtx.Messages = append(agentCtx.Messages, final)
 		*addedPartial = true
 	}
+}
+
+// abortedIfCanceled rewrites a cancelled request's terminal error into an abort.
+// The transport reports a cancelled stream as StopReasonError ("stream aborted")
+// because it cannot tell a user cancel from an upstream failure; only the run
+// context knows. Without this, every consumer's StopReasonAborted branch (REPL
+// Ctrl-C, TUI, headless, the host's cancel reply) is unreachable and a cancel
+// looks like a provider failure.
+func abortedIfCanceled(ctx context.Context, msg agentcore.AssistantMessage) agentcore.AssistantMessage {
+	if msg.StopReason != agentcore.StopReasonError || ctx.Err() == nil {
+		return msg
+	}
+	msg.StopReason = agentcore.StopReasonAborted
+	msg.ErrorMessage = "aborted"
+	return msg
+}
+
+// recordCancelledTurn makes sure a cancelled run leaves a terminal assistant
+// message: it finishes the in-flight partial as aborted (keeping its text but
+// dropping half-streamed tool calls, which would otherwise sit in the transcript
+// without results), or appends an empty aborted turn when nothing was streamed.
+func recordCancelledTurn(agentCtx *agentcore.AgentContext, cfg LoopConfig) {
+	if n := len(agentCtx.Messages); n > 0 {
+		if a, ok := agentCtx.Messages[n-1].(agentcore.AssistantMessage); ok {
+			if a.StopReason != "" {
+				// Already terminal: the cancel arrived while the terminal message was
+				// itself being emitted (the error event was recorded, then its emit
+				// failed). Appending another turn would leave an empty ghost message.
+				return
+			}
+			a.StopReason = agentcore.StopReasonAborted
+			a.Content = mergePartialText(nil, a.Content)
+			agentCtx.Messages[n-1] = a
+			return
+		}
+	}
+	agentCtx.Messages = append(agentCtx.Messages, agentcore.AssistantMessage{
+		RoleField:  agentcore.RoleAssistant,
+		Model:      cfg.Model,
+		Provider:   cfg.Provider,
+		StopReason: agentcore.StopReasonAborted,
+	})
+}
+
+// mergePartialText appends the text blocks of a streamed partial to a terminal
+// message that carries none, so an aborted or failed turn keeps what the user
+// already saw. Non-text blocks are dropped on purpose (see the call site).
+func mergePartialText(final, partial agentcore.ContentList) agentcore.ContentList {
+	if len(final) > 0 {
+		return final
+	}
+	var out agentcore.ContentList
+	for _, block := range partial {
+		if _, ok := block.(agentcore.TextContent); ok {
+			out = append(out, block)
+		}
+	}
+	return out
 }
 
 // newErrorAssistantMessage builds a terminal assistant message for an early
