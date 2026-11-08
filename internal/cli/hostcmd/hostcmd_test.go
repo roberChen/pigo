@@ -599,7 +599,12 @@ func TestServeShutdownRemovesStateFiles(t *testing.T) {
 	// Serve must run: `pigo serve stop` reaches the host over the socket, so a
 	// listening-but-not-accepting server would look like "no running host".
 	go srv.Serve(context.Background())
-	for _, p := range []string{hostpath.SocketPath(dir), hostpath.TokenPath(dir), hostpath.StatePath(dir)} {
+	// The endpoint answers (a unix socket path or a named pipe, depending on the
+	// platform) and the token/state files exist while the host runs.
+	if !hostpath.Probe(hostpath.SocketPath(dir), time.Second) {
+		t.Fatalf("host is not listening on %s", hostpath.SocketPath(dir))
+	}
+	for _, p := range []string{hostpath.TokenPath(dir), hostpath.StatePath(dir)} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("%s missing while listening: %v", p, err)
 		}
@@ -610,9 +615,12 @@ func TestServeShutdownRemovesStateFiles(t *testing.T) {
 		t.Fatalf("stop exit = %d (%s)", code, errOut.String())
 	}
 
-	// `pigo serve stop` waits for the socket to disappear before returning, so the
-	// files must already be gone here without another sleep.
-	for _, p := range []string{hostpath.SocketPath(dir), hostpath.TokenPath(dir), hostpath.StatePath(dir)} {
+	// `pigo serve stop` waits for the endpoint to disappear before returning, so
+	// the footprint must already be gone here without another sleep.
+	if hostpath.Probe(hostpath.SocketPath(dir), 200*time.Millisecond) {
+		t.Fatalf("endpoint %s still answers after shutdown", hostpath.SocketPath(dir))
+	}
+	for _, p := range hostpath.Footprint(dir) {
 		if _, err := os.Stat(p); err == nil {
 			t.Fatalf("%s still exists after shutdown", p)
 		} else if !errors.Is(err, os.ErrNotExist) {

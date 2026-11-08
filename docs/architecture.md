@@ -105,15 +105,31 @@ final, err := runtime.DrainStream(ctx, stream, handler) // 消费者，永远 dr
 
 ### 6.2 传输与握手
 
+传输按平台选择，线协议完全相同；平台差异全部收敛在 `internal/hostpath` 里（`endpoint.go` + `endpoint_posix.go` / `endpoint_windows.go`），`hostserver`、`hostclient`、`hostcmd` 只跟一个不透明的 endpoint 字符串和 `Listen` / `Dial` / `Probe` / `CleanEndpoint` 打交道。
+
 ```
-unix socket  $PIGO_HOME/server.sock      (0600)
-token 文件    $PIGO_HOME/server.token     (0600)
-状态文件      $PIGO_HOME/server.json      {pid, version, startedAt, socket}
+POSIX                          Windows
+unix socket  server.sock  (0600)  named pipe  \\.\pipe\pigo-<hash>   (owner-only DACL)
+token 文件    server.token (0600)  token 文件  server.token (0600)
+状态文件      server.json         状态文件    server.json  {pid, version, startedAt, socket}
 ```
 
 - 一行一个 JSON 对象（NDJSON）。请求带 `id` + `method` + `params`，响应按 `id` 关联，事件是 `event` + `params`（无 `id`）。
-- 连接建立后的第一条消息必须是 `hello`，携带 token；不通过则关闭连接。socket 权限是主防线，token 是对“同用户但误连”的显式确认。
-- 单实例：`listen` 前先尝试连接已有 socket；能连上说明已有守护进程，直接退出并报告它的 pid。
+- 连接建立后的第一条消息必须是 `hello`，携带 token；不通过则关闭连接。endpoint 的所有者限制是主防线（POSIX 上是 socket 的 `0600` 位，Windows 上是只含当前用户一条 ACE 的受保护 DACL + 拒绝远程客户端），token 是对“同用户但误连”的显式确认。
+- 单实例：`listen` 前先尝试连接已有 endpoint；能连上说明已有守护进程，直接退出并报告它的 pid。
+
+两种传输的语义差异都被抽象掉了，但值得记住原因：
+
+| | POSIX | Windows |
+|---|---|---|
+| endpoint 形态 | 状态目录下的 socket 文件 | `\\.\pipe\` 命名空间里的管道 |
+| 名称来源 | 状态目录路径；超过 ~100 字节时回退成临时目录里的哈希名 | 状态目录**绝对路径的哈希**（管道名任何本地用户都能枚举，明文路径会泄露目录布局） |
+| 后缀 `server.sock` | 普通情况下就是它 | 没有后缀，也没有文件 |
+| 崩溃残留 | socket 文件留下，需要 `Probe` + 删除 | 管道随监听者消失，无残留 |
+| 清理 | `Footprint` 含 socket 文件 | `Footprint` 只有 token + 状态文件，`CleanEndpoint` 是 no-op |
+| 权限 | socket 文件 `0600` | 管道 DACL `D:P(A;;GA;;;<user SID>)` |
+
+命名管道的实现依赖 `github.com/Microsoft/go-winio`；`InputBufferSize` / `OutputBufferSize` 提到 64 KiB，否则一条几 MB 的 resume 结果会退化成大量 4 KiB 往返。Windows 分支不参与 CI（仓库只在 Linux 上跑测试），但 `GOOS=windows go vet ./...` 是必须过的门。
 
 ### 6.3 方法
 
@@ -167,6 +183,8 @@ hostserver.Server
 
 已落地：`internal/hostapi`（协议 + `EventMapper`）、`internal/hostserver`（守护进程、会话、权限、持久化、`DefaultFactory`）、`internal/hostclient`、`internal/cli/hostcmd`（`pigo serve` 前台 / `--daemon` / `stop` / `status`，`pigo attach` 行式客户端，含 `--list` / resume）。
 
-测试面：`internal/hostapi/*_test.go`（信封与事件映射，含线格式 golden）、`internal/hostpath/*_test.go`（状态目录 / socket 长度回退 / token 与状态文件原子性）、`internal/hostserver/server_test.go` 与 `server_edge_test.go`（真实 unix socket + 脚本化 Factory：握手、隔离、串行化、取消、resume、权限、持久化，以及畸形输入、断开时机、并发建会话）、`internal/hostclient/client_test.go` 与 `client_edge_test.go`（同一对端到端、订阅分发、Close/Done 与 goroutine 泄漏）、`internal/cli/hostcmd/hostcmd_test.go` 与 `hostcmd_edge_test.go`（attach 渲染与 turn 中答题、stdin EOF / 宿主中途退出、`serve` 生命周期，并通过 `TestMain` 重执行测试二进制真正验证 `--daemon` 的 fork 路径；`cmd/pigo/hostcmd_args_test.go` 覆盖子命令的 argv 校验）。
+测试面：`internal/hostapi/*_test.go`（信封与事件映射，含线格式 golden）、`internal/hostpath/*_test.go`（状态目录 / token 与状态文件原子性；`endpoint_posix_test.go` 覆盖 socket 路径长度回退、权限位与陈旧 socket 清理，`endpoint_windows_test.go` 覆盖管道命名、大小写归一、DACL 与“管道无残留”语义）、`internal/hostserver/server_test.go` 与 `server_edge_test.go`（真实传输 + 脚本化 Factory：握手、隔离、串行化、取消、resume、权限、持久化，以及畸形输入、断开时机、并发建会话）、`internal/hostclient/client_test.go` 与 `client_edge_test.go`（同一对端到端、订阅分发、Close/Done 与 goroutine 泄漏）、`internal/cli/hostcmd/hostcmd_test.go` 与 `hostcmd_edge_test.go`（attach 渲染与 turn 中答题、stdin EOF / 宿主中途退出、`serve` 生命周期，并通过 `TestMain` 重执行测试二进制真正验证 `--daemon` 的 fork 路径；`cmd/pigo/hostcmd_args_test.go` 覆盖子命令的 argv 校验）。
+
+平台相关用例的原则：只对**传输本身**的用例加平台守卫（POSIX 的 socket 文件 / 权限位、Windows 的管道 DACL），其余用例一律走 endpoint 抽象（`Probe` / `Footprint`），这样两端跑的是同一份契约，而不是各写一套。
 
 后续：TUI 改为 host 客户端、Web UI 直接复用 `hostclient`、`-p` 增加 `--server` 走 host。

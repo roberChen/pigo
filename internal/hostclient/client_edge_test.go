@@ -206,7 +206,7 @@ func startRawHost(t *testing.T, handle func(*rawConn)) (dir, socket string) {
 	t.Helper()
 	dir = t.TempDir()
 	socket = hostpath.SocketPath(dir)
-	ln, err := net.Listen("unix", socket)
+	ln, err := hostpath.Listen(socket)
 	if err != nil {
 		t.Fatalf("listen %s: %v", socket, err)
 	}
@@ -301,6 +301,11 @@ func TestConnectMissingSocket(t *testing.T) {
 func TestConnectStaleSocketFile(t *testing.T) {
 	// A crashed host leaves the socket inode behind. Dialing a plain file must
 	// report "not running" — not hang, not panic on a half-open connection.
+	// A named pipe is not a file: it cannot be left behind, so the equivalent
+	// crash footprint is covered by TestConnectMissingSocket.
+	if runtime.GOOS == "windows" {
+		t.Skip("a windows endpoint is a named pipe, not a file on disk")
+	}
 	dir := t.TempDir()
 	if err := hostpath.WriteToken(dir, "stale-token"); err != nil {
 		t.Fatalf("write token: %v", err)

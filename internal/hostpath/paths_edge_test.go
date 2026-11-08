@@ -1,17 +1,21 @@
-// This file tests the host's on-disk footprint: state-directory resolution, the
-// unix-socket path and its length fallback, the state and token files (content,
-// permissions, atomicity) and the liveness probe. These are the bits a *client*
-// relies on to find a running host or to clean up after a crashed one, so the
-// cases that matter are the awkward ones: a long $PIGO_HOME, a corrupt or
-// half-written state file, repeated writes racing a reader, and a socket file
-// that outlived its process.
+// This file tests the host's on-disk footprint, the half that is the same on
+// every platform: state-directory resolution and the state and token files
+// (content, permissions, atomicity). These are the bits a *client* relies on to
+// find a running host, so the cases that matter are the awkward ones: an
+// unusable $PIGO_HOME, a corrupt or half-written state file, and repeated writes
+// racing a reader.
+//
+// The transport is platform-specific and lives next door: endpoint_posix_test.go
+// covers the unix socket path (length fallback, mode bits, stale-file cleanup)
+// and endpoint_windows_test.go the named pipe (hashing, DACL, no residue). The
+// POSIX-only cases here are the ones asserting permission bits, which Windows
+// does not have.
 package hostpath
 
 import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,13 +33,6 @@ func skipOnWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix sockets and POSIX permission bits are not portable to windows")
 	}
-}
-
-// longPath builds an absolute path of exactly n bytes without touching disk.
-// Callers use it to exercise the socket-path length fallback, which only cares
-// about the string.
-func longPath(n int) string {
-	return "/" + strings.Repeat("d", n-1)
 }
 
 func TestDefaultDirHonoursPigoHome(t *testing.T) {
@@ -64,146 +61,6 @@ func TestDefaultDirFallsBackToUserHome(t *testing.T) {
 	want := filepath.Join(home, ".pigo")
 	if got := DefaultDir(); got != want {
 		t.Fatalf("DefaultDir() = %q, want %q", got, want)
-	}
-}
-
-func TestSocketPathShortDirUnchanged(t *testing.T) {
-	skipOnWindows(t)
-	dir := t.TempDir()
-	if got, want := SocketPath(dir), filepath.Join(dir, "server.sock"); got != want {
-		t.Fatalf("SocketPath(%q) = %q, want %q", dir, got, want)
-	}
-	if got := SocketPath(dir); len(got) > maxSocketPath {
-		t.Fatalf("short dir produced %d-byte socket path %q", len(got), got)
-	}
-}
-
-func TestSocketPathLengthBoundary(t *testing.T) {
-	skipOnWindows(t)
-	suffix := "/server.sock"
-
-	// Exactly at the limit: still a plain path, no hashing.
-	atLimit := longPath(maxSocketPath - len(suffix))
-	if len(atLimit)+len(suffix) != maxSocketPath {
-		t.Fatalf("test setup: %d-byte dir does not land on the limit", len(atLimit))
-	}
-	if got, want := SocketPath(atLimit), atLimit+suffix; got != want {
-		t.Fatalf("SocketPath at the limit = %q, want the plain path %q", got, want)
-	}
-
-	// One byte over: the hashed fallback kicks in and is short by construction.
-	overLimit := longPath(maxSocketPath - len(suffix) + 1)
-	got := SocketPath(overLimit)
-	if got == overLimit+suffix {
-		t.Fatalf("over-long dir kept the plain path %q", got)
-	}
-	if len(got) > maxSocketPath {
-		t.Fatalf("hashed fallback is %d bytes: %q", len(got), got)
-	}
-	if filepath.Dir(got) != os.TempDir() {
-		t.Fatalf("fallback not under the OS temp dir: %q", got)
-	}
-	if base := filepath.Base(got); !strings.HasPrefix(base, "pigo-") || !strings.HasSuffix(base, ".sock") {
-		t.Fatalf("fallback name = %q, want pigo-<hash>.sock", base)
-	}
-}
-
-func TestSocketPathHashIsDeterministicAndUnique(t *testing.T) {
-	skipOnWindows(t)
-	a := longPath(200)
-	b := longPath(201) // differs only in length
-
-	first, second := SocketPath(a), SocketPath(a)
-	if first != second {
-		t.Fatalf("fallback is not deterministic: %q vs %q", first, second)
-	}
-	if SocketPath(b) == first {
-		t.Fatalf("two different long dirs collided on %q", first)
-	}
-
-	// The hashed name must be a usable socket path, which is the whole point of
-	// the fallback: listen, probe, and let the helper clean it up.
-	ln, err := net.Listen("unix", first)
-	if err != nil {
-		t.Fatalf("listen on fallback socket: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(first) })
-	if !Probe(first, 200*time.Millisecond) {
-		t.Fatal("probe did not see the listener on the fallback socket path")
-	}
-}
-
-func TestSocketPathLongTempDirStillFits(t *testing.T) {
-	skipOnWindows(t)
-	// $TMPDIR can itself be long (a deep CI workspace, a sandboxed build root).
-	// The hashed fallback must then pick a shorter root instead of returning a
-	// path that still exceeds the unix-socket limit.
-	longTmp := longPath(150)
-	t.Setenv("TMPDIR", longTmp)
-	if len(os.TempDir()) <= maxSocketPath {
-		t.Fatalf("test setup: TMPDIR %q is too short to exercise the fallback", os.TempDir())
-	}
-
-	dir := longPath(220)
-	got := SocketPath(dir)
-	if len(got) > maxSocketPath {
-		t.Fatalf("fallback with a long TMPDIR is %d bytes (> %d): %q", len(got), maxSocketPath, got)
-	}
-	if filepath.Dir(got) == longTmp {
-		t.Fatalf("fallback stayed in the over-long TMPDIR: %q", got)
-	}
-	// It must still be the same deterministic name, just rooted elsewhere, so two
-	// processes agree on where to meet.
-	if base := filepath.Base(got); !strings.HasPrefix(base, "pigo-") || !strings.HasSuffix(base, ".sock") {
-		t.Fatalf("fallback name = %q, want pigo-<hash>.sock", base)
-	}
-	if again := SocketPath(dir); again != got {
-		t.Fatalf("fallback is not deterministic with a long TMPDIR: %q vs %q", got, again)
-	}
-	// And it must be usable: shorten further only if the chosen root does not
-	// exist (a container without /tmp is unusual, but the test should not fail
-	// for that reason).
-	ln, err := net.Listen("unix", got)
-	if err != nil {
-		if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
-			t.Skipf("chosen root %q does not exist: %v", filepath.Dir(got), err)
-		}
-		t.Fatalf("listen on fallback socket %q: %v", got, err)
-	}
-	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(got) })
-	if !Probe(got, 200*time.Millisecond) {
-		t.Fatal("probe did not see the listener on the fallback socket path")
-	}
-}
-
-func TestLongDirStateAndTokenRoundTrip(t *testing.T) {
-	skipOnWindows(t)
-	// A deep, long state directory still works: everything except the socket is
-	// an ordinary file, and the socket falls back to the temp dir. The nesting is
-	// long enough (even under a short t.TempDir) that the fallback is the path
-	// actually under test here.
-	dir := filepath.Join(t.TempDir(), strings.Repeat("nested/", 12)+"state")
-	socket := SocketPath(dir)
-	if socket == filepath.Join(dir, "server.sock") {
-		t.Fatalf("expected the hashed socket fallback for a %d-byte dir, got %q", len(dir), socket)
-	}
-	if len(socket) > maxSocketPath {
-		t.Fatalf("long dir produced an over-long socket path: %q", socket)
-	}
-	started := time.Date(2024, 5, 1, 12, 30, 15, 123456789, time.UTC)
-	want := State{PID: 4242, Version: 1, StartedAt: started, Socket: socket}
-	if err := WriteState(dir, want); err != nil {
-		t.Fatalf("WriteState in a long dir: %v", err)
-	}
-	got, err := ReadState(dir)
-	if err != nil {
-		t.Fatalf("ReadState in a long dir: %v", err)
-	}
-	if got.PID != want.PID || got.Version != want.Version || got.Socket != want.Socket {
-		t.Fatalf("state = %+v, want %+v", got, want)
-	}
-	if !got.StartedAt.Equal(started) {
-		t.Fatalf("startedAt = %s, want %s", got.StartedAt, started)
 	}
 }
 
@@ -665,120 +522,6 @@ func TestProbeMissingSocket(t *testing.T) {
 	}
 }
 
-func TestProbeLiveThenDeadSocket(t *testing.T) {
-	skipOnWindows(t)
-	socket := SocketPath(t.TempDir())
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	if !Probe(socket, 500*time.Millisecond) {
-		t.Fatal("live socket probed as dead")
-	}
-
-	// A crashed host leaves the file behind; after the listener goes away the
-	// probe must report the socket as stale so the next start can reclaim it.
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	if Probe(socket, 500*time.Millisecond) {
-		t.Fatal("closed socket probed as live")
-	}
-	_ = os.Remove(socket)
-}
-
-func TestProbeRegularFileIsNotAHost(t *testing.T) {
-	skipOnWindows(t)
-	path := filepath.Join(t.TempDir(), "not-a-socket")
-	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-	if Probe(path, 100*time.Millisecond) {
-		t.Fatal("a regular file probed as a live host")
-	}
-}
-
-// TestStaleStateDetection covers the shutdown-after-crash path the CLI relies
-// on: ReadState still yields a pid, but Probe says nobody is listening, which is
-// what `pigo serve status` reports as "not responding".
-func TestStaleStateDetection(t *testing.T) {
-	skipOnWindows(t)
-	dir := t.TempDir()
-	t.Setenv("PIGO_HOME", dir)
-	socket := SocketPath(dir)
-
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	live := State{PID: os.Getpid(), Version: 1, StartedAt: time.Now().UTC(), Socket: socket}
-	if err := WriteState(dir, live); err != nil {
-		t.Fatalf("WriteState: %v", err)
-	}
-	if !Probe(live.Socket, 500*time.Millisecond) {
-		t.Fatal("a host that is listening probed as dead")
-	}
-
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	st, err := ReadState(dir)
-	if err != nil {
-		t.Fatalf("ReadState after the host died: %v", err)
-	}
-	if st.PID != live.PID {
-		t.Fatalf("stale state pid = %d, want %d", st.PID, live.PID)
-	}
-	if Probe(st.Socket, 200*time.Millisecond) {
-		t.Fatal("stale state should not probe as live")
-	}
-
-	// RemoveAll is what the next start (or `serve stop`) uses to clear it.
-	RemoveAll(dir)
-	if _, err := ReadState(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("ReadState after RemoveAll = %v, want os.ErrNotExist", err)
-	}
-	_ = os.Remove(socket)
-}
-
-func TestRemoveAllRemovesOnlyHostFiles(t *testing.T) {
-	skipOnWindows(t)
-	dir := t.TempDir()
-	t.Setenv("PIGO_HOME", dir)
-
-	if err := WriteState(dir, State{PID: 1, Version: 1, StartedAt: time.Now().UTC(), Socket: SocketPath(dir)}); err != nil {
-		t.Fatalf("WriteState: %v", err)
-	}
-	if err := WriteToken(dir, "secret"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	socket := SocketPath(dir)
-	if err := os.WriteFile(socket, nil, 0o600); err != nil {
-		t.Fatalf("seed socket file: %v", err)
-	}
-	// An unrelated file must survive: RemoveAll owns three names, not the dir.
-	keep := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(keep, []byte("{}"), 0o600); err != nil {
-		t.Fatalf("seed unrelated file: %v", err)
-	}
-
-	RemoveAll(dir)
-
-	for _, path := range []string{socket, StatePath(dir), TokenPath(dir)} {
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("%s still exists after RemoveAll (err=%v)", path, err)
-		}
-	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Fatalf("RemoveAll removed an unrelated file: %v", err)
-	}
-
-	// Idempotent: a second shutdown, or a shutdown after a crash, must not fail
-	// or panic on missing files.
-	RemoveAll(dir)
-	RemoveAll(filepath.Join(dir, "never-created"))
-}
-
 func TestDefaultDirWithoutHome(t *testing.T) {
 	skipOnWindows(t)
 	// Neither PIGO_HOME nor HOME: DefaultDir has nothing to work with and says so
@@ -808,40 +551,5 @@ func TestWriteStateWhenDirIsAFile(t *testing.T) {
 	// The blocker is untouched: a failed write never truncates what is there.
 	if raw, err := os.ReadFile(blocker); err != nil || string(raw) != "not a directory" {
 		t.Fatalf("blocker damaged: %q, %v", raw, err)
-	}
-}
-
-func TestRemoveAllIsBestEffort(t *testing.T) {
-	skipOnWindows(t)
-	dir := t.TempDir()
-	t.Setenv("PIGO_HOME", dir)
-
-	// A non-empty directory where the state file belongs cannot be removed with
-	// os.Remove; shutdown must still clean up the token and socket rather than
-	// aborting on the first failure.
-	if err := os.Mkdir(StatePath(dir), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(StatePath(dir), "inner"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("seed inner file: %v", err)
-	}
-	if err := WriteToken(dir, "tok"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if err := os.WriteFile(SocketPath(dir), nil, 0o600); err != nil {
-		t.Fatalf("seed socket: %v", err)
-	}
-
-	RemoveAll(dir)
-
-	if _, err := os.Stat(TokenPath(dir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("token survived RemoveAll: %v", err)
-	}
-	if _, err := os.Stat(SocketPath(dir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("socket survived RemoveAll: %v", err)
-	}
-	// The undeletable state directory is still there, as expected.
-	if _, err := os.Stat(StatePath(dir)); err != nil {
-		t.Fatalf("state dir vanished: %v", err)
 	}
 }

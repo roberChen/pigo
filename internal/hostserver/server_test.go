@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/hostapi"
+	"github.com/smallnest/pigo/internal/hostpath"
 	"github.com/smallnest/pigo/internal/runtime"
 	"github.com/smallnest/pigo/internal/session"
 	"github.com/smallnest/pigo/internal/trust"
@@ -227,7 +229,7 @@ func (fx *fixture) dial(t *testing.T) *testClient {
 // rawDial connects without handshaking, for the unauthorized-path tests.
 func (fx *fixture) rawDial(t *testing.T) *testClient {
 	t.Helper()
-	nc, err := net.Dial("unix", fx.srv.Socket())
+	nc, err := hostpath.Dial(fx.srv.Socket(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -794,6 +796,12 @@ func TestUnknownMethodDoesNotCloseConnection(t *testing.T) {
 }
 
 func TestSocketAndTokenPermissions(t *testing.T) {
+	// POSIX permission bits are the defense this test pins. Windows uses a pipe
+	// DACL instead (internal/hostpath/endpoint_windows_test.go) and reports no
+	// useful file mode.
+	if goruntime.GOOS == "windows" {
+		t.Skip("unix socket mode bits are POSIX-only; windows restricts the pipe with a DACL")
+	}
 	fx := newFixture(t, &fakeFactory{})
 	info, err := os.Stat(fx.srv.Socket())
 	if err != nil {

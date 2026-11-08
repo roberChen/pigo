@@ -5,6 +5,7 @@
 package hostserver
 
 import (
+	"net"
 	"os"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 // DefaultDir is the host's state directory (see hostpath.DefaultDir).
 func DefaultDir() string { return hostpath.DefaultDir() }
 
-// SocketPath returns the unix socket path for dir (see hostpath.SocketPath).
+// SocketPath returns the transport endpoint for dir: a unix socket path on
+// POSIX, a named-pipe name on Windows (see hostpath.SocketPath).
 func SocketPath(dir string) string { return hostpath.SocketPath(dir) }
 
 // TokenPath returns the bearer-token file path for dir.
@@ -45,7 +47,13 @@ func tokenMatches(want, got string) bool { return hostpath.TokenMatches(want, go
 // probeExisting reports whether a live host already listens on socket.
 func probeExisting(socket string, timeout time.Duration) bool { return hostpath.Probe(socket, timeout) }
 
-// cleanup removes the host's socket, state and token files.
+// Listen binds an endpoint with the platform's owner-only protection.
+func Listen(endpoint string) (net.Listener, error) { return hostpath.Listen(endpoint) }
+
+// CleanEndpoint removes a crashed host's stale endpoint.
+func CleanEndpoint(endpoint string) { hostpath.CleanEndpoint(endpoint) }
+
+// cleanup removes the host's endpoint, state and token files.
 func cleanup(dir string) { hostpath.RemoveAll(dir) }
 
 // writeFileAtomic writes a file atomically (used for the state file).

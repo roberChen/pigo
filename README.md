@@ -439,7 +439,7 @@ pigo --continue                   # 续跑最近一次会话
 
 ### Host 守护进程（`pigo serve` / `pigo attach`）
 
-pigo 可以把「执行」与「界面」拆成两个进程：一个常驻的 **host** 持有 provider、工具、会话与磁盘持久化，任意多个 **client** 通过 unix socket 连上去驱动它。这是 TUI / Web UI / 脚本共用同一条链路的入口，接口定义在 `internal/hostapi`，设计见 `docs/architecture.md` 第六节。
+pigo 可以把「执行」与「界面」拆成两个进程：一个常驻的 **host** 持有 provider、工具、会话与磁盘持久化，任意多个 **client** 通过本地传输连上去驱动它——POSIX 上是 `$PIGO_HOME/server.sock` 这个 unix domain socket，Windows 上是 `\\.\pipe\pigo-<hash>` 命名管道。这是 TUI / Web UI / 脚本共用同一条链路的入口，接口定义在 `internal/hostapi`，设计见 `docs/architecture.md` 第六节。
 
 ```bash
 # 前台启动 host（Ctrl-C 退出）
@@ -449,8 +449,8 @@ pigo serve
 pigo serve --daemon
 
 # 查看 / 停止
-pigo serve status                 # pid、启动时间、活跃会话数、socket 路径
-pigo serve stop                   # 优雅退出并清理 socket/token/state
+pigo serve status                 # pid、启动时间、活跃会话数、endpoint（socket / 管道名）
+pigo serve stop                   # 优雅退出并清理 endpoint/token/state
 
 # 客户端：新会话 / 续跑 / 列出本连接的会话
 pigo attach
@@ -462,7 +462,8 @@ pigo attach --list
 
 几个契约值得记住：
 
-- **一个 host 一个进程**：socket、token（0600）与状态文件都在 `--dir`／`$PIGO_HOME` 下；重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
+- **一个 host 一个进程**：endpoint、token（POSIX 上 0600，Windows 上仅当前用户可访问的管道 DACL）与状态文件都由 `--dir`／`$PIGO_HOME` 决定；重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
+- **传输按平台选择，协议不变**：两端说的都是同一套 NDJSON，`internal/hostpath` 负责把它落到具体传输上。Windows 的管道名是状态目录的哈希（管道命名空间任何本地用户都能枚举，明文路径会泄露目录布局），因此 Windows 上状态目录里只有 `server.token` 与 `server.json` 两个文件，没有 socket 文件；崩溃也不会留下可清理的残余，下一次 `serve` 直接重新绑定。
 - **会话属于创建它的连接**：另一条连接既看不到也驱动不了你的会话（`session.list` 只返回自己的），所以两个 UI 同时 attach 不会互相打断。
 - **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
 - **host 拥有 turn**：客户端断开不会中断正在跑的轮次；重连后 resume 能拿回完整历史（含压缩点之后的上下文）。
@@ -1207,7 +1208,7 @@ git push origin v0.2.0
 | `PIGO_HOME` | 覆盖 `~/.pigo` 基础目录（影响 plugins、commands、prompts） |
 | `PIGO_SKILLS_DIR` | 覆盖技能目录（默认 `~/.agents/skills`） |
 | `~/.pigo/sessions` | 会话存储（JSONL） |
-| `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 unix socket、bearer token（0600）与状态文件 |
+| `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 endpoint（POSIX 上是 unix socket 文件）、bearer token（0600）与状态文件；Windows 上 endpoint 是命名管道，不落盘 |
 | `~/.pigo/server.log` | `pigo serve --daemon` 的 stdout/stderr |
 | `~/.pigo/plugins` | 外部插件 |
 | `~/.pigo/prompts` | 提示词模板（pi 对齐；`pigo install` 的安装目标） |

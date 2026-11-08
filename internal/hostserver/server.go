@@ -184,17 +184,15 @@ func (s *Server) Listen() error {
 		}
 		return &ErrAlreadyRunning{PID: pid}
 	}
-	// No live host: anything at the path is stale.
-	_ = os.Remove(s.socket)
-	ln, err := net.Listen("unix", s.socket)
+	// No live host: anything at the path is stale (a unix socket file; on
+	// Windows there is nothing to clean).
+	CleanEndpoint(s.socket)
+	// The transport restricts the endpoint to its owner (socket mode on POSIX,
+	// a one-ACE pipe DACL on Windows); the token is the explicit second factor
+	// for a same-user process that found it.
+	ln, err := Listen(s.socket)
 	if err != nil {
 		return fmt.Errorf("host: listen %s: %w", s.socket, err)
-	}
-	// Socket permissions are the primary defense; the token is the explicit
-	// second factor for a same-user process that found the path.
-	if err := os.Chmod(s.socket, 0o600); err != nil {
-		ln.Close()
-		return fmt.Errorf("host: chmod socket: %w", err)
 	}
 	token, err := NewToken()
 	if err != nil {

@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -203,14 +204,19 @@ func runningHost(t *testing.T, dir string, f hostserver.Factory, store *session.
 	return srv
 }
 
-// leftoverSocket leaves a bound-then-closed unix socket behind, which is the
-// inode a SIGKILLed host leaves: the socket path exists but nothing accepts on it.
+// leftoverSocket recreates what a SIGKILLed host leaves behind: an endpoint that
+// is named but accepts nothing. On POSIX that is a bound-then-closed socket file;
+// a named pipe disappears with its listener, so on Windows the crash footprint is
+// simply a pipe name nobody serves — which is what SocketPath already returns.
 func leftoverSocket(t *testing.T, dir string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	socket := hostpath.SocketPath(dir)
+	if goruntime.GOOS == "windows" {
+		return socket
+	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -711,10 +717,13 @@ func TestServeDirDefaultsToPigoHome(t *testing.T) {
 	awaitSocket(t, home)
 	waitForOutput(t, serve.out, "listening on")
 
-	for _, p := range []string{hostpath.SocketPath(home), hostpath.TokenPath(home), hostpath.StatePath(home)} {
+	for _, p := range []string{hostpath.TokenPath(home), hostpath.StatePath(home)} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("%s missing for the default state dir: %v", p, err)
 		}
+	}
+	if !hostpath.Probe(hostpath.SocketPath(home), time.Second) {
+		t.Fatalf("default state dir host is not listening on %s", hostpath.SocketPath(home))
 	}
 	if !strings.Contains(serve.out.String(), hostpath.SocketPath(home)) {
 		t.Fatalf("startup line %q does not name the default socket %q", serve.out.String(), hostpath.SocketPath(home))
@@ -750,10 +759,13 @@ func TestServeRelativeDir(t *testing.T) {
 	waitForOutput(t, serve.out, "listening on")
 
 	abs := filepath.Join(base, "run", "host")
-	for _, p := range []string{hostpath.SocketPath(abs), hostpath.TokenPath(abs), hostpath.StatePath(abs)} {
+	for _, p := range []string{hostpath.TokenPath(abs), hostpath.StatePath(abs)} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("%s missing for a relative --dir: %v", p, err)
 		}
+	}
+	if !hostpath.Probe(hostpath.SocketPath(abs), time.Second) {
+		t.Fatalf("relative --dir host is not listening on %s", hostpath.SocketPath(abs))
 	}
 
 	var so, se bytes.Buffer
@@ -786,11 +798,15 @@ func TestServeDirCreatedWhenMissing(t *testing.T) {
 	if !info.IsDir() {
 		t.Fatalf("%s is not a directory", dir)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("state dir mode = %o, want 700 (the token lives here)", perm)
+	// 0700 keeps the token (which lives here) private. Windows has no POSIX mode
+	// bits to assert; the directory is protected by the profile ACL instead.
+	if goruntime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("state dir mode = %o, want 700 (the token lives here)", perm)
+		}
 	}
-	if _, err := os.Stat(hostpath.SocketPath(dir)); err != nil {
-		t.Fatalf("socket missing in the created dir: %v", err)
+	if !hostpath.Probe(hostpath.SocketPath(dir), time.Second) {
+		t.Fatalf("endpoint missing in the created dir: %s does not answer", hostpath.SocketPath(dir))
 	}
 
 	var so, se bytes.Buffer

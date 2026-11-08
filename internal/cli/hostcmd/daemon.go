@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -69,9 +68,9 @@ func startDaemon(opts ServeOptions, dir string, out, errOut io.Writer) int {
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.Stdin = nil
-	// Setsid detaches from the terminal's process group so Ctrl-C or a closed
-	// terminal does not take the host down; the host owns its own shutdown.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// The host must outlive the terminal that started it; how that is achieved
+	// differs per platform (see detachProcess).
+	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(errOut, "pigo serve: start daemon: %v\n", err)
 		return 1

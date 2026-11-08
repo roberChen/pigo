@@ -1,5 +1,6 @@
 // Package hostpath owns the host's on-disk footprint: the state directory, the
-// unix socket path, the bearer token and the informational state file.
+// transport endpoint (a unix socket or a named pipe), the bearer token and the
+// informational state file.
 //
 // It is a package of its own so that a *client* can find a running host without
 // importing the daemon — `hostserver` links the whole run assembly (providers,
@@ -10,22 +11,14 @@ package hostpath
 
 import (
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
 )
-
-// maxSocketPath is a conservative bound on sockaddr_un.sun_path. Linux allows
-// 108 bytes, macOS 104; staying under the smaller limit keeps the same layout
-// working everywhere.
-const maxSocketPath = 100
 
 // DefaultDir is the host's state directory: $PIGO_HOME, or ~/.pigo. It matches
 // the trust store and the session store so one PIGO_HOME moves all of pigo's
@@ -39,59 +32,6 @@ func DefaultDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".pigo")
-}
-
-// SocketPath returns the unix socket path for the host state directory dir.
-//
-// A unix socket path is capped at ~104 bytes, and $PIGO_HOME can easily be
-// longer (CI temp dirs, deep home directories). Rather than fail at listen time
-// with a cryptic "invalid argument", a too-long path is replaced by a hashed
-// name in the OS temp dir. The hash covers the absolute directory, so two
-// different PIGO_HOMEs never collide. The candidate roots are tried shortest
-// first, because $TMPDIR itself can be long enough to blow the limit.
-func SocketPath(dir string) string {
-	path := filepath.Join(dir, "server.sock")
-	if len(path) <= maxSocketPath {
-		return path
-	}
-	sum := sha1.Sum([]byte(dir))
-	name := "pigo-" + hex.EncodeToString(sum[:8]) + ".sock"
-	// os.TempDir() normally fits, but a long $TMPDIR does not; the fixed roots
-	// are the standard short ones. The choice depends only on the environment,
-	// so a client and its host compute the same path.
-	candidate := ""
-	for _, root := range socketRoots() {
-		p := filepath.Join(root, name)
-		if len(p) <= maxSocketPath {
-			return p
-		}
-		if candidate == "" {
-			candidate = p
-		}
-	}
-	// Nothing fits: return the first candidate rather than a path the caller
-	// cannot distinguish from a working one. listen will fail with a clear error.
-	return candidate
-}
-
-// socketRoots lists the directories a hashed socket may live in, shortest
-// first. os.TempDir() is first so the common case is unchanged; the literals are
-// the conventional short temp roots on unix.
-func socketRoots() []string {
-	roots := []string{os.TempDir()}
-	for _, root := range []string{"/tmp", "/var/tmp"} {
-		dup := false
-		for _, have := range roots {
-			if have == root {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			roots = append(roots, root)
-		}
-	}
-	return roots
 }
 
 // TokenPath returns the bearer-token file path for dir.
@@ -192,31 +132,4 @@ func ReadToken(dir string) (string, error) {
 // prefix from response timing.
 func TokenMatches(want, got string) bool {
 	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
-}
-
-// Probe reports whether a live host is listening on socket. A dial failure means
-// the file is stale (a crashed host leaves the socket behind), which the caller
-// resolves by removing it.
-func Probe(socket string, timeout time.Duration) bool {
-	if socket == "" {
-		return false
-	}
-	conn, err := net.DialTimeout("unix", socket, timeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// RemoveAll removes the host's socket, state and token files. Missing files are
-// not an error: shutdown after a crash still tidies what is left.
-func RemoveAll(dir string) {
-	for _, path := range []string{SocketPath(dir), StatePath(dir), TokenPath(dir)} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			// Best effort: a leftover file must not turn a clean shutdown into a
-			// failure (the next start overwrites it).
-			_ = err
-		}
-	}
 }

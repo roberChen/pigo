@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/smallnest/pigo/internal/cli/run"
@@ -128,9 +127,9 @@ func runStart(opts ServeOptions, out, errOut io.Writer) int {
 	}
 	fmt.Fprintf(out, "pigo host listening on %s (pid %d)\n", srv.Socket(), os.Getpid())
 
-	// SIGTERM/SIGINT shut down gracefully so attached clients get a reason and
-	// the socket/token files are removed.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A stop signal shuts the host down gracefully so attached clients get a
+	// reason and the endpoint/token/state files are removed.
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer stop()
 	if err := srv.Serve(ctx); err != nil {
 		fmt.Fprintf(errOut, "pigo serve: %v\n", err)

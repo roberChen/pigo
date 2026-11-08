@@ -35,7 +35,7 @@
 
 > 优先级判据：**P0** = 影响面最大、是长任务上下文溢出/CC 标志能力的直接诱因；**P1** = 支撑鲁棒性度量与错误恢复；**P2** = 次优先级，本文仅记录、协同设计后期展开。
 >
-> **2026-11 刷新**（UI / Host 拆分）：新增常驻 host 能力——`pigo serve`（前台 / `--daemon` / `status` / `stop`）把 provider、工具、会话与持久化收进单个守护进程，`pigo attach` 作为行式客户端经 unix socket 驱动它，协议见 `internal/hostapi`、设计见 `docs/architecture.md` §6。对 harness 的影响集中在维度 7（安全护栏）：非信任目录的副作用工具确认由终端提问改为 `permission_request` 事件交给**会话属主连接**回答，无答案（超时 / 取消 / 断开）一律拒绝；`serve --approve` 的 session trust 授予 server 实际使用的那个 `trust.Manager`。其余维度行为不变。
+> **2026-11 刷新**（UI / Host 拆分）：新增常驻 host 能力——`pigo serve`（前台 / `--daemon` / `status` / `stop`）把 provider、工具、会话与持久化收进单个守护进程，`pigo attach` 作为行式客户端经本地传输（POSIX 上的 unix socket，Windows 上的命名管道，统一收敛在 `internal/hostpath`）驱动它，协议见 `internal/hostapi`、设计见 `docs/architecture.md` §6。对 harness 的影响集中在维度 7（安全护栏）：非信任目录的副作用工具确认由终端提问改为 `permission_request` 事件交给**会话属主连接**回答，无答案（超时 / 取消 / 断开）一律拒绝；`serve --approve` 的 session trust 授予 server 实际使用的那个 `trust.Manager`。其余维度行为不变。
 >
 > **2026-10 刷新**（#546）：provider 层的三种线上协议收敛到 `internal/provider/turn.go` 的共享 `assistantTurn`；新增跨协议一致性测试作为回归网。Responses driver 从 `openai-go` SDK 切换为自有 SSE 解码器 + 共享 transport，`go.mod` 随之移除该依赖及 4 个传递依赖。协议选择与 `--protocol openai/resp_api` 的用户可见行为不变。
 >

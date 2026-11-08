@@ -176,6 +176,25 @@ interactive REPL/TUI.
   compaction attaches at the right node when the session was resumed first.
 
 ### Changed
+- **`pigo serve` / `pigo attach` now work on Windows**: the host protocol was
+  written against a unix domain socket at `$PIGO_HOME/server.sock`, so `serve`
+  could not start at all on Windows (a unix socket file has no meaning there,
+  and `Setsid`/`SIGTERM` do not exist). The transport now lives behind
+  `internal/hostpath` as one opaque endpoint string plus `Listen` / `Dial` /
+  `Probe` / `CleanEndpoint`: POSIX keeps the socket file (same path, same 0600
+  mode, same stale-file cleanup), Windows binds a named pipe at
+  `\\.\pipe\pigo-<hash>` with a protected DACL granting only the current
+  user and `FILE_PIPE_REJECT_REMOTE_CLIENTS`. The pipe name is a hash of the
+  state directory rather than a readable path, because the pipe namespace is
+  enumerable by any local user; a pipe also disappears with its listener, so
+  Windows has no crash residue to reclaim and `Footprint` lists only the token
+  and state file. Daemon detachment and graceful shutdown were split the same
+  way (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, and Ctrl-C as the only
+  graceful signal since Windows has no SIGTERM). The wire protocol, method set
+  and client-side behaviour are unchanged, and the transport tests were split
+  into `endpoint_posix_test.go` / `endpoint_windows_test.go` so each platform
+  asserts only what it can actually promise while the rest of the host suite
+  goes through the endpoint abstraction. `GOOS=windows go vet ./...` is clean.
 - **Image support is declared on the model, never on the provider**: a gateway
   routinely serves both vision and text-only ids behind one endpoint, so
   `supports_images` on `[[providers]]` had to be wrong for half of its models.

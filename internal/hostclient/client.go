@@ -118,7 +118,7 @@ func Connect(opts Options) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	nc, err := net.DialTimeout("unix", socket, timeout)
+	nc, err := hostpath.Dial(socket, timeout)
 	if err != nil {
 		return nil, ErrNotRunning{Dir: opts.Dir, Socket: socket}
 	}

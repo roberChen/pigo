@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/hostapi"
+	"github.com/smallnest/pigo/internal/hostpath"
 	"github.com/smallnest/pigo/internal/runtime"
 	"github.com/smallnest/pigo/internal/session"
 	"github.com/smallnest/pigo/internal/trust"
@@ -248,7 +250,7 @@ type lineConn struct {
 // newLineConn dials without handshaking.
 func newLineConn(t *testing.T, fx *fixture) *lineConn {
 	t.Helper()
-	nc, err := net.Dial("unix", fx.srv.Socket())
+	nc, err := hostpath.Dial(fx.srv.Socket(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1957,7 +1959,7 @@ func TestShutdownIsIdempotent(t *testing.T) {
 		t.Fatalf("%d sessions survived the first shutdown", got)
 	}
 	// The socket is gone, so nothing can reconnect to a dead host.
-	if conn, err := net.Dial("unix", fx.srv.Socket()); err == nil {
+	if conn, err := hostpath.Dial(fx.srv.Socket(), time.Second); err == nil {
 		conn.Close()
 		t.Fatal("a connection to the shut-down host succeeded")
 	}
@@ -2048,7 +2050,14 @@ func TestServerConstructionGuards(t *testing.T) {
 // file with no listener and a state file naming a dead pid must not be mistaken for
 // a running host, and anything at the socket path (even a regular file) is
 // replaced.
+//
+// Both subtests are about a *file* occupying the endpoint, so they are POSIX
+// only: a windows endpoint is a named pipe, which lives in the kernel namespace
+// and cannot outlive (or be shadowed by) a file.
 func TestListenHandlesStaleFootprint(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("stale file footprints do not exist for named pipes")
+	}
 	t.Run("stale socket and state file", func(t *testing.T) {
 		dir := t.TempDir()
 		sock := SocketPath(dir)
