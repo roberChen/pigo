@@ -52,10 +52,12 @@ func (t *ViewImageTool) Name() string { return "view_image" }
 
 // Description implements AgentTool.
 func (t *ViewImageTool) Description() string {
-	return "View a local image file (PNG, JPEG, GIF, WebP, BMP, TIFF, ...) with a vision-capable " +
-		"model. Returns the image itself plus its path and mime type. Use it to inspect screenshots, " +
-		"diagrams, charts, photos or UI mockups in the workspace. Only works when the configured " +
-		"model accepts image input."
+	return "View a local image file with a vision-capable model. Returns the image itself plus its " +
+		"path and mime type. Use it to inspect screenshots, diagrams, charts, photos or UI mockups in " +
+		"the workspace. Only PNG, JPEG, GIF and WebP files can be sent to a model (max 8 MiB); for " +
+		"other formats (HEIC, BMP, TIFF, SVG, ...) convert first, e.g. with `sips -s format png`, " +
+		"ImageMagick `convert`, or `rsvg-convert`. Only works when the configured model accepts " +
+		"image input."
 }
 
 // Schema implements AgentTool.

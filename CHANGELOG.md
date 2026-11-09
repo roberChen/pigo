@@ -29,27 +29,50 @@ interactive REPL/TUI.
   wiring this: `attach`'s renderer took its write lock and then called the
   lock-taking printer on a turn-end/tool-start line, deadlocking the event
   dispatcher (the turn hung with the mutex held and no output arriving).
-- **A failed request no longer leaves an image behind to break every later
-  turn, without second-guessing the conversation**: declaring
+- **An image no endpoint accepts is refused before it enters a conversation,
+  and the request path can no longer carry one**: every hosted multimodal API
+  accepts the same closed set — PNG, JPEG, GIF and WebP — but pigo chose the mime
+  type from the file extension and forwarded whatever it found, so a JPEG saved as
+  `screenshot.png`, a BMP or an iPhone HEIC reached the wire as an
+  "unsupported image" 400 that failed the *whole* request; because the picture was
+  already in the history, every later turn — and every `--resume` of that
+  session — failed the same way. Ingestion (`--image`, pasted paths, `@image:`
+  references, `read` on an image file, `view_image`) now sniffs the bytes before
+  the extension, refuses anything the wire cannot carry with the fix in the
+  message ("convert it to PNG or JPEG"), and rejects files whose bytes contradict
+  their declared type; the per-image cap is 8 MiB, applied at start-up for
+  `--image` too. The request boundary re-checks the history
+  (`imageload.SanitizeWire`) and replaces anything unsendable with a notice — the
+  session keeps the picture, only the LLM-bound copy loses it — so a resumed
+  session recorded before this rule no longer deadlocks on it.
+- **The runtime image fallback now also repairs the picture that is already in
+  the conversation, without second-guessing a healthy vision model**: declaring
   `supports_images = true` (or relying on a built-in provider's default) is a
-  promise pigo cannot verify, and a gateway that refuses the image used to turn
-  the whole run into an error — worse, the picture stayed in the history, so
-  every later request (this run and every run after it) failed the same way. The
-  repair now has narrow, explicit conditions and never reads the error text (a
-  vendor may answer with a bare `400 Bad Request`, and a missed classification is
-  unrecoverable). A turn is repaired only when the conversation had **no image
-  before the request**, the request itself **added one through a tool call**
-  (`view_image`, or `read` on an image file), the model was **not explicitly
-  declared vision-capable** in the user's config, and the run has not been
-  repaired yet. Then the tool call becomes a failed result quoting the provider
-  error (keeping which file it saw) and the turn is retried once without the
-  picture. The repair is scoped to that one turn: it installs no run-wide
-  "no images" gate, because deciding that an endpoint can never see images is the
-  model's call once the API error is in front of it — a later `view_image`/`read`
-  still hands over the picture and a persistent refusal is visible to the model
-  there. A history that already carried an image, a user-attached image, a
-  failure with no new image, a declared-vision model, a cancelled run, and a run
-  with no images keep the terminal behavior; a second failure stops too.
+  promise pigo cannot verify, and a gateway that refuses an image used to turn the
+  whole run into an error — worse, the picture stayed in the history, so every
+  later request (this run and every run after it, including a resumed session)
+  failed the same way. There are now two bounded triggers, and at most one repair
+  per run. **Explicit**: the provider's error names the image (`unsupported
+  image`, `media_type`, `input_image`, `图片格式不支持`, … — see
+  `internal/runtime/image_error.go`) and the request carried one; then every image
+  in the request is removed, the error text is quoted in each notice, and the turn
+  is retried. This reaches cases the old shape-based rule could not: a
+  user-attached image, a second screenshot, a resumed session, and even a model the
+  user explicitly declared vision-capable — a payload the endpoint will not carry
+  cannot be sent no matter what the config says, and refusing to repair it would
+  strand the session forever. **Structural** (unchanged, for the bare `400 Bad
+  Request` a vendor may answer with): the conversation had **no image before the
+  request**, the request itself **added one through a tool call** (`view_image`,
+  or `read` on an image file), and the model is **not explicitly declared
+  vision-capable**. Either way the targeted tool call becomes a failed result
+  quoting the provider error (keeping which file it saw) and the turn is retried
+  once without the picture. The repair is scoped to that one turn: it installs no
+  run-wide "no images" gate, because deciding that an endpoint can never see
+  images is the model's call once the API error is in front of it — a later
+  `view_image`/`read` still hands over the picture. An error that neither names an
+  image nor fits the structural shape (a plain `500` on a history that already had
+  images), a cancelled run, a run with no images, and a second failure keep the
+  terminal behavior.
 - **The TUI composer no longer collapses lines once it fills the screen**: past
   six lines (and past the terminal height in full screen) the editor silently
   stopped accepting newlines, so every further line was appended to the last row
@@ -210,6 +233,29 @@ interactive REPL/TUI.
   found under a provider is rejected with a message saying where it belongs.
 
 ### Added
+- **`/rewind tool [n]`: roll back one tool call instead of a whole turn**:
+  `/rewind` could only undo a whole turn, so a single bad tool output — the
+  result an endpoint rejects, a command whose output poisons the rest of the
+  conversation — forced you to throw away the turns that followed it. `/rewind
+  tool` now lists the conversation's individual calls (name, first line of
+  output, marked when it failed or is already a placeholder), and `/rewind tool
+  n` replaces that call's output with an **abnormal tool call** placeholder
+  carrying the arguments the model sent and why the output is gone, then
+  branches the conversation from the call. The assistant turn that asked for
+  the call stays, so the call/result pairing the providers require is intact,
+  and the model is told it may re-issue the call. It needs no file snapshots and
+  does not touch any files: the abandoned branch remains on disk for `/tree` to
+  return to.
+- **A rejected request is now repaired before it is reported**: when a provider
+  rejects a request right after a tool produced output (an oversized or
+  malformed payload, an endpoint that refuses a particular result), the turn
+  used to fail with the provider's error even though the rest of the
+  conversation was fine. The loop now replaces the output that request added
+  with the same abnormal placeholder and retries once, quoting the provider's
+  error verbatim so the model can work around it. Credential and rate-limit
+  rejections (401/403/429/quota) and cancelled runs are not retried, because a
+  retry cannot fix them; image-carrying requests keep their own, narrower
+  repair path.
 - **`pigo serve` / `pigo attach`: the agent can now run in a host daemon and be
   driven by any client**: execution and UI were welded together — the REPL and
   TUI each assembled providers, tools and sessions in-process, so a second

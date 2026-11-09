@@ -5,6 +5,7 @@ package repl
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,5 +86,94 @@ func TestREPLRewindDisabled(t *testing.T) {
 	runRewind(&out, &deps, "/rewind")
 	if !strings.Contains(out.String(), "unavailable") {
 		t.Errorf("want unavailable message, got:\n%s", out.String())
+	}
+}
+
+// /rewind tool lists the conversation's tool calls without needing snapshots.
+func TestREPLRewindToolLists(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, _ := newTestDeps(t, p)
+	deps.snap = nil // no file snapshots: the tool listing does not need them
+	deps.agentCtx.Messages = agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
+			agentcore.NewToolCallContent("c1", "read", json.RawMessage(`{"path":"a.go"}`)),
+			agentcore.NewToolCallContent("c2", "bash", json.RawMessage(`{"command":"ls"}`)),
+		}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "c1", ToolName: "read",
+			Content: agentcore.ContentList{agentcore.NewTextContent("package main")}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "c2", ToolName: "bash",
+			Content: agentcore.ContentList{agentcore.NewTextContent("boom")}, IsError: true},
+	}
+
+	var out bytes.Buffer
+	runRewind(&out, &deps, "/rewind tool")
+	got := out.String()
+	for _, want := range []string{"tool calls", "1. read", "package main", "2. bash", "[error]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("listing missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// /rewind tool N replaces that call's output and branches the conversation.
+func TestREPLRewindToolRollsBack(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, _ := newTestDeps(t, p)
+	deps.snap = nil
+	deps.agentCtx.Messages = agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
+			agentcore.NewToolCallContent("c1", "read", json.RawMessage(`{"path":"a.go"}`)),
+		}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "c1", ToolName: "read",
+			Content: agentcore.ContentList{agentcore.NewTextContent("the output that broke the request")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("later turn")}},
+	}
+	// persisted stays 0: RollbackToolCall flushes the unsaved turn itself, which is
+	// what makes the branch point appear on disk.
+
+	var out bytes.Buffer
+	runRewind(&out, &deps, "/rewind tool 1")
+
+	if !strings.Contains(out.String(), "rolled back read") {
+		t.Fatalf("missing confirmation:\n%s", out.String())
+	}
+	if got := len(deps.agentCtx.Messages); got != 3 {
+		t.Fatalf("context has %d messages, want 3 (the later turn is dropped)", got)
+	}
+	tr, ok := deps.agentCtx.Messages[2].(agentcore.ToolResultMessage)
+	if !ok || !agentcore.IsAbnormalToolResult(tr) {
+		t.Fatalf("third message is not the placeholder: %+v", deps.agentCtx.Messages[2])
+	}
+	if deps.persisted != 3 || deps.curLeaf == "" {
+		t.Errorf("cursors not advanced: persisted=%d leaf=%q", deps.persisted, deps.curLeaf)
+	}
+}
+
+// Invalid or absent selections are reported, not applied.
+func TestREPLRewindToolRejectsBadSelection(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, _ := newTestDeps(t, p)
+	deps.snap = nil
+
+	var out bytes.Buffer
+	runRewind(&out, &deps, "/rewind tool 1")
+	if !strings.Contains(out.String(), "no tool calls") {
+		t.Errorf("want the empty listing, got:\n%s", out.String())
+	}
+
+	deps.agentCtx.Messages = agentcore.MessageList{
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
+			agentcore.NewToolCallContent("c1", "read", json.RawMessage(`{}`)),
+		}},
+	}
+	out.Reset()
+	runRewind(&out, &deps, "/rewind tool 9")
+	if !strings.Contains(out.String(), "invalid selection") {
+		t.Errorf("want an invalid-selection message, got:\n%s", out.String())
+	}
+	if len(deps.agentCtx.Messages) != 1 {
+		t.Errorf("a rejected selection modified the conversation")
 	}
 }

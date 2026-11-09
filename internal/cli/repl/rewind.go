@@ -40,7 +40,18 @@ func rewindLabel(prompt string) string {
 // turn and prints the numbered restore points (most useful last). With "/rewind
 // N" it restores files to their state before the N-th listed point and switches
 // the conversation to the leaf that preceded that turn.
+//
+// "/rewind tool [n]" is the fine-grained counterpart: it lists the individual
+// tool calls of the conversation, and rolling one back replaces just that call's
+// output with an abnormal placeholder and branches the conversation from the
+// call, so the user can keep everything else. It needs no file snapshots, so it
+// stays available when the snapshot recorder is disabled.
 func runRewind(out io.Writer, deps *replDeps, line string) {
+	fields := strings.Fields(line)
+	if len(fields) >= 2 && (fields[1] == "tool" || fields[1] == "tools") {
+		runRewindTool(out, deps, fields[2:])
+		return
+	}
 	if deps.snap == nil {
 		fmt.Fprintln(out, "rewind is unavailable (file tools are disabled)")
 		return
@@ -50,7 +61,6 @@ func runRewind(out io.Writer, deps *replDeps, line string) {
 	cli.PersistTurn(out, deps)
 
 	points := deps.snap.Points()
-	fields := strings.Fields(line)
 	if len(fields) < 2 {
 		printRewindPoints(out, points)
 		return
@@ -92,6 +102,53 @@ func runRewind(out io.Writer, deps *replDeps, line string) {
 		return
 	}
 	fmt.Fprintf(out, "rewound to before point %d — next prompt continues from here\n", n)
+}
+
+// runRewindTool lists or rolls back one tool call: "/rewind tool" lists them and
+// "/rewind tool n" rolls the n-th back. The listing is numbered newest last, like
+// /rewind's restore points, so n is a position in the list just printed.
+func runRewindTool(out io.Writer, deps *replDeps, args []string) {
+	refs := cli.ToolCalls(deps.agentCtx.Messages)
+	if len(args) == 0 {
+		printToolCalls(out, refs)
+		return
+	}
+	if len(refs) == 0 {
+		fmt.Fprintln(out, "no tool calls in this conversation yet")
+		return
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 1 || n > len(refs) {
+		fmt.Fprintf(out, "invalid selection %q — run /rewind tool to list calls (1..%d)\n", args[0], len(refs))
+		return
+	}
+	ref := refs[n-1]
+	if !cli.RollbackToolCall(out, deps, ref) {
+		return
+	}
+	fmt.Fprintf(out, "rolled back %s (call %s) — its output is now an abnormal placeholder and the conversation continues from that call\n", ref.Name, ref.CallID)
+}
+
+// printToolCalls renders the numbered tool calls, marking failed results and
+// placeholders so a rolled-back call is not mistaken for real output.
+func printToolCalls(out io.Writer, refs []cli.ToolCallRef) {
+	if len(refs) == 0 {
+		fmt.Fprintln(out, "no tool calls in this conversation yet")
+		return
+	}
+	fmt.Fprintln(out, "tool calls (run /rewind tool <n> to replace one call's output with an abnormal placeholder):")
+	for i, r := range refs {
+		status := ""
+		switch {
+		case r.ResultIndex < 0:
+			status = "  [no result]"
+		case r.Abnormal:
+			status = "  [abnormal placeholder]"
+		case r.IsError:
+			status = "  [error]"
+		}
+		fmt.Fprintf(out, "  %d. %s%s  %s\n", i+1, r.Name, status, r.ResultSummary)
+	}
 }
 
 // rewindConversation switches the active leaf to leafID and rebuilds the shared

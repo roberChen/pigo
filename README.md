@@ -175,7 +175,7 @@ pigo -m ollama/qwen2.5-coder -u http://localhost:11434/v1 -p "解释 main.go 做
 | `--no-skills` | | `false` | 禁用技能发现（不加载 `~/.agents/skills`：`/skill` 无技能可选，模型也不再自动调用） |
 | `--no-prompt-templates` | | `false` | 禁用提示词模板发现（不加载 `~/.pigo/{commands,prompts}`、`.pigo/prompts`、config `prompts`、`--prompt-template`）；内置斜杠命令不受影响 |
 | `--prompt-template` | | `nil` | 从文件或目录（非递归）加载提示词模板；可重复（对标 pi `--prompt-template`） |
-| `--image` | | `nil` | 把本地图片附加到首轮提问（视觉模型用）；可重复。`-p` 下随提问一起发送，交互模式下预填到输入框让你补问题。启动时校验存在性/大小/是否为图片 |
+| `--image` | | `nil` | 把本地图片附加到首轮提问（视觉模型用）；可重复。`-p` 下随提问一起发送，交互模式下预填到输入框让你补问题。启动时校验存在性、大小（≤ 8 MiB）与格式（PNG/JPEG/GIF/WebP，其余格式报错并提示转换） |
 | `--system-prompt` | | `""` | 用自定义系统提示词替换默认的 coding-assistant 提示词 |
 | `--append-system-prompt` | | `nil` | 向系统提示词末尾追加文本或文件内容；可重复 |
 | `--version` | `-v` | `false` | 打印版本信息并退出 |
@@ -325,18 +325,19 @@ model remove mycorp-vl                     # 取消
 
 当前模型到底能不能看图，不必翻配置：`/model` 和 `/status` 会直接打印结论与来源，例如 `image input: supported (built-in default)`、`image input: not supported (custom endpoint default)`（并提示用 `model add ... --supports-images` 声明）、`image input: not supported (declared text-only)`（你自己钉死的）。`/models` 列表里也会给纯文本模型标上 `[text only]`。
 
-声明只是"相信"：网关可能把一个 model id 挂在纯文本部署上，悄悄把请求转到别的后端，或者直接用一个看不懂的错误（`400 Bad Request`、非英文提示、pigo 没见过的错误结构）拒掉请求。**靠错误文本判断"是不是图片的问题"会漏判**，而漏判的代价很大：图片留在 history 里，之后每一次请求（包括下一轮对话、下次启动的会话）都会以同样方式失败。
+除能力声明之外，还有一道与模型无关的**格式闸门**：所有托管多模态端点都只接受 **PNG / JPEG / GIF / WebP** 这四种，别的（BMP、TIFF、ICO、AVIF、HEIC、JPEG XL、SVG……）会让**整个请求**以 400 失败，而图片已经进了 history，之后每一次请求（下一轮对话、`--resume` 恢复的会话）都会以同样方式失败。因此 pigo 在**入站处**就拒绝：`--image`、粘贴、`read` 读图片、`view_image` 用同一套校验（`internal/imageload`），单张上限 8 MiB，报错直接给出可执行的下一步——"转成 PNG 或 JPEG 再试"，而不是把一个注定失败的图片块送上去。
 
-因此 pigo 有一个运行时兜底，但它的作用场景很窄，且**完全不读错误文本**——满足下面全部条件才修复：
+判断格式**以字节为准，扩展名只做兜底**：一个存成 `screenshot.png` 的 JPEG 会按 `image/jpeg` 发送（这正是过去最常见的 `unsupported image` 来源），一个被改名成 `.png` 的 HEIC 会按 HEIC 拒绝并说明原因。请求边界还有一次兜底（`imageload.SanitizeWire`）：旧版本记录下来的、或从 MCP / 工具结果里带进来的不支持图片，会在发给模型前被换成"图片已省略+原因"的文字，**会话里仍保留原图**，所以 `--resume` 一个旧会话不会再被同一张图卡死。
 
-1. **本次请求之前会话里没有任何图片**（不剥夺模型已经看过的上下文）；
-2. **本次请求通过工具调用新增了图片**（`view_image`，或 `read` 读图片文件）——这是唯一会被怀疑的对象；
-3. **模型不是用户在 `[[models]]` 里显式声明为视觉的**（显式声明以用户为准，pigo 不去推翻）；
-4. 本次运行还没有修复过（每个运行最多一次）。
+声明只是"相信"：网关可能把一个 model id 挂在纯文本部署上，悄悄把请求转到别的后端，或者干脆用一个看不懂的错误（`400 Bad Request`、非英文提示、pigo 没见过的错误结构）拒掉请求。错误文本**不是一个可靠的信号**（会漏判），而漏判的代价很大：图片留在 history 里，之后每一次请求都会以同样方式失败。所以 pigo 有两个触发条件，任一命中且**本次运行还没修复过**（每次运行最多一次）就修复：
 
-命中时：这些工具调用被改写为失败（保留"看过哪个文件"的文字并引用上游错误），随后**不带图片重试这一轮**。修复只作用于这一轮——**不会**给本次运行装一个"禁止图片"的闸门：之后的 `view_image`/`read` 照常把图片交给模型，如果端点仍然拒绝，模型会从 API 返回的错误里自己看到并决定下一步（换模型、让你贴文字、或者放弃）。是否"这个端点根本不能看图"由模型判断，pigo 不在背后替它做决定。
+**1. 显式：错误文本点名了图片**（`unsupported image`、`media_type`、`input_image`、`图片格式不支持` 等，见 `internal/runtime/image_error.go`），且本次请求确实带了图片。这覆盖"图片已经在会话里"的所有情况——用户 `--image` 贴的图、恢复的会话、第二次截图，以及被显式声明为 vision 的模型仍拒收某个负载。修复时**移除请求里的全部图片**（无从得知是哪一张被拒），并重试这一轮。
 
-以下情况错误照旧终止：会话之前已有图片、用户自己贴的图（`--image` 或粘贴）、失败的那次请求没新增图片、显式声明 vision 的模型、已取消的运行、以及本来就没有图片的运行。重试仍失败时同样终止。
+**2. 结构化：错误文本看不懂，但会话形状指向"就是这张图"**——本次请求之前会话里没有任何图片（不剥夺模型已经看过的上下文）、本次请求通过工具调用新增了图片（`view_image`，或 `read` 读图片文件）、模型不是用户显式声明为视觉的。这条不读错误文本，也不推翻用户的显式声明。
+
+命中时：被去掉的图片所在的那次工具调用改写为失败（保留"看过哪个文件"的文字并引用上游错误），用户消息里的图片换成"图片已省略"的说明，然后**不带图片重试这一轮**。修复只作用于这一轮——**不会**给本次运行装一个"禁止图片"的闸门：之后的 `view_image`/`read` 照常把图片交给模型，如果端点仍然拒绝，模型会从 API 返回的错误里自己看到并决定下一步（换模型、让你贴文字、或者放弃）。是否"这个端点根本不能看图"由模型判断，pigo 不在背后替它做决定。
+
+以下情况错误照旧终止：错误没点名图片且会话在此之前就有图片（例如一个纯文本的 `500`）、本来就没有图片的运行、已取消的运行、以及修复之后重试仍然失败。
 
 **使用例子：**
 
@@ -362,7 +363,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | 工具 | 说明 |
 |------|------|
 | `read` | 按路径读取文本文件，支持行 offset/limit，输出带行号，超大文件截断；图片文件自动转为图片内容（视觉模型直接看，纯文本模型退回尺寸描述） |
-| `view_image` | 读取本地图片作为多模态内容返回给模型（视觉模型可看，纯文本模型只得到路径/MIME/字节数描述）；支持 PNG/JPEG/GIF/WebP 等，受大小上限约束 |
+| `view_image` | 读取本地图片作为多模态内容返回给模型（视觉模型可看，纯文本模型只得到路径/MIME/字节数描述）；只接受 PNG/JPEG/GIF/WebP 且单张 ≤ 8 MiB，其他格式（HEIC、BMP、TIFF、SVG……）会返回"转成 PNG/JPEG"的错误而不是发送失败 |
 | `write` | 创建或覆盖文件，按需创建父目录 |
 | `edit` | 精确字符串替换（`old_string` 需唯一，除非 `replace_all`），返回 diff |
 | `grep` | 正则检索文件内容，支持 glob 过滤，跳过 `.gitignore` 路径 |
@@ -485,7 +486,7 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 - webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
 - 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
-REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/jobs`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。恢复会话（启动时 `--resume`／`/resume`，TUI 与 REPL 一致）还会把该会话之前**键入过的提问**重新放回 ↑/↓ 历史输入列表，可以直接召回；列表取自当前分支的完整历史（包含已被压缩摘要掉的轮次），与重放的 transcript 一致，而不是只保留压缩检查点之后的上下文。`/jobs [running]` 一次列出当前所有后台工作（`bash` 后台命令与后台 sub-agent）：id、状态、耗时、命令行/任务描述，并给出读取与终止的调用示例（`bash_output` / `kill_bash` / `task_output`）；带 `running` 时只显示仍在运行的条目。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/jobs`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。恢复会话（启动时 `--resume`／`/resume`，TUI 与 REPL 一致）还会把该会话之前**键入过的提问**重新放回 ↑/↓ 历史输入列表，可以直接召回；列表取自当前分支的完整历史（包含已被压缩摘要掉的轮次），与重放的 transcript 一致，而不是只保留压缩检查点之后的上下文。`/jobs [running]` 一次列出当前所有后台工作（`bash` 后台命令与后台 sub-agent）：id、状态、耗时、命令行/任务描述，并给出读取与终止的调用示例（`bash_output` / `kill_bash` / `task_output`）；带 `running` 时只显示仍在运行的条目。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/rewind tool [n]` 是更细粒度的回滚：空参列出当前对话里的每一次工具调用（名称、输出的首行，失败或已是占位符的会标注），`/rewind tool n` 只把第 n 次调用的输出替换成一段 **abnormal tool call** 占位文本（保留模型当时发来的参数，并说明输出为何不可用），对话从这次调用处分出新分支——发起该调用的 assistant 轮次保留，因此各方要求的“调用必有结果”配对不破，模型会被告知可以重新发起这次调用；它不需要文件快照、也不改动任何文件，被弃用的分支仍留在磁盘上，可用 `/tree` 回去。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
 ### TUI 显示与工具卡
 

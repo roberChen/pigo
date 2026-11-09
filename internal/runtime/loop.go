@@ -15,7 +15,7 @@
 // exit). Three stop reasons are handled specially: length (the response was
 // truncated by the token cap) fails every tool call so the model resends
 // (failToolCallsFromTruncatedMessage); error ends the run, after the narrow
-// image-degradation repair (image_fallback.go); aborted ends the run immediately.
+// failed-request repair (tool_fallback.go); aborted ends the run immediately.
 //
 // agentLoop starts a fresh run from a prompt already appended to the context.
 package runtime
@@ -147,11 +147,12 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 		cfg.TransformContext = cfg.Reminders.wrapTransform(cfg.TransformContext)
 	}
 	startIdx := len(agentCtx.Messages)
-	// Image degradation: see image_fallback.go for the (narrow) scenario in which
-	// a failed turn has its images removed and is retried. The policy touches only
-	// that turn: it installs nothing on the context, so later image calls behave as
+	// Failed-request recovery: see tool_fallback.go for the scenarios in which a
+	// rejected turn has its images removed, or the tool output it just added
+	// replaced by an abnormal placeholder, and is retried once. The policy touches
+	// only that turn: it installs nothing on the context, so later calls behave as
 	// they always did.
-	imagePolicy := newImageFallback(provider.ModelImageSupportDeclared(cfg.Provider, cfg.Model))
+	toolPolicy := newToolFallback(provider.ModelImageSupportDeclared(cfg.Provider, cfg.Model))
 	// lastReqLen tracks how many messages the most recent request carried. The
 	// repair needs the delta between two requests to tell "this request added a
 	// view_image picture" from "the conversation already had one".
@@ -241,14 +242,15 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 				}
 				continue
 			case agentcore.StopReasonError:
-				// The error text is not trusted to say whether the picture caused the
-				// failure. Instead the narrow scenario in image_fallback.go decides:
-				// the previous request carried no image, this one added one through a
-				// tool call, the model was not explicitly declared vision-capable, and
-				// the run has not been repaired yet. Then the image is removed (its
-				// tool result becomes a failed call) and this turn is retried, once
-				// per run. Anything else keeps the error terminal.
-				if imagePolicy.recover(ctx, agentCtx, prevReqLen, assistant, emit) {
+				// tool_fallback.go decides whether the request is repairable: the
+				// provider named an image (explicit), the conversation shape isolates
+				// one (structural: image-free before this request, one added now by a
+				// tool call, model not declared vision-capable), or the request added
+				// tool output that the endpoint may be rejecting (general). The images
+				// are removed / the output is replaced by an abnormal placeholder and
+				// this turn is retried, once per run. Anything else keeps the error
+				// terminal.
+				if toolPolicy.recover(ctx, agentCtx, prevReqLen, assistant, emit) {
 					continue
 				}
 				// Terminal failure: emit the turn end and stop.

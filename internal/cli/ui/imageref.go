@@ -78,11 +78,13 @@ func BuildUserContent(prompt string) (agentcore.ContentList, error) {
 }
 
 // loadImageContent reads an image file and returns an ImageContent with the
-// data base64-encoded and the mime type sniffed from the file extension (with a
-// content-sniff fallback). It errors if the file cannot be read, exceeds
-// imageload.MaxImageBytes, or is not a recognizable image type. The work lives in
-// package imageload so the read/view_image tools and this prompt syntax share one
-// size limit and one sniffing rule.
+// data base64-encoded and the mime type taken from the bytes, falling back to the
+// extension only when the bytes are unrecognizable. It errors if the file cannot
+// be read, exceeds imageload.MaxImageBytes, is not a recognizable image, or is not
+// one of the four types a hosted multimodal endpoint accepts (PNG/JPEG/GIF/WebP) —
+// so the reference either attaches a picture that can be sent or fails here with
+// the conversion hint. The work lives in package imageload so the read/view_image
+// tools and this prompt syntax share one size limit and one sniffing rule.
 func loadImageContent(path string) (agentcore.ImageContent, error) {
 	return imageload.Load(path)
 }

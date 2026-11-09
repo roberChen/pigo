@@ -920,9 +920,11 @@ func flagDocs(fs *flag.FlagSet) []config.FlagDoc {
 // validateImages checks every --image path up front so a bad reference fails at
 // launch with exit code 2 instead of mid-run. Each path is resolved against the
 // process working directory (already switched by -C/--cwd), and the check covers
-// existence, readability, size (imageload.MaxImageBytes) and image-ness — the
-// same rules the tools and the prompt reference syntax apply, so the flag cannot
-// accept something the run would later reject.
+// existence, readability, size (imageload.MaxImageBytes), image-ness and the
+// wire format (PNG/JPEG/GIF/WebP only, so a BMP or HEIC is refused here with the
+// conversion hint rather than failing the first request) — the same rules the
+// tools and the prompt reference syntax apply, so the flag cannot accept
+// something the run would later reject.
 func validateImages(paths []string) error {
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {

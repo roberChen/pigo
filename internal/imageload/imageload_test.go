@@ -1,7 +1,8 @@
 // Tests for the shared image loader. They write real (tiny) image files — a PNG
-// and a JPEG-signed blob — so sniffing, the size cap and the base64 round trip
-// are exercised against the same rules the prompt syntax and the image tools
-// apply, rather than against mocks of them.
+// and a JPEG — so sniffing, the size cap, the wire-format gate and the base64
+// round trip are exercised against the same rules the prompt syntax and the image
+// tools apply, rather than against mocks of them. wire_test.go covers the
+// format/validity half of the contract.
 package imageload
 
 import (
@@ -35,8 +36,8 @@ func writeImage(t *testing.T, dir, name string, data []byte) string {
 }
 
 // TestLoadPNG checks the happy path: the bytes are base64-encoded, the mime type
-// comes from the extension, and the block is the ImageContent type the wires
-// look for.
+// comes from the (sniffed, extension-confirmed) content, and the block is the
+// ImageContent type the wires look for.
 func TestLoadPNG(t *testing.T) {
 	path := writeImage(t, t.TempDir(), "pixel.png", pngBytes)
 	img, err := Load(path)
@@ -134,16 +135,16 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// TestValidateAcceptsEmptyFileAsUnknown is the edge the two functions must agree
-// on: an empty .png has no bytes to sniff, so the extension mapping decides and
-// both accept it. A future change that made them disagree would be a bug — the
-// flag would pass a path the run later rejects.
-func TestValidateAcceptsEmptyFileAsUnknown(t *testing.T) {
+// TestValidateAndLoadAgreeOnEmptyFile is the edge the two functions must agree
+// on: an empty .png has no bytes to validate, so it is refused by both — at
+// start-up (the flag) rather than at the first turn. A future change that made
+// them disagree would be a bug: the flag would pass a path the run later rejects.
+func TestValidateAndLoadAgreeOnEmptyFile(t *testing.T) {
 	path := writeImage(t, t.TempDir(), "empty.png", nil)
 	_, loadErr := Load(path)
 	valErr := Validate(path)
-	if (loadErr == nil) != (valErr == nil) {
-		t.Fatalf("Validate and Load disagree on an empty .png: Load=%v Validate=%v", loadErr, valErr)
+	if loadErr == nil || valErr == nil {
+		t.Fatalf("empty .png: Load=%v Validate=%v, want both to reject it", loadErr, valErr)
 	}
 }
 
@@ -177,8 +178,8 @@ func TestLooksLikeImage(t *testing.T) {
 // an image without a real file.
 var pngHeader = pngBytes[:8]
 
-// TestDetectMIME falls back to content for unknown extensions and reports ""
-// for non-images.
+// TestDetectMIME prefers the content, falls back to the extension, and reports
+// "" for non-images.
 func TestDetectMIME(t *testing.T) {
 	if got := DetectMIME("x.bin", pngHeader); got != "image/png" {
 		t.Errorf("DetectMIME(unknown ext, png) = %q, want image/png", got)

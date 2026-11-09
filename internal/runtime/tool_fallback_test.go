@@ -1,10 +1,11 @@
 package runtime
 
-// This file implements the tests for the image-degradation policy: a failed turn
-// is repaired (images removed, one retry) only when the conversation had no
-// image before the request, the request itself added one through a tool call,
-// and the model was not explicitly declared vision-capable. Every other shape of
-// failure stays terminal, which these tests pin one by one.
+// This file implements the tests for the failed-request policy
+// (runtime/tool_fallback.go): a rejected turn is repaired and retried once —
+// either by removing the images (the provider named one, or the conversation
+// shape isolates the one this request added) or by replacing the tool output the
+// request just added with an abnormal placeholder. Every other shape of failure
+// stays terminal, which these tests pin one by one.
 
 import (
 	"context"
@@ -223,9 +224,11 @@ func TestLoopDegradesOnOpaqueError(t *testing.T) {
 	}
 }
 
-// TestLoopKeepsUserAttachedImageTerminal: a picture the user attached is not
-// added by a view_image call, so it is not degraded — the error stays terminal
-// and the user's prompt is left intact.
+// TestLoopKeepsUserAttachedImageTerminal: an *opaque* failure of a request the
+// user attached a picture to is not repaired — no tool call added the image, and
+// the error says nothing about it, so the error stays terminal and the user's
+// prompt is left intact. (An image-naming error is repaired even here; see
+// TestLoopRepairsResumedSessionImageError.)
 func TestLoopKeepsUserAttachedImageTerminal(t *testing.T) {
 	attempts := 0
 	stream := func(context.Context, string, provider.LlmContext, provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
@@ -255,9 +258,10 @@ func TestLoopKeepsUserAttachedImageTerminal(t *testing.T) {
 }
 
 // TestLoopKeepsFailureTerminalWhenHistoryHadImage: once the conversation already
-// carries an image from an earlier request, a later failure is not repaired —
-// removing pictures the model has already reasoned about is worse than letting
-// the error surface.
+// carries an image from an earlier request, an opaque later failure is not
+// repaired — removing pictures the model has already reasoned about is worse than
+// letting the error surface. The structural trigger deliberately stays narrow;
+// the explicit one covers the case where the provider names the image.
 func TestLoopKeepsFailureTerminalWhenHistoryHadImage(t *testing.T) {
 	// Turn 1's tool result is an image and succeeds; turn 2 adds a second image and
 	// the request carrying both fails.
@@ -295,8 +299,11 @@ func TestLoopKeepsFailureTerminalWhenHistoryHadImage(t *testing.T) {
 }
 
 // TestLoopKeepsDeclaredVisionModelTerminal: when the user's config explicitly
-// declares the model vision-capable, the declaration wins. The fallback must not
-// second-guess it by deleting the image.
+// declares the model vision-capable, an opaque failure of a request that added an
+// image does not second-guess the declaration — the error is terminal. The
+// declaration does not survive the provider naming the image, though:
+// TestLoopRepairsDeclaredVisionOnExplicitImageError covers that, because a
+// payload the endpoint refuses cannot be sent no matter what the config says.
 func TestLoopKeepsDeclaredVisionModelTerminal(t *testing.T) {
 	vision := true
 	provider.RegisterDeclaredModels("openai", []provider.DeclaredModel{
@@ -423,12 +430,12 @@ func TestLoopRetriesAtMostOnce(t *testing.T) {
 	}
 }
 
-// TestImageFallbackSkipsCancelledRun: a cancelled run must not be retried — the
+// TestToolFallbackSkipsCancelledRun: a cancelled run must not be retried — the
 // retry would fail again, and the image is not the culprit.
-func TestImageFallbackSkipsCancelledRun(t *testing.T) {
+func TestToolFallbackSkipsCancelledRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	policy := newImageFallback(false)
+	policy := newToolFallback(false)
 	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
 		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("look")}},
 		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "call-1", ToolName: "view_image", Content: agentcore.ContentList{
@@ -454,11 +461,11 @@ func TestImageFallbackSkipsCancelledRun(t *testing.T) {
 	}
 }
 
-// TestImageFallbackSkipsShrunkContext: a compaction (or PrepareNextTurn) can
+// TestToolFallbackSkipsShrunkContext: a compaction (or PrepareNextTurn) can
 // shrink the context so the request boundary no longer describes the previous
 // request. The policy must not guess.
-func TestImageFallbackSkipsShrunkContext(t *testing.T) {
-	policy := newImageFallback(false)
+func TestToolFallbackSkipsShrunkContext(t *testing.T) {
+	policy := newToolFallback(false)
 	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
 		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("look")}},
 	}}
@@ -531,4 +538,382 @@ func contentText(list agentcore.ContentList) string {
 		}
 	}
 	return b.String()
+}
+
+// upstreamImageError is the failure this policy was widened for: the provider
+// itself names the image, in the shape OpenAI-compatible gateways use (and the
+// media-type list Anthropic uses). Real text, so the classifier is exercised
+// against the message a user actually sees.
+var upstreamImageError = errors.New(`transport: upstream 400: {"error":{"message":"input[207].image[0]: You have uploaded an unsupported image. Please make sure your image is valid and has one of the following formats: webp, png, jpeg, and gif.","type":"invalid_request_error"}}`)
+
+// TestLoopRepairsResumedSessionImageError is the case that used to be
+// unrepairable: the offending picture is already in the conversation (a resumed
+// session, or an earlier turn), so no request ever "adds" it. The provider names
+// the image, the history is repaired, and the retried turn answers.
+func TestLoopRepairsResumedSessionImageError(t *testing.T) {
+	p := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+		textTurn("answering after the picture was dropped"),
+	}}
+	attempts := 0
+	stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		if agentcore.MessagesHaveImage(llm.Messages) {
+			return nil, upstreamImageError
+		}
+		return provider.StreamFnFromProvider(p)(ctx, model, llm, sc)
+	}
+	cfg := newRunCfg(stream)
+	// The session was recorded earlier: a tool produced a picture, and the user
+	// came back with a follow-up question.
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("what is on the screen?")}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
+			agentcore.NewToolCallContent("call-1", "view_image", json.RawMessage(`{}`)),
+		}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "call-1", ToolName: "view_image", Content: agentcore.ContentList{
+			agentcore.NewImageContent("QUJD", "image/png"),
+			agentcore.NewTextContent("viewed shot.png"),
+		}},
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonEndTurn, Content: agentcore.ContentList{agentcore.NewTextContent("It is a login form.")}},
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("and the button color?")}},
+	}}
+
+	res := drainRun(t, agentCtx, cfg)
+
+	if attempts != 2 {
+		t.Fatalf("provider attempts = %d, want 2 (failed request + one retry)", attempts)
+	}
+	if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonEndTurn ||
+		!strings.Contains(contentText(final.Content), "answering after") {
+		t.Fatalf("final assistant = %+v, want the retried answer", final)
+	}
+	if agentcore.MessagesHaveImage(agentCtx.Messages) {
+		t.Error("the resumed history still carries the image that failed the request")
+	}
+	// The tool result keeps its text and is flagged as a failure, so the model
+	// knows the picture was dropped rather than silently missing.
+	results := toolResultsOf(agentCtx.Messages)
+	if len(results) != 1 || !results[0].IsError {
+		t.Fatalf("tool results = %+v, want the image call marked failed", results)
+	}
+	if text := contentText(results[0].Content); !strings.Contains(text, "viewed shot.png") {
+		t.Errorf("repaired tool result = %q, want the original descriptor kept", text)
+	}
+}
+
+// TestLoopRepairsDeclaredVisionOnExplicitImageError: the explicit trigger beats
+// the declaration. A user can declare a gateway model vision-capable and still
+// have it refuse one payload; refusing to repair would strand that session
+// forever, because the picture cannot be sent at all.
+func TestLoopRepairsDeclaredVisionOnExplicitImageError(t *testing.T) {
+	vision := true
+	provider.RegisterDeclaredModels("openai", []provider.DeclaredModel{
+		{ID: "declared-vision-repair-test", SupportsImages: &vision},
+	})
+	t.Cleanup(func() { provider.RegisterDeclaredModels("openai", nil) })
+
+	p := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+		textTurn("recovered despite the declaration"),
+	}}
+	attempts := 0
+	stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		if agentcore.MessagesHaveImage(llm.Messages) {
+			return nil, upstreamImageError
+		}
+		return provider.StreamFnFromProvider(p)(ctx, model, llm, sc)
+	}
+	cfg := newRunCfg(stream)
+	cfg.Provider = "openai"
+	cfg.Model = "declared-vision-repair-test"
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{
+			agentcore.NewTextContent("what is this?"),
+			agentcore.NewImageContent("QUJD", "image/png"),
+		}},
+	}}
+
+	res := drainRun(t, agentCtx, cfg)
+
+	if attempts != 2 {
+		t.Fatalf("provider attempts = %d, want 2 (explicit image error → one repair)", attempts)
+	}
+	if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonEndTurn {
+		t.Fatalf("final assistant = %+v, want the retried answer", final)
+	}
+	if agentcore.MessagesHaveImage(agentCtx.Messages) {
+		t.Error("the declared-vision run kept the picture the provider refused")
+	}
+	// The user's prompt survives; only the picture is replaced by a notice.
+	user := agentCtx.Messages[0].(agentcore.UserMessage)
+	if !strings.Contains(contentText(user.Content), "what is this?") {
+		t.Errorf("user message = %q, want the prompt kept", contentText(user.Content))
+	}
+	if !strings.Contains(contentText(user.Content), "image was removed") {
+		t.Errorf("user message = %q, want an omission notice", contentText(user.Content))
+	}
+}
+
+// TestLoopDoesNotRepairWhenTheErrorIsNotAboutImages: widening the trigger must
+// not turn every failure of a vision session into a picture purge. An opaque 500
+// on a conversation that already had images stays terminal.
+func TestLoopDoesNotRepairWhenTheErrorIsNotAboutImages(t *testing.T) {
+	attempts := 0
+	stream := func(context.Context, string, provider.LlmContext, provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		return nil, gatewayError
+	}
+	cfg := newRunCfg(stream)
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("look")}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "call-0", ToolName: "view_image", Content: agentcore.ContentList{
+			agentcore.NewImageContent("QUJD", "image/png"),
+		}},
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("continue")}},
+	}}
+
+	res := drainRun(t, agentCtx, cfg)
+
+	if attempts != 1 {
+		t.Fatalf("provider attempts = %d, want 1 (no repair without an image-naming error)", attempts)
+	}
+	if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonError {
+		t.Fatalf("final assistant = %+v, want the terminal error", final)
+	}
+	if !agentcore.MessagesHaveImage(agentCtx.Messages) {
+		t.Error("an unrelated failure stripped the conversation's images")
+	}
+}
+
+// TestStreamResponseDropsUnsendableImages: the request path itself must never
+// re-send a picture the wire cannot carry, even from a session recorded before
+// ingestion enforced the rule. The conversation keeps it; only the LLM copy gets
+// a notice.
+func TestStreamResponseDropsUnsendableImages(t *testing.T) {
+	var sent agentcore.MessageList
+	stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		sent = llm.Messages
+		s := provider.NewAssistantMessageEventStream(0)
+		go func() {
+			_ = s.Emit(ctx, provider.StreamDoneEvent{Message: agentcore.AssistantMessage{
+				RoleField:  agentcore.RoleAssistant,
+				StopReason: agentcore.StopReasonEndTurn,
+			}})
+			s.Close()
+		}()
+		return s, nil
+	}
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{
+			agentcore.NewImageContent("AAAAIGZ0eXBhdmlm", "image/avif"),
+		}},
+	}}
+	noEmit := func(context.Context, agentcore.AgentEvent) error { return nil }
+	cfg := LoopConfig{Model: "fake", Stream: stream}
+
+	if _, err := streamAssistantResponse(context.Background(), agentCtx, cfg, noEmit); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if agentcore.MessagesHaveImage(sent) {
+		t.Error("the request still carries an AVIF image")
+	}
+	if !strings.Contains(agentcore.ContentToText(sent[0].(agentcore.UserMessage).Content), "image omitted") {
+		t.Error("the dropped image left no notice for the model")
+	}
+	if !agentcore.MessagesHaveImage(agentCtx.Messages) {
+		t.Error("sanitizing the request must not modify the history")
+	}
+}
+
+// TestRepairedSessionContinuesInLaterTurns is the requirement the repair exists
+// for: after one image-shaped failure, the conversation — not just the failed
+// turn — keeps working. The follow-up message is sent as its own run, exactly as
+// an interactive turn after the error, and must reach the model with no image and
+// no second failure.
+func TestRepairedSessionContinuesInLaterTurns(t *testing.T) {
+	first := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+		textTurn("answered without the picture"),
+	}}
+	attempts := 0
+	stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		if agentcore.MessagesHaveImage(llm.Messages) {
+			return nil, upstreamImageError
+		}
+		return provider.StreamFnFromProvider(first)(ctx, model, llm, sc)
+	}
+	cfg := newRunCfg(stream)
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{
+			agentcore.NewTextContent("what is this?"),
+			agentcore.NewImageContent("QUJD", "image/png"),
+		}},
+	}}
+	if res := drainRun(t, agentCtx, cfg); attempts != 2 {
+		t.Fatalf("first run attempts = %d, want 2 (failure + repaired retry)", attempts)
+	} else if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonEndTurn {
+		t.Fatalf("first run end = %+v, want an answer", final)
+	}
+
+	// The user reacts to that answer: a fresh run over the same history.
+	agentCtx.Messages = append(agentCtx.Messages,
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("thanks, and what about the button?")}})
+	second := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+		textTurn("second answer"),
+	}}
+	attempts = 0
+	cfg2 := newRunCfg(func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		if agentcore.MessagesHaveImage(llm.Messages) {
+			return nil, upstreamImageError
+		}
+		return provider.StreamFnFromProvider(second)(ctx, model, llm, sc)
+	})
+
+	res := drainRun(t, agentCtx, cfg2)
+
+	if attempts != 1 {
+		t.Fatalf("second run attempts = %d, want 1 (the history no longer carries the image)", attempts)
+	}
+	if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonEndTurn {
+		t.Fatalf("second run end = %+v, want an answer", final)
+	}
+}
+
+// textTool returns a tool whose output is plain text, so the general
+// tool-output trigger (not either image trigger) is the one under test.
+func textTool(name, output string) execTool {
+	return execTool{
+		name: name,
+		run: func(context.Context, string, json.RawMessage, agentcore.ToolUpdateFunc) (agentcore.AgentToolResult, error) {
+			return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(output)}}, nil
+		},
+	}
+}
+
+// TestLoopDegradesToolOutputOnRejection is the general case: the request the
+// provider rejected carried no image, but it added a tool result — so that result
+// is the suspect. It becomes an abnormal placeholder holding the call's arguments
+// and the provider's error verbatim, and the turn is retried.
+func TestLoopDegradesToolOutputOnRejection(t *testing.T) {
+	p := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+		toolCallTurn("call-1", "lookup", `{"query":"release notes"}`),
+		textTurn("answered without the lookup output"),
+	}}
+	attempts := 0
+	stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		attempts++
+		// Attempt 1 is the turn that calls the tool; the request that replays its
+		// output is attempt 2, and that is the one the endpoint rejects.
+		if attempts == 2 {
+			return nil, errors.New("upstream 500: internal server error")
+		}
+		return provider.StreamFnFromProvider(p)(ctx, model, llm, sc)
+	}
+	cfg := newRunCfg(stream, textTool("lookup", "a very long result the endpoint refused"))
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser},
+	}}
+
+	res := drainRun(t, agentCtx, cfg)
+
+	// tool turn, failed request, retried request that answers.
+	if attempts != 3 {
+		t.Fatalf("provider attempts = %d, want 3 (tool, failed, retry): kinds %v", attempts, res.kinds)
+	}
+	if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonEndTurn ||
+		!strings.Contains(contentText(final.Content), "answered without") {
+		t.Fatalf("final assistant = %+v, want the retried answer", final)
+	}
+	results := toolResultsOf(agentCtx.Messages)
+	if len(results) != 1 {
+		t.Fatalf("tool results = %d, want 1: %+v", len(results), results)
+	}
+	tr := results[0]
+	if !agentcore.IsAbnormalToolResult(tr) {
+		t.Fatalf("result is not an abnormal placeholder: %+v", tr)
+	}
+	detail, ok := agentcore.AbnormalDetailsOf(tr)
+	if !ok {
+		t.Fatalf("placeholder carries no details: %+v", tr)
+	}
+	if detail.Arguments != `{"query":"release notes"}` {
+		t.Errorf("arguments = %q, want the model's verbatim arguments", detail.Arguments)
+	}
+	if !strings.Contains(detail.ProviderError, "internal server error") {
+		t.Errorf("provider error = %q, want it quoted verbatim", detail.ProviderError)
+	}
+	text := contentText(tr.Content)
+	for _, want := range []string{agentcore.AbnormalToolResultMarker, "a very long result"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("placeholder text = %q, want it to contain %q", text, want)
+		}
+	}
+}
+
+// TestLoopKeepsAuthFailuresTerminal: a credential or rate-limit rejection answers
+// the same way on every retry, so degrading the tool output cannot help and the
+// error stays terminal.
+func TestLoopKeepsAuthFailuresTerminal(t *testing.T) {
+	for _, msg := range []string{"401 Unauthorized: invalid api key", "429 Too Many Requests", "insufficient_quota"} {
+		t.Run(msg, func(t *testing.T) {
+			p := &fauxProvider{name: "faux", models: []provider.Model{{ID: "fake"}}, turns: []fauxTurn{
+				toolCallTurn("call-1", "lookup", `{}`),
+			}}
+			attempts := 0
+			stream := func(ctx context.Context, model string, llm provider.LlmContext, sc provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+				attempts++
+				if attempts == 2 {
+					return nil, errors.New(msg)
+				}
+				return provider.StreamFnFromProvider(p)(ctx, model, llm, sc)
+			}
+			cfg := newRunCfg(stream, textTool("lookup", "output"))
+			agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+				agentcore.UserMessage{RoleField: agentcore.RoleUser},
+			}}
+
+			res := drainRun(t, agentCtx, cfg)
+
+			if attempts != 2 {
+				t.Fatalf("provider attempts = %d, want 2 (no retry after an unrepairable failure)", attempts)
+			}
+			if final := res.lastTurnEnd(t); final.StopReason != agentcore.StopReasonError {
+				t.Fatalf("final assistant = %+v, want the terminal error", final)
+			}
+			results := toolResultsOf(agentCtx.Messages)
+			if len(results) != 1 || results[0].IsError || agentcore.IsAbnormalToolResult(results[0]) {
+				t.Errorf("tool output was degraded for an unrepairable failure: %+v", results)
+			}
+		})
+	}
+}
+
+// TestAbnormalizeToolResultsIgnoresUnknownAndExisting: the helper only rewrites
+// the ids it was given, and never rewraps a placeholder (which would nest
+// reasons and lose the original arguments).
+func TestAbnormalizeToolResultsIgnoresUnknownAndExisting(t *testing.T) {
+	msgs := agentcore.MessageList{
+		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonToolUse, Content: agentcore.ContentList{
+			agentcore.NewToolCallContent("call-1", "lookup", json.RawMessage(`{"q":"x"}`)),
+		}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "call-1", ToolName: "lookup",
+			Content: agentcore.ContentList{agentcore.NewTextContent("first output")}},
+		agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, ToolCallID: "call-2", ToolName: "other",
+			Content: agentcore.ContentList{agentcore.NewTextContent("keep me")}},
+	}
+
+	first := agentcore.AbnormalizeToolResults(msgs, []string{"call-1", "missing"}, "boom", "replaced")
+	if len(first) != 1 || first[0].ToolCallID != "call-1" {
+		t.Fatalf("rewrote %+v, want only call-1", first)
+	}
+	if again := agentcore.AbnormalizeToolResults(msgs, []string{"call-1"}, "boom2", "replaced again"); len(again) != 0 {
+		t.Errorf("a placeholder was rewritten again: %+v", again)
+	}
+	if got := contentText(msgs[1].(agentcore.ToolResultMessage).Content); !strings.Contains(got, "first output") {
+		t.Errorf("original text lost: %q", got)
+	}
+	if got := contentText(msgs[2].(agentcore.ToolResultMessage).Content); got != "keep me" {
+		t.Errorf("unlisted result changed: %q", got)
+	}
 }

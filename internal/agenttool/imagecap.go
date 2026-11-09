@@ -8,7 +8,7 @@
 // takes effect on the next call).
 //
 // A failed request no longer arms a run-wide block. When the loop repairs a turn
-// (runtime/image_fallback.go) it removes the picture that request added, but it
+// (runtime/tool_fallback.go) it removes the picture that request added, but it
 // does not disable the tools: a later view_image still returns the image, and if
 // the endpoint refuses it the model sees the provider's error and decides what to
 // do next. Deciding "this endpoint cannot take images at all" from one failure is

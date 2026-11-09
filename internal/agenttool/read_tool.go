@@ -81,8 +81,8 @@ func (t *ReadTool) Name() string { return "read" }
 func (t *ReadTool) Description() string {
 	return "Read a text file's contents by path, with optional line offset/limit. " +
 		"Output is line-numbered; very large files are truncated. An image file " +
-		"(PNG, JPEG, GIF, WebP, ...) is returned as an image block the model can see, " +
-		"not as text."
+		"(PNG, JPEG, GIF or WebP under 8 MiB) is returned as an image block the model " +
+		"can see, not as text; other image formats are rejected with a conversion hint."
 }
 
 // Schema implements AgentTool.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/compaction"
+	"github.com/smallnest/pigo/internal/imageload"
 	"github.com/smallnest/pigo/internal/provider"
 )
 
@@ -82,10 +83,21 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 	//
 	// A repair does not arm a run-wide latch: images a later request brings are
 	// left alone, and the model decides from the provider's error (see
-	// runtime/image_fallback.go for the one repaired case).
+	// runtime/tool_fallback.go for the repaired cases).
 	if !provider.ModelSupportsImages(cfg.Provider, cfg.Model) {
 		msgs = agentcore.StripImages(msgs)
 	}
+	// 2.6 Drop images the wire cannot carry at all (unsupported format, bytes
+	// that contradict the declared type, an empty payload). Ingestion already
+	// refuses those, but a session recorded before that rule was enforced — and
+	// most importantly a *resumed* one — still holds the picture on disk, and
+	// every request that re-sends it fails with a 400 that names the image. The
+	// session keeps its image; only the LLM-bound copy gets a notice.
+	//
+	// This is a backstop, not a capability guess: it drops only images that no
+	// hosted multimodal endpoint accepts (and the ones whose bytes are not the
+	// type they claim). Whether this *model* takes pictures is the check above.
+	msgs, _ = imageload.SanitizeWire(msgs)
 	// 3. shape the LLM context.
 	llm := provider.LlmContext{
 		SystemPrompt: agentCtx.SystemPrompt,
