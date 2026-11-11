@@ -8,10 +8,12 @@ package hostpath
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -94,6 +96,10 @@ func Listen(endpoint string) (net.Listener, error) {
 func Dial(endpoint string, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout("unix", endpoint, timeout)
 }
+
+// IsEndpointInUse reports whether binding an endpoint failed because another
+// listener already holds the path.
+func IsEndpointInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }
 
 // socketArtifact returns the on-disk leftovers of a host's transport: the
 // socket file itself, which a crashed host does not remove.

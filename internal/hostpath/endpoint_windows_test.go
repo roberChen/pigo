@@ -13,6 +13,7 @@
 package hostpath
 
 import (
+	"bufio"
 	"net"
 	"os"
 	"path/filepath"
@@ -95,21 +96,37 @@ func TestListenDialRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
+	var srv net.Conn
 	select {
-	case srv := <-accepted:
+	case srv = <-accepted:
 		if srv == nil {
 			t.Fatal("Accept failed")
 		}
-		_ = srv.Close()
+		t.Cleanup(func() { _ = srv.Close() })
 	case <-time.After(5 * time.Second):
 		t.Fatal("the listener never accepted the connection")
 	}
 
-	// The pair must carry a line the way the NDJSON protocol needs, including one
-	// longer than the 4 KiB default pipe buffer.
-	want := strings.Repeat("x", 32*1024) + "\n"
-	if _, err := conn.Write([]byte(want)); err != nil {
-		t.Fatalf("write: %v", err)
+	// The pair must carry a line longer than the default 4 KiB pipe buffer. The
+	// server is deliberately not reading yet: with the configured 64 KiB buffer
+	// the write completes on its own, and only a misconfigured listener would
+	// block here until the deadline.
+	want := strings.Repeat("x", 32*1024)
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set write deadline: %v", err)
+	}
+	if _, err := conn.Write([]byte(want + "\n")); err != nil {
+		t.Fatalf("write %d bytes: %v", len(want)+1, err)
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+
+	sc := bufio.NewScanner(srv)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	if !sc.Scan() {
+		t.Fatalf("read line: %v", sc.Err())
+	}
+	if got := sc.Text(); got != want {
+		t.Fatalf("read %d bytes, want %d", len(got), len(want))
 	}
 }
 
@@ -122,6 +139,19 @@ func TestProbeLiveThenGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
+	// A live host is a listener whose accept loop is running, and go-winio only
+	// makes a pipe instance dialable while an Accept is pending (it creates the
+	// next instance per Accept call). A bare listener therefore accepts nothing,
+	// which is not a host.
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
 	if !Probe(endpoint, time.Second) {
 		t.Fatal("a listening pipe probed as dead")
 	}
@@ -184,13 +214,15 @@ func TestOwnerOnlyPipeSDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ownerOnlyPipeSDDL: %v", err)
 	}
+	sid, err := currentUserSID()
+	if err != nil {
+		t.Fatalf("currentUserSID: %v", err)
+	}
 	// D:P = protected DACL (no inherited ACEs); A;;GA;;;<sid> = one generic-all
 	// grant; the SID must be the current user's.
-	if !strings.HasPrefix(sd, "D:P(A;;GA;;;S-1-") || !strings.HasSuffix(sd, ")") {
-		t.Fatalf("SDDL = %q, want D:P(A;;GA;;;<user sid>)", sd)
-	}
-	if strings.Count(sd, ";;") != 1 {
-		t.Fatalf("SDDL = %q grants more than one ACE", sd)
+	want := "D:P(A;;GA;;;" + sid.String() + ")"
+	if sd != want {
+		t.Fatalf("SDDL = %q, want %q", sd, want)
 	}
 }
 

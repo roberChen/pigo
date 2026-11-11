@@ -134,6 +134,11 @@ func (c *conn) close() {
 		_ = c.nc.Close()
 		shutdown := c.srv.isShuttingDown()
 		for _, s := range c.snapshotOwned() {
+			// A pending permission question can only be answered by this
+			// connection. With it gone, fail the requests so the gate denies
+			// instead of blocking forever on a channel nobody will write to; the
+			// turn would stay "running" and the session could never be resumed.
+			s.perms.abortAll()
 			if shutdown {
 				c.srv.closeSession(s, "server shutdown")
 			} else {

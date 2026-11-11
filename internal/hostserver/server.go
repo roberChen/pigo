@@ -23,6 +23,7 @@ import (
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/diag"
 	"github.com/smallnest/pigo/internal/hostapi"
+	"github.com/smallnest/pigo/internal/hostpath"
 	"github.com/smallnest/pigo/internal/runtime"
 	"github.com/smallnest/pigo/internal/session"
 	"github.com/smallnest/pigo/internal/trust"
@@ -32,6 +33,11 @@ import (
 // a resume result can be much larger, but both are far below this; the cap only
 // exists so a hostile client cannot make the server allocate without bound.
 const maxLineBytes = 32 << 20
+
+// shutdownWriteGrace bounds the final event write to each client. A client that
+// stopped reading would otherwise block the write until its pipe is drained,
+// which shutdown must not wait for.
+const shutdownWriteGrace = 2 * time.Second
 
 // Config controls a host server.
 type Config struct {
@@ -192,6 +198,18 @@ func (s *Server) Listen() error {
 	// for a same-user process that found it.
 	ln, err := Listen(s.socket)
 	if err != nil {
+		// A second bind on an existing name is "already running", not a raw
+		// transport error. On Windows it is also the common startup race:
+		// probeExisting dials, and a named pipe only accepts a connection while
+		// its owner is in Accept (Serve), so a host that has bound the pipe but
+		// not reached Serve yet probes as dead.
+		if hostpath.IsEndpointInUse(err) {
+			pid := 0
+			if st, rerr := ReadState(s.dir); rerr == nil {
+				pid = st.PID
+			}
+			return &ErrAlreadyRunning{PID: pid}
+		}
 		return fmt.Errorf("host: listen %s: %w", s.socket, err)
 	}
 	token, err := NewToken()
@@ -217,7 +235,25 @@ func (s *Server) Listen() error {
 
 // Serve accepts connections until ctx is cancelled or Shutdown is called. It is
 // safe to call after Listen only.
+//
+// Serve does not return until the shutdown has finished removing the host's
+// files. A shutdown that starts in another goroutine (ctx cancellation, or a
+// server.shutdown request) closes the listener first, which lets this loop
+// return while cleanup is still running; a caller that then exits the process
+// leaves the state and token files behind (observed on Windows, where the
+// daemon lost that race every time).
 func (s *Server) Serve(ctx context.Context) error {
+	err := s.serve(ctx)
+	// Idempotent: this is a no-op when serve() already triggered the shutdown,
+	// and the cleanup path when it returned on its own.
+	s.Shutdown("serve loop exited")
+	s.Wait()
+	return err
+}
+
+// serve is the accept loop behind Serve; it returns as soon as the listener
+// stops accepting, without waiting for the shutdown cleanup.
+func (s *Server) serve(ctx context.Context) error {
 	if s.ln == nil {
 		return errors.New("host: Serve called before Listen")
 	}
@@ -273,11 +309,18 @@ func (s *Server) Shutdown(reason string) {
 			_ = s.ln.Close()
 		}
 		// Tell every client before closing, so an attached UI can print a reason
-		// instead of a bare EOF.
-		for _, c := range s.snapshotConns() {
+		// instead of a bare EOF. A client that stopped reading cannot be allowed
+		// to hold the shutdown open: a full pipe buffer blocks the write forever,
+		// and Serve now waits for this cleanup before returning.
+		conns := s.snapshotConns()
+		deadline := time.Now().Add(shutdownWriteGrace)
+		for _, c := range conns {
+			_ = c.nc.SetWriteDeadline(deadline)
+		}
+		for _, c := range conns {
 			_ = c.notify(eventServerShutdown, hostapi.ServerShutdownEvent{Reason: reason})
 		}
-		for _, c := range s.snapshotConns() {
+		for _, c := range conns {
 			c.close()
 		}
 		cleanup(s.dir)

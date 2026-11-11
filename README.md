@@ -463,8 +463,8 @@ pigo attach --list
 
 几个契约值得记住：
 
-- **一个 host 一个进程**：endpoint、token（POSIX 上 0600，Windows 上仅当前用户可访问的管道 DACL）与状态文件都由 `--dir`／`$PIGO_HOME` 决定；重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
-- **传输按平台选择，协议不变**：两端说的都是同一套 NDJSON，`internal/hostpath` 负责把它落到具体传输上。Windows 的管道名是状态目录的哈希（管道命名空间任何本地用户都能枚举，明文路径会泄露目录布局），因此 Windows 上状态目录里只有 `server.token` 与 `server.json` 两个文件，没有 socket 文件；崩溃也不会留下可清理的残余，下一次 `serve` 直接重新绑定。
+- **一个 host 一个进程**：endpoint、token 与状态文件都由 `--dir`／`$PIGO_HOME` 决定；POSIX 上 socket 与 token 是 0600，Windows 上管道和 token 文件都只授权当前用户（DACL），重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
+- **传输按平台选择，协议不变**：两端说的都是同一套 NDJSON，`internal/hostpath` 负责把它落到具体传输上。Windows 的管道名是状态目录的哈希（管道命名空间任何本地用户都能枚举，明文路径会泄露目录布局），因此 Windows 上状态目录里只有 `server.token` 与 `server.json` 两个文件，没有 socket 文件；崩溃也不会留下可清理的残余，下一次 `serve` 直接重新绑定。客户端连接后还会校验管道 owner 必须是当前用户，其他人抢先占用同名管道也拿不到 token。
 - **会话属于创建它的连接**：另一条连接既看不到也驱动不了你的会话（`session.list` 只返回自己的），所以两个 UI 同时 attach 不会互相打断。
 - **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
 - **host 拥有 turn**：客户端断开不会中断正在跑的轮次；重连后 resume 能拿回完整历史（含压缩点之后的上下文）。
@@ -1209,7 +1209,7 @@ git push origin v0.2.0
 | `PIGO_HOME` | 覆盖 `~/.pigo` 基础目录（影响 plugins、commands、prompts） |
 | `PIGO_SKILLS_DIR` | 覆盖技能目录（默认 `~/.agents/skills`） |
 | `~/.pigo/sessions` | 会话存储（JSONL） |
-| `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 endpoint（POSIX 上是 unix socket 文件）、bearer token（0600）与状态文件；Windows 上 endpoint 是命名管道，不落盘 |
+| `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 endpoint（POSIX 上是 unix socket 文件）、bearer token（POSIX 0600，Windows 仅当前用户 DACL）与状态文件；Windows 上 endpoint 是命名管道，不落盘 |
 | `~/.pigo/server.log` | `pigo serve --daemon` 的 stdout/stderr |
 | `~/.pigo/plugins` | 外部插件 |
 | `~/.pigo/prompts` | 提示词模板（pi 对齐；`pigo install` 的安装目标） |

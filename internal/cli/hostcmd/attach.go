@@ -288,8 +288,12 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 		case r := <-turnDone:
 			running = false
 			a.finishTurn(r)
-			// Anything typed while the turn ran is processed now, in order.
-			for {
+			// Anything typed while the turn ran is processed now, in order. Stop as
+			// soon as a line starts the next turn: startTurn refuses a second
+			// concurrent turn, so continuing here would report "a turn is already
+			// running" and drop the rest. The remainder stays queued for when that
+			// turn completes.
+			for !exit {
 				line, ok := a.popQueued()
 				if !ok {
 					break
@@ -298,8 +302,14 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 					exit = true
 					break
 				}
+				if running {
+					break
+				}
 			}
-			if exitPending {
+			// EOF was seen while a turn was running. If the queue started another
+			// turn (typed-ahead prompts), let it finish too instead of detaching
+			// under it; the next turnDone re-enters here with an empty queue.
+			if exitPending && !running {
 				exit = true
 			}
 		}

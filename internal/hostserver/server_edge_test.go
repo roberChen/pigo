@@ -1965,6 +1965,77 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestSecondServerOnSameDirIsAlreadyRunning covers the startup race of the
+// second host: on Windows the first host is between Listen and Serve, so a probe
+// (which needs an Accept on a named pipe) reports nobody home. The bind itself
+// then fails, and that failure must still be ErrAlreadyRunning rather than a raw
+// transport error, or `serve` prints "Access is denied" to the user.
+func TestSecondServerOnSameDirIsAlreadyRunning(t *testing.T) {
+	dir := t.TempDir()
+	_, _ = bareHost(t, dir, newScriptFactory()) // Listen called, Serve not started
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("session store: %v", err)
+	}
+	mgr, err := trust.NewManager(filepath.Join(t.TempDir(), "trust.json"))
+	if err != nil {
+		t.Fatalf("trust: %v", err)
+	}
+	second, err := NewServer(Config{Dir: dir, Factory: newScriptFactory(), Store: store, Trust: mgr})
+	if err != nil {
+		t.Fatalf("new second server: %v", err)
+	}
+	err = second.Listen()
+	var already *ErrAlreadyRunning
+	if !errors.As(err, &already) {
+		t.Fatalf("second Listen = %v, want ErrAlreadyRunning", err)
+	}
+	if already.PID != os.Getpid() {
+		t.Fatalf("ErrAlreadyRunning.PID = %d, want the first host's pid %d", already.PID, os.Getpid())
+	}
+}
+
+// TestServeReturnImpliesFootprintGone pins the daemon-exit contract: a caller
+// that returns from Serve and lets the process exit must not leave the token and
+// state files behind. Shutdown removes them on its own goroutine, and closing
+// the listener lets the accept loop return first, so Serve has to wait for the
+// cleanup itself (the Windows daemon lost that race every time).
+func TestServeReturnImpliesFootprintGone(t *testing.T) {
+	dir := t.TempDir()
+	srv, _ := bareHost(t, dir, newScriptFactory())
+
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(context.Background()) }()
+
+	// An attached client makes shutdown do real work (notify, then close) before
+	// cleanup, which is the window in which the process used to exit early.
+	conn, err := hostpath.Dial(srv.Socket(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Shutting down from elsewhere is the `serve stop` request shape.
+	go srv.Shutdown("test")
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after shutdown")
+	}
+
+	// No Wait here: Serve returning is the promise being tested.
+	for _, path := range []string{TokenPath(dir), StatePath(dir)} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived Serve's return (stat error: %v)", path, err)
+		}
+	}
+}
+
 // TestServeReturnsWhenContextCancelled drives the accept loop directly: a cancelled
 // context stops Serve with a nil error (not an accept error), tells clients why,
 // and leaves no footprint behind.

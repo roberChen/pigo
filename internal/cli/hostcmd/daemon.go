@@ -48,6 +48,14 @@ func startDaemon(opts ServeOptions, dir string, out, errOut io.Writer) int {
 	}
 	_ = os.Remove(ready)
 
+	// The log lives in the state directory, so the parent has to create it:
+	// the child would create it too (NewServer), but only after its stdout has
+	// already been redirected here, and open would fail first.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(errOut, "pigo serve: create state dir: %v\n", err)
+		return 1
+	}
+
 	logf, err := os.OpenFile(logPath(dir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintf(errOut, "pigo serve: open log: %v\n", err)
@@ -93,7 +101,13 @@ func startDaemon(opts ServeOptions, dir string, out, errOut io.Writer) int {
 			}
 		case err := <-exited:
 			_ = os.Remove(ready)
-			fmt.Fprintf(errOut, "pigo serve: daemon exited during startup: %v (see %s)\n", err, logPath(dir))
+			// The child is detached: its stderr went to the log, so without this
+			// the user only sees "exit status 1" and has to find the file.
+			if tail := logTail(logPath(dir)); tail != "" {
+				fmt.Fprintf(errOut, "pigo serve: daemon exited during startup: %v: %s (see %s)\n", err, tail, logPath(dir))
+			} else {
+				fmt.Fprintf(errOut, "pigo serve: daemon exited during startup: %v (see %s)\n", err, logPath(dir))
+			}
 			return 1
 		case <-deadline:
 			_ = os.Remove(ready)
@@ -129,3 +143,37 @@ func hasFlag(args []string, name string) bool {
 
 // readyPathFromEnv returns the readiness file the parent asked for.
 func readyPathFromEnv() string { return os.Getenv("PIGO_HOST_READY") }
+
+// logTail returns the last non-empty line of the daemon log. A detached child
+// reports failures only through that file, so the line is what makes "daemon
+// exited during startup" actionable.
+func logTail(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const maxTail = 8 << 10
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	offset := info.Size() - maxTail
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}

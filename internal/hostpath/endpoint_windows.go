@@ -14,6 +14,7 @@ package hostpath
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -68,9 +69,79 @@ func Listen(endpoint string) (net.Listener, error) {
 	})
 }
 
-// Dial connects to a host listening on endpoint.
+// Dial connects to a host listening on endpoint and verifies that the pipe
+// belongs to the current user.
+//
+// Named pipes live in a global namespace: any local user can create
+// \\.\pipe\pigo-<hash> before the real host does. A client that connected
+// blindly would then send the bearer token to that process in hello. The owner
+// of a pipe is fixed by the kernel to the user of the process that created it
+// (changing it needs SeRestorePrivilege, which a normal local user does not
+// have), so checking the owner rejects a squatter without any shared secret. A
+// same-user impostor is out of scope: it can already read the token file.
 func Dial(endpoint string, timeout time.Duration) (net.Conn, error) {
-	return winio.DialPipe(endpoint, &timeout)
+	conn, err := winio.DialPipe(endpoint, &timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyPipeOwner(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// verifyPipeOwner rejects a connection whose server pipe is owned by another
+// user, so the token is never handed to a name-squatting process.
+func verifyPipeOwner(conn net.Conn) error {
+	h, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return errors.New("host: pipe connection does not expose its handle")
+	}
+	owner, err := pipeOwner(h.Fd())
+	if err != nil {
+		return err
+	}
+	want, err := currentUserSID()
+	if err != nil {
+		return err
+	}
+	if !ownerMatches(owner, want) {
+		got := "unknown"
+		if owner != nil {
+			got = owner.String()
+		}
+		return fmt.Errorf("%w: pipe owner is %s", ErrEndpointOwner, got)
+	}
+	return nil
+}
+
+// pipeOwner returns the owner SID of an open pipe handle.
+func pipeOwner(fd uintptr) (*windows.SID, error) {
+	sd, err := windows.GetSecurityInfo(windows.Handle(fd), windows.SE_KERNEL_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, fmt.Errorf("host: pipe security: %w", err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, fmt.Errorf("host: pipe owner: %w", err)
+	}
+	return owner, nil
+}
+
+// ownerMatches reports whether a pipe's owner is the expected SID. A missing
+// owner is never a match.
+func ownerMatches(owner, want *windows.SID) bool {
+	return owner != nil && want != nil && owner.Equals(want)
+}
+
+// IsEndpointInUse reports whether binding an endpoint failed because another
+// listener already holds the name. A named pipe that exists rejects a second
+// FILE_CREATE with ERROR_ACCESS_DENIED.
+func IsEndpointInUse(err error) bool {
+	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
+		errors.Is(err, windows.ERROR_PIPE_BUSY)
 }
 
 // socketArtifact returns the on-disk leftovers of a host's transport. A named
@@ -81,18 +152,9 @@ func socketArtifact(string) []string { return nil }
 // ownerOnlyPipeSDDL builds "D:P(A;;GA;;;<current user>)" — a protected DACL with
 // one ACE granting generic-all to the process's user.
 func ownerOnlyPipeSDDL() (string, error) {
-	tok, err := windows.OpenCurrentProcessToken()
+	sid, err := currentUserSID()
 	if err != nil {
-		return "", fmt.Errorf("open process token: %w", err)
-	}
-	defer tok.Close()
-	user, err := tok.GetTokenUser()
-	if err != nil {
-		return "", fmt.Errorf("get token user: %w", err)
-	}
-	sid := user.User.Sid
-	if sid == nil {
-		return "", fmt.Errorf("token has no user SID")
+		return "", err
 	}
 	// P protects the DACL from inheritance; GA is generic-all.
 	return "D:P(A;;GA;;;" + sid.String() + ")", nil

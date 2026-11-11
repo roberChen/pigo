@@ -120,6 +120,11 @@ func Connect(opts Options) (*Client, error) {
 	}
 	nc, err := hostpath.Dial(socket, timeout)
 	if err != nil {
+		// A pipe created by another local user is a security signal, not the
+		// ordinary "nobody is listening" case: report why the client refused.
+		if errors.Is(err, hostpath.ErrEndpointOwner) {
+			return nil, fmt.Errorf("hostclient: refusing endpoint %s: %w", socket, err)
+		}
 		return nil, ErrNotRunning{Dir: opts.Dir, Socket: socket}
 	}
 	c := &Client{

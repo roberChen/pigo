@@ -249,10 +249,12 @@ func drainQuietly(rc *rawConn) {
 // ---- connect failures --------------------------------------------------
 
 func TestConnectWithoutAnyStateDir(t *testing.T) {
-	// No Options.Dir, no PIGO_HOME and no HOME: the client has nowhere to look
-	// and must say so instead of dialing a relative path.
+	// No Options.Dir, no PIGO_HOME and no home directory: the client has nowhere
+	// to look and must say so instead of dialing a relative path. Windows takes
+	// the home directory from USERPROFILE, the rest from HOME.
 	t.Setenv("PIGO_HOME", "")
 	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
 	_, err := Connect(Options{})
 	if err == nil {
 		t.Fatal("connect without a state directory succeeded")
@@ -366,10 +368,19 @@ func TestConnectHelloTimeout(t *testing.T) {
 	// startup: Hello is bounded by Options.CallTimeout. Repeat it, because an
 	// abandoned handshake that leaks its reader would leak one per attempt.
 	dir, _ := startRawHost(t, drainQuietly)
-	baseline := runtime.NumGoroutine()
+	// Warm up first. A named-pipe listener only creates its next pipe instance
+	// (and that instance's connect goroutine) when Accept is called, so the first
+	// connection adds a fixture goroutine after the ready signal. Measure the
+	// baseline once that steady state has settled, or the fixture looks like one
+	// leaked client goroutine.
+	opts := Options{Dir: dir, Token: "t", Client: "test", CallTimeout: 150 * time.Millisecond}
+	if _, err := dial(t, opts); err == nil {
+		t.Fatal("warm-up handshake unexpectedly succeeded")
+	}
+	baseline := settledGoroutines(t)
 	for i := 0; i < 3; i++ {
 		start := time.Now()
-		_, err := dial(t, Options{Dir: dir, Token: "t", Client: "test", CallTimeout: 150 * time.Millisecond})
+		_, err := dial(t, opts)
 		elapsed := time.Since(start)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("attempt %d: error = %v, want context.DeadlineExceeded", i, err)
@@ -381,6 +392,24 @@ func TestConnectHelloTimeout(t *testing.T) {
 	// Every abandoned connection closed its socket, so the fixture's handlers exit
 	// and the count returns to where it started.
 	waitGoroutines(t, baseline, "after three hello timeouts")
+}
+
+// settledGoroutines waits until the goroutine count stops changing, then
+// returns it. Async teardown (a transport's reader, the fixture's next accept
+// instance) makes an immediate reading racy as a baseline.
+func settledGoroutines(t *testing.T) int {
+	t.Helper()
+	prev := runtime.NumGoroutine()
+	deadline := time.Now().Add(edgeTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		n := runtime.NumGoroutine()
+		if n == prev {
+			return n
+		}
+		prev = n
+	}
+	return prev
 }
 
 func TestConnectSeesServerReportedVersion(t *testing.T) {

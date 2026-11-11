@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -282,22 +283,31 @@ func (p *attachPipe) wait(t *testing.T) int {
 }
 
 // echoFactory replies with the prompt it was handed, which is how the tests prove
-// what attach actually forwarded to the host.
-type echoFactory struct{}
+// what attach actually forwarded to the host. delay holds each turn open, which
+// the concurrent-client tests use to observe several live sessions at once.
+type echoFactory struct{ delay time.Duration }
 
-func (echoFactory) NewAgent(_ context.Context, spec hostserver.AgentSpec) (hostserver.Agent, error) {
+func (f echoFactory) NewAgent(_ context.Context, spec hostserver.AgentSpec) (hostserver.Agent, error) {
 	if spec.Model == "" {
 		spec.Model = "echo-model"
 	}
-	return &echoAgent{spec: spec, turnRecorder: &turnRecorder{}}, nil
+	return &echoAgent{spec: spec, turnRecorder: &turnRecorder{}, delay: f.delay}, nil
 }
 
 type echoAgent struct {
 	spec hostserver.AgentSpec
 	*turnRecorder
+	delay time.Duration
 }
 
-func (a *echoAgent) Run(_ context.Context, prompt string, h runtime.StreamHandler) (*agentcore.AssistantMessage, error) {
+func (a *echoAgent) Run(ctx context.Context, prompt string, h runtime.StreamHandler) (*agentcore.AssistantMessage, error) {
+	if a.delay > 0 {
+		select {
+		case <-time.After(a.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	msg := agentcore.AssistantMessage{
 		RoleField:  agentcore.RoleAssistant,
 		Content:    agentcore.ContentList{agentcore.NewTextContent("echo:" + prompt)},
@@ -1188,6 +1198,28 @@ func TestAttachAlwaysApproveSkipsLaterPrompts(t *testing.T) {
 	}
 }
 
+// TestAttachTypedAheadPromptsSurviveEOF pins the piped-input case: the reader hit
+// EOF while the first turn was running, but more prompts were already queued.
+// They must all run to completion, one turn at a time, before the client
+// detaches; EOF means "no more input", not "drop the queued work".
+func TestAttachTypedAheadPromptsSurviveEOF(t *testing.T) {
+	dir := t.TempDir()
+	startHost(t, dir, &scriptedFactory{reply: "queued-reply"})
+
+	// Three prompts: one in flight, two queued, then EOF. Only one turn may be in
+	// flight at a time, so the queue has to be drained one turn per completion.
+	stdout, stderr, code := attachAndRead(t, dir, "first\nsecond\nthird\n", nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr)
+	}
+	if got := strings.Count(stdout, "queued-reply"); got != 3 {
+		t.Fatalf("rendered %d replies, want all three prompts to run: %q", got, stdout)
+	}
+	if strings.Contains(stdout, "a turn is already running") {
+		t.Fatalf("a queued prompt was dropped as a concurrent turn: %q", stdout)
+	}
+}
+
 // TestAttachUnexpectedPermissionInputDenies pins fail-closed parsing: anything
 // that is not an explicit yes/always — here a plausible-looking "maybe" — denies.
 func TestAttachUnexpectedPermissionInputDenies(t *testing.T) {
@@ -1508,3 +1540,89 @@ func TestNewFactoryResolvesThinkingLevel(t *testing.T) {
 // directory), which costs the full 10s deadline per run and deliberately leaves a
 // live child behind. The failure path that matters — a child that exits during
 // startup — is covered by TestServeDaemonRefusedWhenHostAlreadyRunning above.
+
+// TestConcurrentAttachClientsOwnSeparateSessions is the multi-UI shape at the CLI
+// boundary: one host, four attach processes, four different sessions. Each client
+// must see only its own stream, its own cwd and its own session id, while the host
+// reports all four sessions live at once.
+func TestConcurrentAttachClientsOwnSeparateSessions(t *testing.T) {
+	const n = 4
+	dir := t.TempDir()
+	startHost(t, dir, &echoFactory{delay: 400 * time.Millisecond})
+
+	type attachResult struct {
+		out, errOut string
+		code        int
+	}
+	cwds := make([]string, n)
+	results := make([]attachResult, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		cwds[i] = t.TempDir()
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var out, errOut bytes.Buffer
+			code := Attach(AttachOptions{Dir: dir, Cwd: cwds[i]},
+				strings.NewReader(fmt.Sprintf("prompt-%d\n/exit\n", i)), &out, &errOut)
+			results[i] = attachResult{out: out.String(), errOut: errOut.String(), code: code}
+		}(i)
+	}
+
+	// All four turns overlap for their 400ms, so the host must count four.
+	sawAll := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errOut bytes.Buffer
+		if Run([]string{"status"}, ServeOptions{Dir: dir}, &out, &errOut) == 0 &&
+			strings.Contains(out.String(), fmt.Sprintf("%d live session(s)", n)) {
+			sawAll = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	wg.Wait()
+	if !sawAll {
+		t.Fatalf("host never reported %d live sessions", n)
+	}
+
+	ids := make([]string, n)
+	for i := range results {
+		r := results[i]
+		if r.code != 0 {
+			t.Fatalf("client %d exit = %d, stderr = %q", i, r.code, r.errOut)
+		}
+		if want := fmt.Sprintf("echo:prompt-%d", i); !strings.Contains(r.out, want) {
+			t.Fatalf("client %d output lacks its own reply %q: %q", i, want, r.out)
+		}
+		if !strings.Contains(r.out, " in "+cwds[i]) {
+			t.Fatalf("client %d session is not rooted at %s: %q", i, cwds[i], r.out)
+		}
+		ids[i] = sessionIDFrom(t, r.out)
+		if ids[i] == "" {
+			t.Fatalf("client %d printed no session id: %q", i, r.out)
+		}
+	}
+	for i := range results {
+		for j := range ids {
+			if i == j {
+				continue
+			}
+			if strings.Contains(results[i].out, ids[j]) {
+				t.Fatalf("client %d output names client %d's session %s: %q", i, j, ids[j], results[i].out)
+			}
+			if strings.Contains(results[i].out, cwds[j]) {
+				t.Fatalf("client %d output names client %d's cwd %s: %q", i, j, cwds[j], results[i].out)
+			}
+		}
+	}
+
+	// Sessions belong to their connection, so a fresh one lists nothing.
+	out, errOut, code := attachAndRead(t, dir, "", func(o *AttachOptions) { o.List = true })
+	if code != 0 {
+		t.Fatalf("--list exit = %d, stderr = %q", code, errOut)
+	}
+	if !strings.Contains(out, "no sessions on this connection") {
+		t.Fatalf("a fresh connection saw another client's sessions: %q", out)
+	}
+}

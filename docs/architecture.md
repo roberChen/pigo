@@ -110,13 +110,13 @@ final, err := runtime.DrainStream(ctx, stream, handler) // 消费者，永远 dr
 ```
 POSIX                          Windows
 unix socket  server.sock  (0600)  named pipe  \\.\pipe\pigo-<hash>   (owner-only DACL)
-token 文件    server.token (0600)  token 文件  server.token (0600)
+token 文件    server.token (0600)  token 文件  server.token (owner-only DACL)
 状态文件      server.json         状态文件    server.json  {pid, version, startedAt, socket}
 ```
 
 - 一行一个 JSON 对象（NDJSON）。请求带 `id` + `method` + `params`，响应按 `id` 关联，事件是 `event` + `params`（无 `id`）。
-- 连接建立后的第一条消息必须是 `hello`，携带 token；不通过则关闭连接。endpoint 的所有者限制是主防线（POSIX 上是 socket 的 `0600` 位，Windows 上是只含当前用户一条 ACE 的受保护 DACL + 拒绝远程客户端），token 是对“同用户但误连”的显式确认。
-- 单实例：`listen` 前先尝试连接已有 endpoint；能连上说明已有守护进程，直接退出并报告它的 pid。
+- 连接建立后的第一条消息必须是 `hello`，携带 token；不通过则关闭连接。endpoint 的所有者限制是主防线（POSIX 上是 socket 的 `0600` 位，Windows 上是只含当前用户一条 ACE 的受保护 DACL + 拒绝远程客户端），token 是对“同用户但误连”的显式确认。Windows 上 token 文件本身同样只授权当前用户（`os.Chmod` 在 Windows 只能切换只读位，因此写文件时直接设置受保护 DACL）；客户端 `Dial` 之后还会校验管道的 owner 是当前用户——管道名在全局命名空间里，其他本地用户可以抢先创建同名管道，校验 owner 才能避免把 token 发过去。
+- 单实例：`listen` 前先尝试连接已有 endpoint；能连上说明已有守护进程，直接退出并报告它的 pid。Windows 上监听者尚未进入 `Accept` 时探测会失败（命名管道只在 `Accept` 挂起时可连接），因此第二次 `Listen` 的 “名字被占用” 错误同样映射成“已有 host 在运行”。
 
 两种传输的语义差异都被抽象掉了，但值得记住原因：
 
@@ -127,9 +127,11 @@ token 文件    server.token (0600)  token 文件  server.token (0600)
 | 后缀 `server.sock` | 普通情况下就是它 | 没有后缀，也没有文件 |
 | 崩溃残留 | socket 文件留下，需要 `Probe` + 删除 | 管道随监听者消失，无残留 |
 | 清理 | `Footprint` 含 socket 文件 | `Footprint` 只有 token + 状态文件，`CleanEndpoint` 是 no-op |
-| 权限 | socket 文件 `0600` | 管道 DACL `D:P(A;;GA;;;<user SID>)` |
+| 权限 | socket 文件 `0600` | 管道 DACL `D:P(A;;GA;;;<user SID>)`；token/状态文件同样是仅当前用户的受保护 DACL |
+| 客户端校验 | 无（文件权限已隔离） | 连接后校验管道 owner 必须是当前用户，拒绝同名管道冒充 |
+| 并发/关闭 | — | 命名管道只在 `Accept` 挂起时可连接；`Serve` 返回前必须等完 shutdown 清理，否则进程退出会留下 token/state 文件 |
 
-命名管道的实现依赖 `github.com/Microsoft/go-winio`；`InputBufferSize` / `OutputBufferSize` 提到 64 KiB，否则一条几 MB 的 resume 结果会退化成大量 4 KiB 往返。Windows 分支不参与 CI（仓库只在 Linux 上跑测试），但 `GOOS=windows go vet ./...` 是必须过的门。
+命名管道的实现依赖 `github.com/Microsoft/go-winio`；`InputBufferSize` / `OutputBufferSize` 提到 64 KiB，否则一条几 MB 的 resume 结果会退化成大量 4 KiB 往返。Windows 分支不参与 CI（仓库只在 Linux 上跑测试），但 `GOOS=windows go vet ./...` 是必须过的门；在 Windows 上手工运行 `go test ./internal/hostpath ./internal/hostclient ./internal/hostserver ./internal/cli/hostcmd` 也应全绿（`endpoint_windows_test.go` / `file_windows_test.go` 覆盖管道、ACL 与原子写）。
 
 ### 6.3 方法
 

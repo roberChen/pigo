@@ -53,7 +53,7 @@ type State struct {
 // ReadState loads the state file, returning os.ErrNotExist when no host has
 // written one.
 func ReadState(dir string) (State, error) {
-	data, err := os.ReadFile(StatePath(dir))
+	data, err := readFileShared(StatePath(dir))
 	if err != nil {
 		return State{}, err
 	}
@@ -86,6 +86,14 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
+	// Tighten the staging file's permissions before writing anything into it. A
+	// temp file created by os.CreateTemp inherits the directory ACL on Windows,
+	// and os.Chmod cannot express 0600 there, so writing first would expose the
+	// token to anyone who can list the directory. A rename keeps the ACL.
+	if err := secureFile(tmp); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Chmod(mode); err != nil {
 		f.Close()
 		return err
@@ -97,7 +105,7 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return replaceFile(tmp, path)
 }
 
 // NewToken returns a fresh random bearer token (32 bytes, hex encoded).
@@ -117,7 +125,7 @@ func WriteToken(dir, token string) error {
 
 // ReadToken reads the token written by a running host.
 func ReadToken(dir string) (string, error) {
-	data, err := os.ReadFile(TokenPath(dir))
+	data, err := readFileShared(TokenPath(dir))
 	if err != nil {
 		return "", err
 	}

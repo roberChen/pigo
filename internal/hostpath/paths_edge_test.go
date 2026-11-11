@@ -255,18 +255,13 @@ func TestWriteStateNeverPartiallyVisible(t *testing.T) {
 				return
 			default:
 			}
-			raw, err := os.ReadFile(StatePath(dir))
+			// Read through the production reader: it is the one that must see a
+			// whole state file, and on Windows it shares delete so a concurrent
+			// replacement is allowed underneath it.
+			st, err := ReadState(dir)
 			if err != nil {
 				select {
 				case errs <- err:
-				default:
-				}
-				return
-			}
-			var st State
-			if err := json.Unmarshal(raw, &st); err != nil {
-				select {
-				case errs <- errors.New("partial state file visible: " + err.Error()):
 				default:
 				}
 				return

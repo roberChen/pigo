@@ -16,6 +16,11 @@ import (
 	"time"
 )
 
+// ErrEndpointOwner reports that the endpoint belongs to a different user. On
+// Windows a named pipe lives in the global namespace, so another local user can
+// create the name before the real host; a client must not send its token there.
+var ErrEndpointOwner = errors.New("host: endpoint is owned by another user")
+
 // Probe reports whether a live host is listening on endpoint. A failed dial
 // means nobody is there: on POSIX a crashed host can leave the socket file
 // behind, and on Windows the pipe simply does not exist once its listener closes.
@@ -40,10 +45,15 @@ func Footprint(dir string) []string {
 }
 
 // RemoveAll removes the host's endpoint, state and token. Missing entries are
-// not an error: shutdown after a crash still tidies what is left.
+// not an error: shutdown after a crash still tidies what is left. An empty dir
+// is ignored rather than resolved against the working directory, which would
+// delete files the host never owned.
 func RemoveAll(dir string) {
+	if dir == "" {
+		return
+	}
 	for _, path := range Footprint(dir) {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			// Best effort: a leftover file must not turn a clean shutdown into a
 			// failure (the next start replaces it).
 			continue

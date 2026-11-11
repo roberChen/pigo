@@ -12,6 +12,47 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Fixed
+- **A client that disconnects while its tool confirmation is pending no longer
+  wedges the session**: the host's permission gate waits for an answer from the
+  owning connection, and a disconnect only detached the session. With the
+  default timeout of zero the gate waited forever, so the turn stayed "running"
+  and the session could never be resumed or closed. Closing a connection now
+  fails its sessions' pending permission requests, which the gate turns into a
+  denial: the turn finishes, persists, and becomes resumable again, while other
+  attached clients are untouched. Covered together with the multi-client
+  isolation suite (separate sessions per client, owner-only events and
+  permissions, owner-only cancel, mid-turn disconnect, concurrent id allocation,
+  shutdown fan-out).
+- **`pigo attach` no longer loses prompts typed ahead when stdin ends**: when the
+  input was piped, the client hit EOF while a turn was running, then drained its
+  queued lines, started the next turn, and immediately detached because EOF was
+  pending — the host finished the turn, but its stream went to a closed
+  connection. With three or more queued prompts the extra ones were also dropped
+  as "a turn is already running". The queue is now drained one turn at a time and
+  the client detaches only when it is idle again, so every typed-ahead prompt
+  runs and streams to completion.
+- **The Windows host daemon now shuts down without leaving its token and state
+  files behind**: `pigo serve stop` on Windows reported "host did not exit in
+  time" and left `server.json` and `server.token` in the state directory. A
+  `server.shutdown` request (and a context cancel) closes the listener before it
+  removes those files, so `Serve` returned, the daemon process exited, and the
+  cleanup goroutine lost the race. `Serve` now waits for the shutdown to finish
+  before returning, and duplicate `serve --daemon` failures quote the detached
+  child's last log line instead of only "exit status 1".
+- **The Windows host token is actually private, and a pipe squatter cannot
+  steal it**: `os.Chmod(0600)` is a no-op on Windows, so the bearer-token file
+  inherited whatever ACL its state directory had; the token and state files now
+  get a protected owner-only DACL at write time, and the atomic replace retries
+  while a concurrent reader has the target open (`MoveFileEx` cannot replace a
+  file opened without `FILE_SHARE_DELETE`; reads now share delete). Because
+  named pipes live in a global namespace, a client also verifies that the pipe
+  it connected to is owned by the current user before sending the token, and
+  reports that refusal instead of "no pigo host is running". `serve --daemon
+  --dir` now creates a missing state directory (the log is written there before
+  the child starts). The Windows-only tests that had never run were fixed
+  (probe needs an accept loop, the round-trip test closed its side before
+  writing, the SDDL assertion miscounted ACEs, `HOME` is `USERPROFILE`, and
+  go-winio adds a per-Accept goroutine), so the host packages pass on Windows.
 - **Cancelling a turn no longer reports it as a provider failure or loses the
   partial answer**: a user cancel surfaced as `stop_reason: "error"` — and with
   a blank `error`, which made "I stopped it" indistinguishable from "the

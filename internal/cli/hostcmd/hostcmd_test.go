@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -647,5 +648,65 @@ func TestServeStatusDetectsStaleStateFile(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "not responding") {
 		t.Fatalf("stale state not reported: %q", out.String())
+	}
+}
+
+// TestServeDaemonCreatesStateDir is the `--dir` case where the directory does
+// not exist yet: the daemon's log lives there, so the parent has to create it
+// before redirecting the child's output. Foreground serve already creates it.
+func TestServeDaemonCreatesStateDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("daemon test re-execs the test binary")
+	}
+	dir := filepath.Join(t.TempDir(), "nested", "state")
+	t.Setenv("PIGO_TEST_HOST_REPLY", "x")
+
+	var out, errOut bytes.Buffer
+	code := Run(nil, ServeOptions{
+		Dir:     dir,
+		Daemon:  true,
+		Build:   "test",
+		Factory: &scriptedFactory{reply: "x"},
+	}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("daemon start exit = %d, stdout = %q, stderr = %q", code, out.String(), errOut.String())
+	}
+	defer func() {
+		var o, e bytes.Buffer
+		Run([]string{"stop"}, ServeOptions{Dir: dir}, &o, &e)
+	}()
+	if !strings.Contains(out.String(), "listening on") {
+		t.Fatalf("daemon did not report readiness: %q", out.String())
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("state dir was not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
+	}
+}
+
+// TestLogTailReportsTheLastLine is the daemon startup-failure path: the child is
+// detached, so its only voice is the log. Reporting the last line is what turns
+// "exit status 1" into the actual reason.
+func TestLogTailReportsTheLastLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.log")
+	if err := os.WriteFile(path, []byte("first\nsecond\n\n"), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if got := logTail(path); got != "second" {
+		t.Fatalf("logTail = %q, want %q", got, "second")
+	}
+	if got := logTail(filepath.Join(dir, "missing.log")); got != "" {
+		t.Fatalf("logTail of a missing file = %q, want empty", got)
+	}
+	// A final line without a newline is a crash mid-write, and still the reason.
+	if err := os.WriteFile(path, []byte("a\nb"), 0o600); err != nil {
+		t.Fatalf("rewrite log: %v", err)
+	}
+	if got := logTail(path); got != "b" {
+		t.Fatalf("logTail without a trailing newline = %q, want %q", got, "b")
 	}
 }
