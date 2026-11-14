@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // newTestStatusBar builds a status bar with a known cwd (already ~-abbreviated

@@ -12,7 +12,7 @@ package compaction
 import (
 	"encoding/json"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // CompactionSettings holds the thresholds and retention knobs for compaction,

@@ -28,7 +28,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/pihost"
+	"github.com/roberChen/pigo/internal/pihost"
 )
 
 // DistributeExtension copies the extension package at pkgDir into the plugins

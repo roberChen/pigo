@@ -21,7 +21,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/roberChen/pigo/internal/hooks"
 )
 
 // ReferenceMarker prefixes the generated file and also marks the built-in skill

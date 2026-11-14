@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/agenttool"
 )
 
 // switchManager connects a manager with two servers (one connected, one

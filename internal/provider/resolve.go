@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/cli/config"
 )
 
 // ResolveProvider maps a model id to a built-in provider. An explicit

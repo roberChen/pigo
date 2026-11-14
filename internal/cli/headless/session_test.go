@@ -8,7 +8,7 @@ package headless
 import (
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 func textUser(s string) agentcore.UserMessage {

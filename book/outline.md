@@ -1,6 +1,6 @@
 # 《Write Pi Agent in Go》全书大纲
 
-本书以 [pigo](https://github.com/smallnest/pigo)（pi 命令行 AI Agent 的 Go 重实现）源码为标本，
+本书以 [pigo](https://github.com/roberChen/pigo)（pi 命令行 AI Agent 的 Go 重实现）源码为标本，
 按「从入口向内、再向外」的解剖顺序，逐层拆解一个可用于生产的命令行 AI Agent 是如何装配、运行与扩展的：
 先从 **CLI 入口** 进入，深入 **核心抽象 → 两层循环 → Provider 传输 → 工具系统**，
 再向内触及 **上下文压缩 → 会话持久化 → 项目信任**，最后向外延伸到 **子 Agent 编排 → 可扩展性生态**。

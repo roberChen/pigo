@@ -4,7 +4,7 @@ pigo is a Go re-implementation of the [pi](https://pi.dev) coding agent: a CLI
 coding assistant with a headless mode, a line REPL, a full-screen TUI, an
 embeddable SDK, plus a Chinese-language book about its internals (`book/`).
 
-Module: `github.com/smallnest/pigo`. Single Go module, no submodules, no
+Module: `github.com/roberChen/pigo`. Single Go module, no submodules, no
 Makefile, no linter config, no code generation (`go:generate` appears nowhere).
 
 ## Commands

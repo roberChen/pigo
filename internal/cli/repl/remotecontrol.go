@@ -18,9 +18,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/remotecontrol"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/remotecontrol"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // teeWriter is an io.Writer that always forwards to a primary writer (the

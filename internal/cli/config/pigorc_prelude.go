@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/roberChen/pigo/internal/hooks"
 )
 
 // pigorcPrelude is the Bash DSL a pigorc builds config with.

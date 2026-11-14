@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // TestLoopRecoversFromMalformedToolArguments drives the real loop with a turn

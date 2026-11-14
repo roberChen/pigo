@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // seedSession writes a small multi-turn session and returns its header.

@@ -1,12 +1,12 @@
 # pigo SDK examples · pigo SDK 示例
 
 Runnable examples for embedding a **pigo** coding agent in your own Go program
-via the public [`github.com/smallnest/pigo/agent`](../../agent) package.
+via the public [`github.com/roberChen/pigo/agent`](../../agent) package.
 
 本目录是将 **pigo** 编码智能体嵌入到你自己的 Go 程序中的可运行示例，使用公共
-[`github.com/smallnest/pigo/agent`](../../agent) 包。
+[`github.com/roberChen/pigo/agent`](../../agent) 包。
 
-> Issue [#554](https://github.com/smallnest/pigo/issues/554)
+> Issue [#554](https://github.com/roberChen/pigo/issues/554)
 
 ---
 
@@ -26,7 +26,7 @@ pigo 的实现代码全部位于 `internal/` 下，Go 禁止其他模块导入�
 ## Install · 安装
 
 ```go
-import "github.com/smallnest/pigo/agent"
+import "github.com/roberChen/pigo/agent"
 ```
 
 ## Run · 运行
@@ -99,8 +99,8 @@ not read or write the machine's shared pigo state unless you opt in.
 
 ## API reference · API 参考
 
-Full docs: `go doc github.com/smallnest/pigo/agent`. 完整文档见
-`go doc github.com/smallnest/pigo/agent`。
+Full docs: `go doc github.com/roberChen/pigo/agent`. 完整文档见
+`go doc github.com/roberChen/pigo/agent`。
 
 - `New(opts ...Option) (*Session, error)` — build a session; validates provider, tools, and thinking level up front, no network call. · 构建会话；预先校验服务商、工具与推理等级，不发起网络请求。
 - `(*Session) Prompt(ctx, prompt) (string, error)` — one turn, returns final text. · 单轮对话，返回最终文本。

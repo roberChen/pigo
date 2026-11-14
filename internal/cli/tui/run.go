@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // Run starts the full-screen TUI and blocks until the user quits (Ctrl+C /

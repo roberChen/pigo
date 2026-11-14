@@ -30,7 +30,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // providerBaseURLs holds the default endpoint per built-in provider. A base URL
@@ -804,7 +804,7 @@ func NewOpenRouterProvider(baseURL string, models []Model) Provider {
 		requiresAuth: true,
 		extraHeaders: map[string]string{
 			// OpenRouter attribution headers (optional but recommended).
-			"HTTP-Referer": "https://github.com/smallnest/pigo",
+			"HTTP-Referer": "https://github.com/roberChen/pigo",
 			"X-Title":      "pigo",
 		},
 	}, baseURL, models)

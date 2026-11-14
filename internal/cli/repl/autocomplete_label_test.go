@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 func TestFormatSlashAutocompleteLabel(t *testing.T) {

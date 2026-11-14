@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // TestThinkCommandSwitchesLevel verifies /think mutates the live thinking level

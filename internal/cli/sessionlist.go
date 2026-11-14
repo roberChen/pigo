@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smallnest/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/session"
 )
 
 // DescribeSession renders the one-line description shown in a /resume listing:

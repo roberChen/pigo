@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/agenttool"
-	"github.com/smallnest/pigo/internal/jsonrpc"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/jsonrpc"
 )
 
 // ProtocolVersion is the MCP revision this client announces. Servers may reply

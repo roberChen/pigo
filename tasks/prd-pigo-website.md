@@ -2,7 +2,7 @@
 
 ## Introduction / 概述
 
-为 pigo（`github.com/smallnest/pigo`，一个用 Go 复刻 pi 的命令行编码 Agent）重建一套**纯静态官方网站**，视觉与信息结构对标 [MiMo Code](https://mimo.xiaomi.com/coder)：一个营销风格的落地页（Hero + 交替展示的特性区块），配套多篇文档页。
+为 pigo（`github.com/roberChen/pigo`，一个用 Go 复刻 pi 的命令行编码 Agent）重建一套**纯静态官方网站**，视觉与信息结构对标 [MiMo Code](https://mimo.xiaomi.com/coder)：一个营销风格的落地页（Hero + 交替展示的特性区块），配套多篇文档页。
 
 网站为零构建、零依赖的静态资源，可直接双击打开或托管到 GitHub Pages。首页位于 `docs/index.html`，文档页位于新建目录 `docs/web/`。全站**中英双语**，支持一键切换。
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/agent"
+	"github.com/roberChen/pigo/agent"
 )
 
 // hermetic points provider/skill/plugin discovery at throwaway dirs and supplies

@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // searchMaxResults caps the number of matches/entries any single search returns

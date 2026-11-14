@@ -1,6 +1,8 @@
-module github.com/smallnest/pigo
+module github.com/roberChen/pigo
 
 go 1.27rc1
+
+tool github.com/roberChen/pigo/e2e/longstay
 
 require (
 	charm.land/bubbles/v2 v2.1.1

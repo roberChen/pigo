@@ -9,7 +9,7 @@ import (
 
 	flag "github.com/spf13/pflag"
 
-	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/cli/config"
 )
 
 // TestReferenceDocumentsEveryCLIFlag renders the reference from the real flag set

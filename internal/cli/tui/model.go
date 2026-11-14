@@ -12,15 +12,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/cli/memstatus"
-	"github.com/smallnest/pigo/internal/cli/prompts"
-	"github.com/smallnest/pigo/internal/cli/status"
-	"github.com/smallnest/pigo/internal/cli/ui"
-	"github.com/smallnest/pigo/internal/diag"
-	"github.com/smallnest/pigo/internal/memory"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/memstatus"
+	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/cli/status"
+	"github.com/roberChen/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/memory"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // Model is the root Bubble Tea model for the full-screen TUI. It composes a

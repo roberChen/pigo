@@ -7,7 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // statusBar renders the persistent bottom line described in the SPEC (US-003,

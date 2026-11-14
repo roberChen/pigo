@@ -17,14 +17,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/agenttool"
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/cli/prompts"
-	"github.com/smallnest/pigo/internal/plugin"
-	"github.com/smallnest/pigo/internal/provider"
-	rt "github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/plugin"
+	"github.com/roberChen/pigo/internal/provider"
+	rt "github.com/roberChen/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/session"
 )
 
 // cmdPluginMain is a standalone plugin that declares one "hello" slash command

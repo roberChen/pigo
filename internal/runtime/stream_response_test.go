@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // fakeStream builds a StreamFn that replays a fixed sequence of events, pushing

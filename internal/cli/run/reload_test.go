@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agenttool"
-	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/cli/config"
 )
 
 // baseSettings is the assembly input the reload tests start from: a valid provider

@@ -25,7 +25,7 @@
 **Description:** As a developer, I need a module that queries the latest GitHub release and compares it against the current build version, so that both `pigo update` and the startup banner can reuse it.
 
 **Acceptance Criteria:**
-- [ ] 提供函数查询 `smallnest/pigo` 最新 release 的 tag（复用 install.sh 使用的 GitHub `releases/latest` API）
+- [ ] 提供函数查询 `roberChen/pigo` 最新 release 的 tag（复用 install.sh 使用的 GitHub `releases/latest` API）
 - [ ] 提供语义化版本比较：能判断 latest 是否新于当前 `main.version`
 - [ ] 当前版本为 `dev`/`unknown` 时，比较函数返回"无法判断/不提示升级"，不误报
 - [ ] 存在 `GITHUB_TOKEN` 环境变量时带上以提高 API 速率限制
@@ -72,7 +72,7 @@
 ## Functional Requirements
 
 - FR-1: 系统必须在 `pigo update` 无位置参数时执行自更新，有位置参数时委派给包管理更新。
-- FR-2: 系统必须查询 `smallnest/pigo` 的 GitHub 最新 release 以确定目标版本。
+- FR-2: 系统必须查询 `roberChen/pigo` 的 GitHub 最新 release 以确定目标版本。
 - FR-3: 系统必须根据运行平台的 GOOS/GOARCH 选择对应的 release 归档。
 - FR-4: 系统必须在替换前用 `checksums.txt` 校验下载归档的 SHA256。
 - FR-5: 系统必须以原子方式（临时文件 + rename）替换当前正在运行的二进制。

@@ -14,11 +14,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/agenttool"
-	pigoconfig "github.com/smallnest/pigo/internal/cli/config"
-	"github.com/smallnest/pigo/internal/mcp"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agenttool"
+	pigoconfig "github.com/roberChen/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // configToolFrom returns the registered pigo_config tool, or nil.

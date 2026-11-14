@@ -19,8 +19,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/cli/headless"
-	"github.com/smallnest/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/cli/headless"
+	"github.com/roberChen/pigo/internal/session"
 )
 
 // Run executes a session subcommand (cmd) with arguments (args), writing

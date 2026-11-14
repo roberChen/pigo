@@ -16,7 +16,7 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // diagMsg carries diagnostics that arrived while the UI was busy (or between

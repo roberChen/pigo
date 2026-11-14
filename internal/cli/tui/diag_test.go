@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // TestWaitDiagInertWhenNotKeeping verifies the two cases where there is nothing

@@ -39,7 +39,7 @@ type Updater struct {
 	HTTPClient *http.Client
 	// Repo is "owner/name"; ReleaseBaseURL overrides the download host in tests.
 	Repo           string
-	ReleaseBaseURL string // e.g. https://github.com/smallnest/pigo/releases/download
+	ReleaseBaseURL string // e.g. https://github.com/roberChen/pigo/releases/download
 	GOOS, GOARCH   string
 	// ExecPath is the executable to replace; defaults to os.Executable().
 	ExecPath string

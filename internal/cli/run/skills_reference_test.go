@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/cli/config"
 )
 
 // TestLoadSkillsRefreshesConfigReference verifies the built-in pigorc skill is

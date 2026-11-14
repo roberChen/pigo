@@ -20,14 +20,14 @@ package tui
 import (
 	"strings"
 
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/cli/prompts"
-	"github.com/smallnest/pigo/internal/cli/run"
-	"github.com/smallnest/pigo/internal/diag"
-	"github.com/smallnest/pigo/internal/mcp"
-	"github.com/smallnest/pigo/internal/plugin"
-	"github.com/smallnest/pigo/internal/provider"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/cli/run"
+	"github.com/roberChen/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/plugin"
+	"github.com/roberChen/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // maxMenuRows caps how many candidate rows the popup shows at once; a longer

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/cli/prompts"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // TestBtwListedInHelp verifies registerLiveCommands registers /btw so /help (and

@@ -1,13 +1,15 @@
 # pigo
 
-[![CI](https://github.com/smallnest/pigo/actions/workflows/ci.yml/badge.svg)](https://github.com/smallnest/pigo/actions/workflows/ci.yml)
-[![Release](https://github.com/smallnest/pigo/actions/workflows/release.yml/badge.svg)](https://github.com/smallnest/pigo/actions/workflows/release.yml)
+[![CI](https://github.com/roberChen/pigo/actions/workflows/ci.yml/badge.svg)](https://github.com/roberChen/pigo/actions/workflows/ci.yml)
+[![Release](https://github.com/roberChen/pigo/actions/workflows/release.yml/badge.svg)](https://github.com/roberChen/pigo/actions/workflows/release.yml)
 
 使用 Go 复刻的 [pi](https://pi.dev) AI Agent —— 一个面向命令行的编码智能体，同时支持**无头（headless）脚本模式**与**交互式 REPL**。
 
 pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助大模型完成从"读懂需求"到"改好代码"的闭环。它兼容 OpenAI / Anthropic 等多种协议网关，支持会话续跑、项目信任、技能（Skills）、插件与包管理。
 
-> 模块路径：`github.com/smallnest/pigo` · Go 1.27+
+> 模块路径：`github.com/roberChen/pigo` · Go 1.27+
+>
+> 本仓库由 **roberChen 独立维护**，后续开发、发布与自更新均使用该仓库；原版 `smallnest/pigo` 不再维护。
 
 > 📖 配套电子书《用 Go 编写 pi Agent》：[write_pi_agent_in_go.pdf](https://github.com/smallnest/ebooks/blob/master/write_pi_agent_in_go.pdf)
 
@@ -87,7 +89,7 @@ pigo 的运行时分层架构：请求路径从用户经 CLI、Agent 循环、Pr
 
 ```bash
 # 克隆仓库
-git clone https://github.com/smallnest/pigo.git
+git clone https://github.com/roberChen/pigo.git
 cd pigo
 
 # 构建二进制（生成 ./pigo）
@@ -112,7 +114,7 @@ pigo --version
 `install.sh` 会自动检测操作系统 / 架构，从 GitHub Releases 下载最新的预编译二进制并安装到常用的 PATH 目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/smallnest/pigo/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/roberChen/pigo/master/install.sh | sh
 ```
 
 可用环境变量覆盖默认行为：
@@ -126,14 +128,14 @@ curl -fsSL https://raw.githubusercontent.com/smallnest/pigo/master/install.sh | 
 ```bash
 # 指定版本与安装目录
 PIGO_VERSION=v0.2.0 PIGO_INSTALL_DIR="$HOME/bin" \
-  curl -fsSL https://raw.githubusercontent.com/smallnest/pigo/master/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/roberChen/pigo/master/install.sh | sh
 ```
 
 > Windows 请从 Releases 页面下载 `.zip` 手动解压。
 
 ### 下载预编译二进制
 
-[Releases](https://github.com/smallnest/pigo/releases) 页面提供 Linux / macOS / Windows 的 amd64 与 arm64 预编译包（由 goreleaser 构建）。下载对应平台的压缩包解压即可使用。
+[Releases](https://github.com/roberChen/pigo/releases) 页面提供 Linux / macOS / Windows 的 amd64 与 arm64 预编译包（由 goreleaser 构建）。下载对应平台的压缩包解压即可使用。
 
 ---
 
@@ -466,18 +468,20 @@ pigo attach --list
 - **一个 host 一个进程**：endpoint、token 与状态文件都由 `--dir`／`$PIGO_HOME` 决定；POSIX 上 socket 与 token 是 0600，Windows 上管道和 token 文件都只授权当前用户（DACL），重复 `serve` 会被拒绝而不是抢占已有 host。`--dir` 让测试与多实例互不干扰。
 - **传输按平台选择，协议不变**：两端说的都是同一套 NDJSON，`internal/hostpath` 负责把它落到具体传输上。Windows 的管道名是状态目录的哈希（管道命名空间任何本地用户都能枚举，明文路径会泄露目录布局），因此 Windows 上状态目录里只有 `server.token` 与 `server.json` 两个文件，没有 socket 文件；崩溃也不会留下可清理的残余，下一次 `serve` 直接重新绑定。客户端连接后还会校验管道 owner 必须是当前用户，其他人抢先占用同名管道也拿不到 token。
 - **会话属于创建它的连接**：另一条连接既看不到也驱动不了你的会话（`session.list` 只返回自己的），所以两个 UI 同时 attach 不会互相打断。
-- **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
-- **host 拥有 turn**：客户端断开不会中断正在跑的轮次；重连后 resume 能拿回完整历史（含压缩点之后的上下文）。
+- **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`always` 只授权当前会话，不会扩散到其它连接或同目录的其它会话；`--permission-timeout` 可配置等待时限（默认直到回答或断开）。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
+- **host 拥有 turn**：客户端断开不会中断正在跑的轮次；运行中可通过 `session.resume` 只读重连，按 `turnId` 与递增 `seq` 回放保留的事件并继续接收后续事件（回放窗口有界，溢出会明确标记）；轮次结束后再 resume 可拿回完整历史（含压缩点之后的上下文）。
 - **取消是一轮正常的结局，不是故障**：`cancel`（`attach` 里的 Ctrl-C）让这一轮以 `aborted` 结束，已经流式输出给客户端的文字留在结果里、也写进磁盘上的历史，`error` 字段保持为空——客户端据此渲染中止提示而不是报错。还没产出任何文字就被取消时，host 同样补一条 `aborted` 的空轮次，否则 resume 会停在一句没人回答的提问上。取消后会话照常可用。
 - **host 组装真实 run**：`pigo serve` 接受与普通运行相同的 `-m/--provider/--base-url/-n/--allowed-tools/--system-prompt` 等参数，`run.SetupEnvIn` 以会话的 cwd 为根装配工具与系统提示词，因此同一个 host 可以服务不同目录下的会话。
 
 `serve`/`attach` 目前都不取代 TUI：它们证明拆分可行，并给 Web UI 与 `-p --server` 留好了接口。
 
+一对多长稳可靠性验证使用 `go tool longstay`（不属于 `go test`）：真实 host 与命名管道/unix socket、mock LLM、客户端随时加入/退出/恢复、事件连续性校验和 JSONL 结果报告。用法见 [`e2e/longstay/README.md`](e2e/longstay/README.md)。
+
 ### GitHub PR Review Webhook
 
 ```
 export PIGO_GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
-pigo --github-review --github-webhook-repo smallnest/pigo
+pigo --github-review --github-webhook-repo roberChen/pigo
 ```
 
 Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动创建一个**只读 review 会话**（仅 read/grep/find 工具，不能写文件、不能执行命令）并运行 review。部署前置条件：
@@ -536,12 +540,12 @@ h j k l w b e move · 0 ^ $ gg G jump · dd cc yy lines · x X del · p P paste 
 
 ## 作为 SDK 嵌入
 
-除命令行外，pigo 也提供一个公共、可导入的 SDK 包，方便把编码智能体嵌入到你自己的 Go 程序中（issue [#554](https://github.com/smallnest/pigo/issues/554)）。
+除命令行外，pigo 也提供一个公共、可导入的 SDK 包，方便把编码智能体嵌入到你自己的 Go 程序中（issue [#554](https://github.com/roberChen/pigo/issues/554)）。
 
 pigo 的实现代码全部位于 `internal/` 下，Go 禁止外部模块导入；`agent` 包是官方支持的接口层，所有导出类型都是 Go 基本类型（`string`、`[]string`、`bool`、`func`），因此你的代码不会依赖任何 pigo 内部类型。
 
 ```go
-import "github.com/smallnest/pigo/agent"
+import "github.com/roberChen/pigo/agent"
 
 sess, err := agent.New(
     agent.WithModel("claude-opus-4-8"),
@@ -560,7 +564,7 @@ fmt.Println(reply)
 - **技能与记忆默认关闭**：保持嵌入式会话“隔离”，不读写本机共享状态，可用 `WithSkills` / `WithMemory` 开启。
 - **多轮对话**：同一个 `Session` 会跨调用保留历史；`Reset` 可清空历史。`Session` 非并发安全。
 
-完整的可运行示例（01~07：最小调用、流式输出、模型与推理强度、系统提示词、工具策略、多轮对话、自定义 Provider）见 [`examples/sdk/`](examples/sdk/)，API 文档见 `go doc github.com/smallnest/pigo/agent`。
+完整的可运行示例（01~07：最小调用、流式输出、模型与推理强度、系统提示词、工具策略、多轮对话、自定义 Provider）见 [`examples/sdk/`](examples/sdk/)，API 文档见 `go doc github.com/roberChen/pigo/agent`。
 
 ---
 

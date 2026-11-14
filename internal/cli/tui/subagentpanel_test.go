@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // TestSubagentPanelLifecycle exercises the ordered add/update/remove set: rows

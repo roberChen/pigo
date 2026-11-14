@@ -14,7 +14,7 @@ package provider
 import (
 	"context"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // Model is provider-agnostic metadata describing a single model's identity and

@@ -36,8 +36,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // MaxImageBytes caps a single image file. 8 MiB matches the common per-image

@@ -11,7 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // skillParamFixture builds a catalog with one positional/defaulted skill and one

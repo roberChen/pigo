@@ -106,7 +106,7 @@ func TestApplyEndToEnd(t *testing.T) {
 
 	u := &Updater{
 		HTTPClient:     srv.Client(),
-		Repo:           "smallnest/pigo",
+		Repo:           "roberChen/pigo",
 		ReleaseBaseURL: srv.URL,
 		GOOS:           "linux",
 		GOARCH:         "amd64",

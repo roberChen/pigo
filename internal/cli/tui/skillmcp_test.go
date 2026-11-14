@@ -15,8 +15,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/mcp"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // skillFixture builds the two-skill catalog the picker tests select from.

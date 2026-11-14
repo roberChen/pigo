@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/roberChen/pigo/internal/hooks"
 )
 
 func stopDispatcher(t *testing.T, event, cmd string) *hooks.Dispatcher {

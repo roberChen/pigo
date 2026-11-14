@@ -8,8 +8,8 @@ package prompts
 import (
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/cli/testutil"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/testutil"
 )
 
 // TestBuildSlashRegistryLoadsLegacyCommandsDir verifies the legacy

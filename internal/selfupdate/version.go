@@ -23,7 +23,7 @@ import (
 
 // Repo is the GitHub "owner/name" whose releases back pigo's self-update. It
 // matches the release target in .goreleaser.yaml and install.sh.
-const Repo = "smallnest/pigo"
+const Repo = "roberChen/pigo"
 
 // latestReleaseURL builds the GitHub API endpoint for a repo's latest release.
 func latestReleaseURL(repo string) string {

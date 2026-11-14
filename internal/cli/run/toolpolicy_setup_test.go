@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // writePolicySkill drops a minimal valid skill into dir so LoadSkills has

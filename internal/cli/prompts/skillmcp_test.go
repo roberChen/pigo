@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/mcp"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // skillCommandFixture builds a registry holding two skills with $ARGUMENTS.

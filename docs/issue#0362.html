@@ -64,7 +64,7 @@
 <body>
   <div class="container">
     <h1>Implementation Notes</h1>
-    <p class="meta">Issue <a href="https://github.com/smallnest/pigo/issues/362">#362</a> &mdash; 迁移运行装配层到 internal/cli/run &mdash; 2026-07-28</p>
+    <p class="meta">Issue <a href="https://github.com/roberChen/pigo/issues/362">#362</a> &mdash; 迁移运行装配层到 internal/cli/run &mdash; 2026-07-28</p>
 
     <h2><span class="dot design"></span> Design Decisions</h2>
     <div class="item">
@@ -77,7 +77,7 @@
       <h3><span class="label label-design">Decision</span> env 注入沿用 os.Getenv 直传</h3>
       <p><strong>Ambiguity:</strong> <code>SetupEnv</code> 内部调用 <code>provider.ResolveProvider(..., env)</code> 需要一个 env 函数。</p>
       <p><strong>Choice:</strong> 在 <code>SetupEnv</code> 内直接传 <code>os.Getenv</code>，不把 env 提升为 <code>SetupEnv</code> 的参数。</p>
-      <p><strong>Rationale:</strong> 与 <a href="https://github.com/smallnest/pigo/issues/361">#361</a> 一致——生产装配读真实进程环境是正确行为；env 注入只在 provider 解析的单元测试中需要，装配层无需为此扩签名。</p>
+      <p><strong>Rationale:</strong> 与 <a href="https://github.com/roberChen/pigo/issues/361">#361</a> 一致——生产装配读真实进程环境是正确行为；env 注入只在 provider 解析的单元测试中需要，装配层无需为此扩签名。</p>
     </div>
 
     <h2><span class="dot deviation"></span> Deviations</h2>

@@ -18,8 +18,8 @@ import (
 
 	goruntime "runtime"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // errorTurn scripts a turn whose final message stops on StopReasonError, so a

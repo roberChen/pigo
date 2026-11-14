@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // TestModelQuitKeys verifies the root model returns tea.Quit on the standard

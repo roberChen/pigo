@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // TestSetupEnvWarningsGoToDiagSink runs the assembly path that emits the

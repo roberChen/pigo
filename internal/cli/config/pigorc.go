@@ -64,8 +64,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/smallnest/pigo/internal/hooks"
-	"github.com/smallnest/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/hooks"
+	"github.com/roberChen/pigo/internal/mcp"
 )
 
 // pigorcTimeout bounds the whole evaluation so a script waiting on input cannot

@@ -2,7 +2,7 @@
 
 ## Introduction
 
-《用 Go 从零构建 Pi Agent》以 [pigo](https://github.com/smallnest/pigo) 源码为标本，庖丁解牛式逐层拆解一个命令行 AI Agent。引言（#202）与第 1 章（#204）已完成并入库，构建管线（pandoc → tectonic → ElegantBook）已跑通。
+《用 Go 从零构建 Pi Agent》以 [pigo](https://github.com/roberChen/pigo) 源码为标本，庖丁解牛式逐层拆解一个命令行 AI Agent。引言（#202）与第 1 章（#204）已完成并入库，构建管线（pandoc → tectonic → ElegantBook）已跑通。
 
 本 PRD 覆盖**剩余全部正文写作单元**：第 2–10 章共 9 章正文 + 后记，合计 10 个独立可交付单元。每章锚定 `outline.md` 中列出的真实源码包与关键文件，读者可对照源码逐行印证。写作规范、图表/实验盒子/交叉引用约定沿用第 1 章既定模式（见 `book/README.md`「写作约定」）。
 

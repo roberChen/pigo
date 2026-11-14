@@ -29,7 +29,7 @@
 
 **Acceptance Criteria:**
 - [ ] `internal/tui/` 目录及其下所有 `*.go`、`*_test.go` 文件被删除
-- [ ] 代码库中无任何文件 `import "github.com/smallnest/pigo/internal/tui"`（`grep -rn "internal/tui" --include="*.go"` 返回空）
+- [ ] 代码库中无任何文件 `import "github.com/roberChen/pigo/internal/tui"`（`grep -rn "internal/tui" --include="*.go"` 返回空）
 - [ ] `go build ./...` 通过
 - [ ] `go vet ./...` 通过
 

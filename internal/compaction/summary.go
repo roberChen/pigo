@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // SUMMARIZATION_SYSTEM_PROMPT instructs the model to only emit the structured

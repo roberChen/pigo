@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/session"
 )
 
 func summary(id, model, cwd, preview string, updated time.Time) session.SessionSummary {

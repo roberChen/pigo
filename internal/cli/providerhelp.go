@@ -9,7 +9,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // PrintProviderHelp writes the "Supported providers" block appended to `--help`

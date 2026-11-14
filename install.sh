@@ -3,7 +3,7 @@
 # 预编译二进制，并安装到常用的 PATH 目录。
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/smallnest/pigo/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/roberChen/pigo/master/install.sh | sh
 #
 # 可用环境变量覆盖默认行为：
 #   PIGO_VERSION   指定版本（形如 v0.2.0），默认取最新 release
@@ -11,7 +11,7 @@
 #   GITHUB_TOKEN   可选，用于提高 GitHub API 速率限制
 set -eu
 
-REPO="smallnest/pigo"
+REPO="roberChen/pigo"
 BINARY="pigo"
 
 info() { printf '%s\n' "pigo-install: $*" >&2; }

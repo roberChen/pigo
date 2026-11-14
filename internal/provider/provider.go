@@ -12,7 +12,7 @@ package provider
 import (
 	"context"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // AssistantMessageEvent is the sealed interface for provider stream deltas. The

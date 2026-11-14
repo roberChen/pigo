@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // TestPrintProviderHelp verifies the --help "Supported providers" block is

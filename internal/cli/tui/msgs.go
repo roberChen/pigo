@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/smallnest/pigo/internal/agentcore"
+import "github.com/roberChen/pigo/internal/agentcore"
 
 // This file defines the tea.Msg types the event bridge (bridge.go) produces from
 // a run's AgentEvents (US-004, SPEC 5.1). Each raw runtime signal is converted to

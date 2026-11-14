@@ -56,7 +56,7 @@
 <body>
   <div class="container">
     <h1>Implementation Notes</h1>
-    <p class="meta">Issue <a href="https://github.com/smallnest/pigo/issues/466">#466</a> &mdash; 内置自替换执行 pigo update &mdash; 2026-08-01</p>
+    <p class="meta">Issue <a href="https://github.com/roberChen/pigo/issues/466">#466</a> &mdash; 内置自替换执行 pigo update &mdash; 2026-08-01</p>
 
     <h2><span class="dot design"></span> Design Decisions</h2>
     <div class="item">
@@ -77,7 +77,7 @@
       <h3><span class="label label-deviation">Deviation</span> 无参 <code>pigo update</code> 的分发语义被改变(遗留 UpdateAll 变为死代码)</h3>
       <p><strong>Spec said:</strong> US-003 要求"保持 <code>pigo update &lt;包名&gt;</code> 包更新语义"。</p>
       <p><strong>Implemented instead:</strong> 在 <code>cmd/pigo/main.go</code> 分发处拦截 <code>update</code> 且无位置参数(<code>len(os.Args)==2</code>)的情况路由到 <code>selfupdate.Run</code>；带包名仍走 <code>pkgcmd.Run</code>。这使 pkgcmd 中"无参 = UpdateAll(全量更新包)"的旧路径成为不可达死代码。</p>
-      <p><strong>Why:</strong> 用户明确决策"无参=自更新，删除包全更新"。本 Issue 只做分发拦截;pkgcmd 内 <code>UpdateAll</code> 死代码的正式清理与分发分类测试归属 <a href="https://github.com/smallnest/pigo/issues/468">#468</a>。</p>
+      <p><strong>Why:</strong> 用户明确决策"无参=自更新，删除包全更新"。本 Issue 只做分发拦截;pkgcmd 内 <code>UpdateAll</code> 死代码的正式清理与分发分类测试归属 <a href="https://github.com/roberChen/pigo/issues/468">#468</a>。</p>
     </div>
 
     <h2><span class="dot tradeoff"></span> Tradeoffs</h2>

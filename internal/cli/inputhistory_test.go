@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // TestUserInputsFiltersToHumanPrompts verifies only human-typed user turns become

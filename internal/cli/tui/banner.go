@@ -6,8 +6,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/smallnest/pigo/internal/provider"
-	"github.com/smallnest/pigo/internal/selfupdate"
+	"github.com/roberChen/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/selfupdate"
 )
 
 // This file builds the startup splash shown at the top of the transcript: the

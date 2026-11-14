@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli/config"
-	"github.com/smallnest/pigo/internal/provider"
+	"github.com/roberChen/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/provider"
 )
 
 // TestRegisterConfiguredProviders verifies a configured provider becomes a

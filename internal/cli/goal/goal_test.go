@@ -7,8 +7,8 @@ package goal
 import (
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agenttool"
 )
 
 func TestGoalFollowUpDecision(t *testing.T) {

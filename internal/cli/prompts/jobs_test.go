@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agenttool"
-	pi_runtime "github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/agenttool"
+	pi_runtime "github.com/roberChen/pigo/internal/runtime"
 )
 
 // With no registries (or no jobs) /jobs explains how to start one instead of

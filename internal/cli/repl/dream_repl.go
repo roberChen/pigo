@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
-	"github.com/smallnest/pigo/internal/dream"
+	"github.com/roberChen/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/dream"
 )
 
 // dreamSubprocessResult is the parsed outcome of one spawn: the decoded Report

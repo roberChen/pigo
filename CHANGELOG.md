@@ -11,7 +11,37 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
+### Added
+- **A standalone long-stay reliability harness** (`e2e/longstay`, registered as
+  `go tool longstay`) drives a real
+  host over the native transport with a mock OpenAI-compatible SSE server and
+  many clients that join, disconnect and resume at arbitrary points. It checks
+  sequence continuity and reply integrity, records JSONL evidence and a
+  machine-readable summary, and exits non-zero on protocol, transport, host or
+  unrepaired-event failures. It is intentionally a command, not a Go test, so
+  runs can last hours with bounded artifacts.
+
 ### Fixed
+- **Host sessions now preserve isolation during reconnects, permission grants and
+  shutdown**: `always` approves only the session that answered, not every session
+  in the same directory. A client can now resume an ownerless running turn as a
+  read-only observer: the host replays a bounded event log with `turnId` and
+  monotonically increasing `seq` values, then streams later events in order.
+  Session creation and resume reserve their id before building an agent, running
+  closes keep a tombstone until persistence finishes, and persistence failures
+  roll the reservation back. Shutdown cancels assembly and running turns, closes
+  detached sessions, and releases agents without leaving late writers behind.
+- **Streaming backpressure no longer grows memory without limit or takes down a
+  UI**: the client caps event queues, reports `event_queue_overflow` when older
+  deltas are dropped, dispatches permission requests independently of text
+  rendering, and isolates subscriber panics with `CallbackErrors`. Server writes
+  are time-bounded so a client that stops reading cannot pin handlers forever.
+- **Host transport and lifecycle validation is stricter**: duplicate hello
+  requests no longer mutate authentication state, negative protocol versions and
+  null parameters are rejected safely, permission requests carry their turn id,
+  `--permission-timeout` configures denial deadlines, and POSIX only removes a
+  stale socket after a missing-file or connection-refused result rather than
+  treating every dial failure as permission to unlink it.
 - **A client that disconnects while its tool confirmation is pending no longer
   wedges the session**: the host's permission gate waits for an answer from the
   owning connection, and a disconnect only detached the session. With the
@@ -841,22 +871,22 @@ coding agent.
   `provider`, `agenttool`, and `runtime` leaf packages with a verified layering
   DAG. (#74–#79)
 
-[Unreleased]: https://github.com/smallnest/pigo/compare/v0.4.3...HEAD
-[0.4.3]: https://github.com/smallnest/pigo/compare/v0.4.2...v0.4.3
-[0.4.2]: https://github.com/smallnest/pigo/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/smallnest/pigo/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/smallnest/pigo/compare/v0.3.7...v0.4.0
-[0.3.7]: https://github.com/smallnest/pigo/compare/v0.3.6...v0.3.7
-[0.3.6]: https://github.com/smallnest/pigo/compare/v0.3.5...v0.3.6
-[0.3.5]: https://github.com/smallnest/pigo/compare/v0.3.4...v0.3.5
-[0.3.4]: https://github.com/smallnest/pigo/compare/v0.3.3...v0.3.4
-[0.3.3]: https://github.com/smallnest/pigo/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/smallnest/pigo/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/smallnest/pigo/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/smallnest/pigo/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/smallnest/pigo/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/smallnest/pigo/compare/v0.1.2...v0.2.0
-[0.1.2]: https://github.com/smallnest/pigo/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/smallnest/pigo/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/smallnest/pigo/releases/tag/v0.1.0
+[Unreleased]: https://github.com/roberChen/pigo/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/roberChen/pigo/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/roberChen/pigo/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/roberChen/pigo/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/roberChen/pigo/compare/v0.3.7...v0.4.0
+[0.3.7]: https://github.com/roberChen/pigo/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/roberChen/pigo/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/roberChen/pigo/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/roberChen/pigo/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/roberChen/pigo/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/roberChen/pigo/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/roberChen/pigo/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/roberChen/pigo/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/roberChen/pigo/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/roberChen/pigo/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/roberChen/pigo/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/roberChen/pigo/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/roberChen/pigo/releases/tag/v0.1.0
 

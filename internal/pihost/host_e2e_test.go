@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/pihost"
-	"github.com/smallnest/pigo/internal/plugin"
+	"github.com/roberChen/pigo/internal/pihost"
+	"github.com/roberChen/pigo/internal/plugin"
 )
 
 // piSDKProbe mirrors pihost.mjs's own SDK resolution (loadSdk): try a direct

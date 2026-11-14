@@ -80,7 +80,7 @@ changelog:
 
 release:
   github:
-    owner: smallnest
+    owner: roberChen
     name: pigo
   draft: false
   prerelease: auto

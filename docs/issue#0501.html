@@ -30,7 +30,7 @@
 <body>
   <div class="container">
     <h1>Implementation Notes</h1>
-    <p class="meta">Issue <a href="https://github.com/smallnest/pigo/issues/501">#501</a> &mdash; 安装文档页 &mdash; 2026-08-01</p>
+    <p class="meta">Issue <a href="https://github.com/roberChen/pigo/issues/501">#501</a> &mdash; 安装文档页 &mdash; 2026-08-01</p>
 
     <h2><span class="dot design"></span> Design Decisions</h2>
     <div class="item">
@@ -53,7 +53,7 @@
     <h2><span class="dot question"></span> Open Questions</h2>
     <div class="item">
       <h3><span class="label label-question">Question</span> go install 的模块路径是否为 cmd/pigo</h3>
-      <p><strong>Assumption:</strong> 主命令位于 <code>github.com/smallnest/pigo/cmd/pigo</code>（与源码构建 <code>go build ./cmd/pigo</code> 一致）。</p>
+      <p><strong>Assumption:</strong> 主命令位于 <code>github.com/roberChen/pigo/cmd/pigo</code>（与源码构建 <code>go build ./cmd/pigo</code> 一致）。</p>
       <p><strong>Verify:</strong> 若发布时用了不同的模块路径，需同步更新此命令。</p>
     </div>
 

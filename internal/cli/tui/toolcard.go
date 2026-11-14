@@ -9,9 +9,9 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/smallnest/pigo/internal/agenttool"
-	"github.com/smallnest/pigo/internal/cli/ui"
-	"github.com/smallnest/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/mcp"
 )
 
 // This file implements the rich tool-call card component (US-006, SPEC 3.2,

@@ -16,7 +16,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // fakeTransport is an in-memory MCP server for client tests.

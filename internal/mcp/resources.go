@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // Resource is one MCP resource description.

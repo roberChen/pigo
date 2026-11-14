@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // TestAnthropicProtocolProviderRegistrySpecs asserts the registry metadata for

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/smallnest/pigo/internal/jsonrpc"
+	"github.com/roberChen/pigo/internal/jsonrpc"
 )
 
 // sseTransport is the legacy HTTP+SSE MCP transport.

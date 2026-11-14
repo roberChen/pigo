@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/smallnest/pigo/internal/pkgmgr"
+	"github.com/roberChen/pigo/internal/pkgmgr"
 )
 
 // Subcommands are the argv[1] values routed to Run.

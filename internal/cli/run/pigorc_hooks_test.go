@@ -6,8 +6,8 @@ package run
 import (
 	"testing"
 
-	"github.com/smallnest/pigo/internal/cli/config"
-	"github.com/smallnest/pigo/internal/hooks"
+	"github.com/roberChen/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/hooks"
 )
 
 // TestResolveHookSetAppendsPigorcHooks verifies a pigorc hook reaches the resolved

@@ -13,8 +13,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/jsonrpc"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/jsonrpc"
 )
 
 // initTimeout bounds the initialize handshake so a plugin that never replies

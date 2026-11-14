@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/smallnest/pigo/internal/cli/prompts"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // maxSkillArgRows caps how many form rows are visible at once; a longer form

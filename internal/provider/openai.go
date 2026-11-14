@@ -29,7 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // OpenAIDecoder is the stateful SSE decoder for the OpenAI Chat Completions API

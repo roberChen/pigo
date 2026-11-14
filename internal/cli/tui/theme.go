@@ -5,7 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // Theme bundles the lipgloss styles for every visual element the TUI paints so

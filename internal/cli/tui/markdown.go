@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/smallnest/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
 // This file renders finalized assistant turns as Markdown inside the TUI

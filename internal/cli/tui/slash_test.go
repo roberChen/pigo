@@ -6,8 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // typeInto feeds each rune of s to the model as a key press, returning the
