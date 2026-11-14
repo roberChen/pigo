@@ -141,6 +141,44 @@ func hasFlag(args []string, name string) bool {
 	return false
 }
 
+// AbsolutizeCwdFlag rewrites a relative --cwd/-C in args to the absolute
+// directory the parent already switched to, and returns args unchanged when it
+// carries no cwd flag.
+//
+// The daemon child inherits the parent's working directory, so replaying a
+// relative `-C sub` would apply it a second time (the child would end up in
+// sub/sub, or fail outright when sub/sub does not exist). An absolute path is
+// idempotent, which is what makes the argv replay safe.
+func AbsolutizeCwdFlag(args []string, cwd string) []string {
+	if cwd == "" {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--cwd" || a == "-C":
+			// A following value belongs to this flag.
+			out = append(out, a)
+			if i+1 < len(args) {
+				i++
+				out = append(out, cwd)
+			}
+		case strings.HasPrefix(a, "--cwd="):
+			out = append(out, "--cwd="+cwd)
+		case strings.HasPrefix(a, "-C="):
+			out = append(out, "-C="+cwd)
+		case strings.HasPrefix(a, "-C") && !strings.HasPrefix(a, "--"):
+			// pflag also accepts the concatenated shorthand (`-Csub`). Leaving it
+			// alone would apply the relative path a second time in the child.
+			out = append(out, "-C="+cwd)
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // readyPathFromEnv returns the readiness file the parent asked for.
 func readyPathFromEnv() string { return os.Getenv("PIGO_HOST_READY") }
 

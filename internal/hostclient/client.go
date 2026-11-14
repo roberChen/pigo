@@ -223,19 +223,65 @@ func (c *Client) fail(err error) {
 }
 
 // enqueue adds an event to the bounded dispatcher queue and wakes the
-// dispatcher. The oldest streaming increments are dropped on overflow.
+// dispatcher.
+//
+// On overflow the oldest *streaming increment* is evicted, because a delta is
+// the only thing whose loss the protocol repairs (the authoritative text and
+// state follow in turn_end/tool_end and the final prompt result). A lifecycle
+// event — turn_end, tool_start/tool_end, compaction, session_closed — is never
+// evicted: dropping one would leave a UI that cannot tell a finished turn from a
+// hung one, and nothing would ever resend it.
 func (c *Client) enqueue(env hostapi.Envelope) {
 	c.mu.Lock()
 	if len(c.queue) >= maxQueuedEvents {
-		c.queue = c.queue[1:]
-		c.dropped++
+		if at := firstDroppable(c.queue); at >= 0 {
+			c.queue = append(c.queue[:at], c.queue[at+1:]...)
+			c.dropped++
+		} else {
+			// Every queued event is a lifecycle event: report the loss the same
+			// way (the client re-reads the final result) instead of letting the
+			// queue grow without bound.
+			c.dropped++
+			c.mu.Unlock()
+			c.nudgeDispatcher()
+			return
+		}
 	}
 	c.queue = append(c.queue, env)
 	c.mu.Unlock()
+	c.nudgeDispatcher()
+}
+
+// nudgeDispatcher wakes the event dispatcher without blocking.
+func (c *Client) nudgeDispatcher() {
 	select {
 	case c.queueSig <- struct{}{}:
 	default:
 	}
+}
+
+// firstDroppable returns the index of the oldest event that may be evicted under
+// backpressure, or -1. A caller must hold c.mu.
+func firstDroppable(queue []hostapi.Envelope) int {
+	for i, env := range queue {
+		if isStreamingIncrement(env) {
+			return i
+		}
+	}
+	return -1
+}
+
+// isStreamingIncrement reports whether losing env only costs an increment whose
+// full value arrives again in a later lifecycle event.
+func isStreamingIncrement(env hostapi.Envelope) bool {
+	if env.Event != hostapi.EventSession {
+		return false
+	}
+	var ev hostapi.SessionEvent
+	if env.DecodeParams(&ev) != nil {
+		return false
+	}
+	return ev.Type == hostapi.SessionEventTextDelta || ev.Type == hostapi.SessionEventThinking
 }
 
 // enqueuePermission queues a permission request independently of streaming
@@ -519,26 +565,48 @@ func (c *Client) callAs(ctx context.Context, method string, params, out any) err
 	return env.DecodeResult(out)
 }
 
-// writeLine writes one JSON line under the write lock.
+// writeGrace bounds one request write. A peer that stops reading must not be able
+// to pin a caller forever inside Write (the request goroutine would hold the
+// write lock and every later send would queue behind it).
+const writeGrace = 30 * time.Second
+
+// writeLine writes one JSON line under the write lock. The deadline is cleared
+// afterwards: SetWriteDeadline is absolute, so leaving it set would make every
+// later write on the connection fail once that instant passes.
 func (c *Client) writeLine(line []byte) error {
 	line = append(line, '\n')
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if _, err := c.nc.Write(line); err != nil {
+	_ = c.nc.SetWriteDeadline(time.Now().Add(writeGrace))
+	n, err := c.nc.Write(line)
+	_ = c.nc.SetWriteDeadline(time.Time{})
+	if err != nil {
+		c.fail(err)
+		return err
+	}
+	if n != len(line) {
+		err := io.ErrShortWrite
 		c.fail(err)
 		return err
 	}
 	return nil
 }
 
+// defaultCallTimeout bounds a typed request when Options.CallTimeout is unset.
+// Without it every RPC (status, resume, cancel, decide, and the shutdown that
+// `pigo serve stop` waits on) could hang forever on a host that accepts the
+// socket but never answers — a wedged UI with no way out. Prompts are the one
+// deliberate exception: they are driven through Prompt's own context.
+const defaultCallTimeout = 30 * time.Second
+
 // request is the shared entry point for the typed wrappers.
 func (c *Client) request(method string, params, out any) error {
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if c.opt.CallTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, c.opt.CallTimeout)
-		defer cancel()
+	timeout := c.opt.CallTimeout
+	if timeout <= 0 {
+		timeout = defaultCallTimeout
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	return c.callAs(ctx, method, params, out)
 }
 

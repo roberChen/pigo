@@ -112,7 +112,12 @@ func runServe(args []string, version string, out, errOut io.Writer) int {
 		Factory:           factory,
 		// The daemon child re-execs with the same argv minus --daemon, so it
 		// resolves the same providers, flags and config layers as the parent.
-		ChildArgs: args,
+		//
+		// --cwd is rewritten to the absolute directory this process switched to.
+		// The child inherits that as its working directory, so replaying a
+		// relative --cwd would apply it twice (pigo serve -C sub --daemon would
+		// land in sub/sub).
+		ChildArgs: hostcmd.AbsolutizeCwdFlag(args, cwd),
 	}, out, errOut)
 }
 

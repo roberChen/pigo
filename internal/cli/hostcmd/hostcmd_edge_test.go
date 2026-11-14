@@ -626,8 +626,14 @@ func TestServeStatusAfterHostDiesWithoutCleanup(t *testing.T) {
 	if !strings.Contains(msg, "not responding") || !strings.Contains(msg, "999999") {
 		t.Fatalf("status = %q, want it to name the dead pid and say it is not responding", msg)
 	}
-	if !strings.Contains(msg, "pigo serve stop") {
-		t.Fatalf("status = %q, want it to suggest `pigo serve stop`", msg)
+	// The advice must be actionable: `serve stop` needs a live host to talk to, so
+	// suggesting it here would send the user in a circle (the next subtest proves
+	// it fails). The next start is what actually reclaims the leftovers.
+	if !strings.Contains(msg, "next `pigo serve`") {
+		t.Fatalf("status = %q, want it to point at the next `pigo serve`", msg)
+	}
+	if strings.Contains(msg, "serve stop") {
+		t.Fatalf("status = %q, want no `serve stop` advice for an unreachable host", msg)
 	}
 
 	// `stop` cannot clear a host it cannot reach: it fails, and it leaves the

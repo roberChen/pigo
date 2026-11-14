@@ -499,6 +499,10 @@ func (s *Server) detachSession(st *sessionState) {
 // adoptSession hands a live, idle, unowned session to a reconnecting client
 // instead of replaying it from disk into a second agent. That keeps "disconnect
 // and resume" from racing a still-running turn with a second writer.
+//
+// An adopted session's earlier read-only watchers are dropped: the session now
+// belongs to this client, and emit fans events out to owner *and* observers, so
+// leaving them registered would stream the new owner's turn to another UI.
 func (s *Server) adoptSession(id string, c *conn) (*sessionState, bool) {
 	s.mu.Lock()
 	st := s.sessions[id]
@@ -507,11 +511,14 @@ func (s *Server) adoptSession(id string, c *conn) (*sessionState, bool) {
 		return nil, false
 	}
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	if st.closed || st.running || st.owner != nil || st.agent == nil {
+		st.mu.Unlock()
 		return nil, false
 	}
 	st.owner = c
+	dropped := st.takeObservers()
+	st.mu.Unlock()
+	st.releaseObservers(dropped, "session adopted by another client")
 	return st, true
 }
 
@@ -817,9 +824,10 @@ func (c *conn) handleSessionResume(env envelope) {
 	}
 	// A running, ownerless session may be observed read-only. This preserves
 	// live progress and the bounded event log without allowing a second writer.
+	// observe also registers the delivery-side watch, so the snapshot, the
+	// observer set and the queue are committed together.
 	if st := c.srv.liveSession(p.ID); st != nil {
 		if rr, ok := st.observe(c); ok {
-			c.watch(st)
 			c.reply(env.ID, rr)
 			c.watchReadyAfterResume(st.id)
 			return
@@ -834,6 +842,14 @@ func (c *conn) handleSessionResume(env envelope) {
 			return
 		}
 		st.mu.Lock()
+		// publishSession can detach the adopted session again (its owner vanished
+		// while it was being handed over) and closeSessionIf then clears agent. A
+		// blind dereference here would panic the whole daemon, so re-check.
+		if st.closed || st.agent == nil {
+			st.mu.Unlock()
+			c.replyError(env.ID, codeBusy, "session was closed during resume")
+			return
+		}
 		msgs := st.agent.Messages()
 		info := st.info()
 		st.mu.Unlock()
@@ -1014,6 +1030,10 @@ func (c *conn) handlePrompt(env envelope) {
 		c.replyNotOwned(env.ID, p.SessionID)
 		return
 	}
+	// The turn id is allocated before st.mu is taken: nextTurnID locks s.mu, and
+	// the shutdown path holds s.mu while taking st.mu. Allocating inside the st.mu
+	// critical section would invert that order and deadlock a shutdown.
+	turnID := c.srv.nextTurnID()
 	st.mu.Lock()
 	if st.agent == nil || st.closed {
 		st.mu.Unlock()
@@ -1029,8 +1049,13 @@ func (c *conn) handlePrompt(env envelope) {
 	ctx, cancel := context.WithCancel(c.srv.runCtx)
 	st.running = true
 	st.cancel = cancel
-	st.startTurn(c.srv.nextTurnID(), agent.Messages())
+	// startTurn replaces the replay log and the observer set. Watchers of an
+	// earlier turn are told their subscription ended, or they would never hear
+	// from this session again and could not resume it.
+	droppedObservers := st.takeObservers()
+	st.startTurn(turnID, agent.Messages())
 	st.mu.Unlock()
+	st.releaseObservers(droppedObservers, "new turn started")
 
 	defer func() {
 		st.mu.Lock()

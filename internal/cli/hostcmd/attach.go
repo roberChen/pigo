@@ -19,7 +19,6 @@ package hostcmd
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,9 +107,15 @@ type attacher struct {
 	shutDown bool
 	// observedDone closes when a running session resumed in read-only mode
 	// finishes. The client then adopts it before accepting another prompt.
-	observedDone chan struct{}
-	// replayEvents is the retained log returned by a running resume.
-	replayEvents []hostapi.SessionEvent
+	// observedClosed guards the close: a turn_end and a session_closed can both
+	// try to end the observation.
+	observedDone   chan struct{}
+	observedClosed bool
+	// bootstrapped is set once the resume reply's replay has been rendered. Until
+	// then live events are buffered in pendingLive instead of printed, so the
+	// replay is never interleaved with (or overtaken by) new output.
+	bootstrapped bool
+	pendingLive  []hostapi.Envelope
 }
 
 func newAttacher(c *hostclient.Client, out, errOut io.Writer) *attacher {
@@ -120,6 +125,11 @@ func newAttacher(c *hostclient.Client, out, errOut io.Writer) *attacher {
 		errOut:      errOut,
 		atLineStart: true,
 		permSig:     make(chan struct{}, 1),
+		// Rendering is live by default: only run() subscribes to a host, and it
+		// clears this while a resume is in flight (see run/renderReplay). Any other
+		// caller — the render tests, a future direct renderer — wants events drawn
+		// as they arrive.
+		bootstrapped: true,
 	}
 }
 
@@ -155,7 +165,20 @@ type turnResult struct {
 
 // run wires the renderer and drives the loop until the user detaches.
 func (a *attacher) run(opts AttachOptions, in io.Reader) int {
+	// Subscribe before the first request. The host may start fanning events out
+	// the moment it registers this connection as an observer, and a subscriber
+	// installed afterwards would silently miss everything emitted in between.
+	// Events that arrive before the resume reply is rendered are buffered (see
+	// render) and replayed after it, which is what preserves replay-then-live
+	// order without losing the gap.
+	a.mu.Lock()
+	a.bootstrapped = false
+	a.pendingLive = nil
+	a.mu.Unlock()
+	a.installHandlers()
+
 	sessionID := opts.SessionID
+	var replay []hostapi.SessionEvent
 	if sessionID != "" {
 		rr, err := a.client.Resume(sessionID)
 		if err != nil {
@@ -164,8 +187,10 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 		}
 		a.printOut("resumed %s (%d messages, %s) in %s\n", rr.Session.ID, len(rr.Messages), rr.Session.Model, rr.Session.Cwd)
 		if rr.Session.Running {
+			a.mu.Lock()
 			a.observedDone = make(chan struct{})
-			a.replayEvents = rr.Events
+			a.mu.Unlock()
+			replay = rr.Events
 		}
 	} else {
 		info, err := a.client.CreateSession(opts.Cwd, opts.Model, "")
@@ -176,15 +201,7 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 		sessionID = info.ID
 		a.printOut("session %s in %s\n", sessionID, info.Cwd)
 	}
-	// Render the retained replay before installing live subscriptions. The
-	// server's resume response precedes every queued live event by construction.
-	for _, ev := range a.replayEvents {
-		env := hostapi.Envelope{Event: hostapi.EventSession}
-		raw, _ := json.Marshal(ev)
-		env.Params = raw
-		a.render(env)
-	}
-	a.installHandlers()
+	a.renderReplay(replay)
 
 	lines := make(chan input)
 	go pumpLines(in, lines)
@@ -215,7 +232,12 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 	// "wait for the turn" loop) is what lets a permission question arrive while
 	// the turn is mid-flight without either side starving.
 	exit := false
-	running := a.observedDone != nil
+	// The observation channel is captured once, under two mutexes held in the
+	// same order as the dispatcher (mu then observed): reading the field directly
+	// in a select case would race the close from render or the session_closed
+	// handler.
+	observed := a.observationChannel()
+	running := observed != nil
 	// exitPending is set when stdin closed while a turn was running: finish the
 	// turn, then detach.
 	exitPending := false
@@ -316,9 +338,12 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 			if exitPending && !running {
 				exit = true
 			}
-		case <-a.observedDone:
+		case <-observed:
 			// Observation is read-only. Adopt only after the original turn has
 			// finished and its handler has released the session reservation.
+			// The channel is consumed: clear it so a closed channel cannot spin
+			// the loop, and so a later prompt is never mistaken for observing.
+			observed = nil
 			if !a.adoptObserved(sessionID) {
 				a.printErr("pigo attach: could not adopt %s after its turn\n", sessionID)
 				exit = true
@@ -360,7 +385,10 @@ func (a *attacher) drainQueued(sessionID string, turnDone chan<- turnResult, run
 // turn's final persist and tombstone removal happen just after turn_end, so a
 // short bounded retry is required before sending the next prompt.
 func (a *attacher) adoptObserved(sessionID string) bool {
+	a.mu.Lock()
 	a.observedDone = nil
+	a.observedClosed = false
+	a.mu.Unlock()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		rr, err := a.client.Resume(sessionID)
@@ -545,6 +573,75 @@ func (a *attacher) answerPermission(req *hostapi.PermissionRequest, reply string
 	}
 }
 
+// renderReplay prints the retained event log from a running-session resume, then
+// switches the renderer into live mode and flushes whatever arrived in between.
+//
+// It runs under mu, so a concurrent live event cannot slip between the replay and
+// the flush; such an event is either in the replay (emitted before the host built
+// the snapshot) or in pendingLive.
+func (a *attacher) renderReplay(replay []hostapi.SessionEvent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, ev := range replay {
+		a.renderLocked(ev)
+	}
+	// Drop the turn_end that closed the observed turn *before* buffering started.
+	// The replay exists to show where the turn got to; its turn_end would
+	// otherwise close an observation channel that adoptObserved still needs, and
+	// would eject a prompt printed after it.
+	if a.observedDone != nil && a.observedAtEnd(replay) {
+		a.endObservationLocked()
+	}
+	a.bootstrapped = true
+	pending := a.pendingLive
+	a.pendingLive = nil
+	for _, env := range pending {
+		var ev hostapi.SessionEvent
+		if env.DecodeParams(&ev) != nil {
+			continue
+		}
+		a.renderLocked(ev)
+	}
+}
+
+// observedAtEnd reports whether replay already contains the turn_end of the
+// observed turn, i.e. the turn finished while this client was reconnecting.
+func (a *attacher) observedAtEnd(replay []hostapi.SessionEvent) bool {
+	for i := len(replay) - 1; i >= 0; i-- {
+		switch replay[i].Type {
+		case hostapi.SessionEventTurnEnd:
+			return true
+		case hostapi.SessionEventToolStart, hostapi.SessionEventToolEnd:
+			return false
+		}
+	}
+	return false
+}
+
+// observationChannel returns the channel that closes when the observed turn
+// ends, or nil when this client owns the session.
+func (a *attacher) observationChannel() chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.observedDone
+}
+
+// endObservation closes the observation channel exactly once. Both turn_end and
+// session_closed can end an observation, and closing a closed channel panics, so
+// the two paths share this guard.
+func (a *attacher) endObservation() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.endObservationLocked()
+}
+
+func (a *attacher) endObservationLocked() {
+	if a.observedDone != nil && !a.observedClosed {
+		close(a.observedDone)
+		a.observedClosed = true
+	}
+}
+
 // installHandlers subscribes the renderer to session and permission events.
 func (a *attacher) installHandlers() {
 	a.client.OnEvent(hostapi.EventSession, a.render)
@@ -561,12 +658,9 @@ func (a *attacher) installHandlers() {
 		var ev hostapi.SessionClosedEvent
 		_ = env.DecodeParams(&ev)
 		a.printOut("\nsession closed: %s\n", ev.Reason)
-		a.mu.Lock()
-		if a.observedDone != nil {
-			close(a.observedDone)
-			a.observedDone = nil
-		}
-		a.mu.Unlock()
+		// Unblock the loop and detach: the session this client was driving (or
+		// watching) no longer exists, so a prompt would only fail.
+		a.endObservation()
 	})
 }
 
@@ -593,6 +687,11 @@ func (a *attacher) onPermission(env hostapi.Envelope) {
 
 // render draws one session event. Only the increments a terminal user needs are
 // printed; the authoritative transcript is on disk.
+//
+// Before the first resume reply has been rendered (a brand new session, where
+// bootstrapped is set immediately, or a resume still in flight) events are
+// buffered rather than printed, so the replay cannot be interleaved with live
+// output from the same turn.
 func (a *attacher) render(env hostapi.Envelope) {
 	var ev hostapi.SessionEvent
 	if err := env.DecodeParams(&ev); err != nil {
@@ -600,6 +699,16 @@ func (a *attacher) render(env hostapi.Envelope) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.bootstrapped {
+		a.pendingLive = append(a.pendingLive, env)
+		return
+	}
+	a.renderLocked(ev)
+}
+
+// renderLocked is render's body. The caller holds mu: printing here keeps a delta
+// from being interleaved with a permission question or a prompt.
+func (a *attacher) renderLocked(ev hostapi.SessionEvent) {
 	switch ev.Type {
 	case hostapi.SessionEventTextDelta:
 		fmt.Fprint(a.out, ev.Text)
@@ -635,9 +744,6 @@ func (a *attacher) render(env hostapi.Envelope) {
 			fmt.Fprint(a.out, "\n")
 			a.atLineStart = true
 		}
-		if a.observedDone != nil {
-			close(a.observedDone)
-			a.observedDone = nil
-		}
+		a.endObservationLocked()
 	}
 }

@@ -78,7 +78,9 @@ type sessionState struct {
 // transcript rather than treating the replay as complete.
 const maxReplayEvents = 4096
 
-// startTurn resets the replay log for a new turn.
+// startTurn resets the replay log for a new turn. The caller must have taken
+// s.observers first (takeObservers) so the previous turn's watchers are told the
+// session is theirs to resume again instead of being silently forgotten.
 func (s *sessionState) startTurn(turnID string, base agentcore.MessageList) {
 	s.turnID = turnID
 	s.eventSeq = 0
@@ -86,6 +88,28 @@ func (s *sessionState) startTurn(turnID string, base agentcore.MessageList) {
 	s.truncated = false
 	s.turnBase = append(agentcore.MessageList(nil), base...)
 	s.observers = make(map[*conn]struct{})
+}
+
+// takeObservers removes and returns the read-only watchers of this session. The
+// caller must hold s.mu and notify them after unlocking: a watcher whose
+// subscription was dropped without a word would sit on a dead channel forever,
+// because no event can reach it again.
+func (s *sessionState) takeObservers() []*conn {
+	observers := make([]*conn, 0, len(s.observers))
+	for c := range s.observers {
+		observers = append(observers, c)
+	}
+	s.observers = nil
+	return observers
+}
+
+// releaseObservers notifies every dropped watcher and detaches it from its
+// connection. reason explains why the subscription ended.
+func (s *sessionState) releaseObservers(observers []*conn, reason string) {
+	for _, c := range observers {
+		_ = c.notify(eventSessionClosed, hostapi.SessionClosedEvent{SessionID: s.id, Reason: reason})
+		c.unwatch(s.id)
+	}
 }
 
 // emit appends an event to the turn log and fans it out to the owner and any
@@ -121,6 +145,14 @@ func (s *sessionState) emit(ev hostapi.SessionEvent) {
 func (s *sessionState) replay() (hostapi.SessionResumeResult, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.replayLocked()
+}
+
+// replayLocked is replay for a caller already holding s.mu. Keeping observe's
+// snapshot and registration in one critical section is what makes the replay
+// complete: an event emitted between two lock acquisitions would otherwise be in
+// neither the snapshot nor the queue and vanish from the observer's stream.
+func (s *sessionState) replayLocked() (hostapi.SessionResumeResult, bool) {
 	if s.closed || !s.running || s.owner != nil || s.agent == nil {
 		return hostapi.SessionResumeResult{}, false
 	}
@@ -135,22 +167,28 @@ func (s *sessionState) replay() (hostapi.SessionResumeResult, bool) {
 }
 
 // observe registers c as a read-only watcher of a running, ownerless turn. The
-// registration and replay snapshot share one lock section, so new events are
-// either in the replay or queued behind the resume response, never lost.
+// replay snapshot, the server-side observer registration and the connection-side
+// watch queue all happen in one lock section, so new events are either in the
+// replay or queued behind the resume response — never lost, never duplicated.
+//
+// Lock order: s.mu (the session's own lock) is held while taking the
+// connection's lock. That direction is fixed (see conn.close, which snapshots
+// under the connection lock and only then touches session locks).
 func (s *sessionState) observe(c *conn) (hostapi.SessionResumeResult, bool) {
-	rr, ok := s.replay()
-	if !ok {
-		return hostapi.SessionResumeResult{}, false
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || !s.running || s.owner != nil || s.agent == nil {
+	rr, ok := s.replayLocked()
+	if !ok {
 		return hostapi.SessionResumeResult{}, false
 	}
 	if s.observers == nil {
 		s.observers = make(map[*conn]struct{})
 	}
 	s.observers[c] = struct{}{}
+	// Register the delivery-side state while the session lock is still held: an
+	// event emitted between observe returning and c.watch would find no queue and
+	// be dropped.
+	c.watch(s)
 	return rr, true
 }
 
@@ -158,16 +196,9 @@ func (s *sessionState) observe(c *conn) (hostapi.SessionResumeResult, bool) {
 // connection. Observers are not owners and cannot keep a session alive.
 func (s *sessionState) closeObservers(reason string) {
 	s.mu.Lock()
-	observers := make([]*conn, 0, len(s.observers))
-	for c := range s.observers {
-		observers = append(observers, c)
-	}
-	s.observers = nil
+	observers := s.takeObservers()
 	s.mu.Unlock()
-	for _, c := range observers {
-		_ = c.notify(eventSessionClosed, hostapi.SessionClosedEvent{SessionID: s.id, Reason: reason})
-		c.unwatch(s.id)
-	}
+	s.releaseObservers(observers, reason)
 }
 
 // info renders the session's public metadata. A caller must hold s.mu.

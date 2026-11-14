@@ -165,7 +165,11 @@ func runStatus(opts ServeOptions, out, errOut io.Writer) int {
 		return 1
 	}
 	// A state file without a live socket is what a crashed host leaves behind.
-	fmt.Fprintf(out, "pigo host pid %d is not responding (socket %s); run `pigo serve stop` to clear it\n", st.PID, st.Socket)
+	// `serve stop` cannot help here — it has to reach the host to ask it to exit,
+	// so it fails against exactly this state. Point at what does work: the next
+	// start reclaims the leftover socket, or the files can be removed by hand.
+	fmt.Fprintf(out, "pigo host pid %d is not responding, so it has probably exited without cleaning up (socket %s)\n", st.PID, st.Socket)
+	fmt.Fprintf(out, "the next `pigo serve` reclaims it; remove %s to clear it now\n", dir)
 	return 1
 }
 
