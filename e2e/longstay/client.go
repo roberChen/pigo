@@ -15,10 +15,16 @@ import (
 	"github.com/roberChen/pigo/internal/hostclient"
 )
 
-// turnOutcome is the result of one asynchronous prompt.
+// turnOutcome is the result of one asynchronous prompt. It carries the attempt
+// it belongs to: a client may exit mid-turn, reconnect and start a new prompt
+// before the abandoned turn's goroutine returns, and without the token that late
+// result would be attributed to (and corrupt the state of) the newer attempt.
 type turnOutcome struct {
-	result hostapi.PromptResult
-	err    error
+	attempt  int
+	expected string
+	client   *hostclient.Client
+	result   hostapi.PromptResult
+	err      error
 }
 
 // clientState is one independent UI lifecycle. Prompt execution, event delivery
@@ -41,10 +47,21 @@ type clientState struct {
 	exitAt      time.Time
 	reconnectAt time.Time
 	nextPrompt  time.Time
-	outcomes    chan turnOutcome
+	outcomes    chan struct{}
 	cancel      context.CancelFunc
 	turn        int
-	expected    string
+	// attempt numbers prompts across reconnects. A late outcome whose attempt no
+	// longer matches is discarded instead of being applied to a newer turn.
+	attempt int
+
+	// pending holds finished prompts until the loop drains them, and outcomeSignal
+	// wakes it. A prompt goroutine must never block on delivery (the loop may have
+	// stopped while its turn was in flight) and must never drop a result (a lost
+	// live outcome would leave running=true forever and stall the client), so the
+	// hand-off is an unbounded under-lock queue rather than a channel.
+	outcomeMu     sync.Mutex
+	pending       []turnOutcome
+	outcomeSignal chan struct{}
 
 	seen    map[string]uint64
 	missing map[string]map[uint64]bool
@@ -57,13 +74,13 @@ func newClientState(r *runner, id int) *clientState {
 		r.recordProtocol("create_client_workspace", err)
 	}
 	return &clientState{
-		runner:   r,
-		id:       id,
-		rng:      rand.New(rand.NewSource(r.cfg.Seed + int64(id)*7919)),
-		cwd:      cwd,
-		outcomes: make(chan turnOutcome, 1),
-		seen:     make(map[string]uint64),
-		missing:  make(map[string]map[uint64]bool),
+		runner:        r,
+		id:            id,
+		rng:           rand.New(rand.NewSource(r.cfg.Seed + int64(id)*7919)),
+		cwd:           cwd,
+		outcomeSignal: make(chan struct{}, 1),
+		seen:          make(map[string]uint64),
+		missing:       make(map[string]map[uint64]bool),
 	}
 }
 
@@ -81,12 +98,36 @@ func (s *clientState) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case outcome := <-s.outcomes:
-			s.handleOutcome(outcome)
+		case <-s.outcomeSignal:
+			for _, outcome := range s.takeOutcomes() {
+				s.handleOutcome(outcome)
+			}
 		case <-ticker.C:
 			s.step()
 		}
 	}
+}
+
+// deliverOutcome queues a finished prompt and wakes the loop. It never blocks, so
+// a prompt goroutine cannot leak when the loop has already stopped.
+func (s *clientState) deliverOutcome(outcome turnOutcome) {
+	s.outcomeMu.Lock()
+	s.pending = append(s.pending, outcome)
+	s.outcomeMu.Unlock()
+	select {
+	case s.outcomeSignal <- struct{}{}:
+	default:
+		// A wake-up is already queued, which is enough for the whole batch.
+	}
+}
+
+// takeOutcomes drains the queue in completion order.
+func (s *clientState) takeOutcomes() []turnOutcome {
+	s.outcomeMu.Lock()
+	defer s.outcomeMu.Unlock()
+	outcomes := s.pending
+	s.pending = nil
+	return outcomes
 }
 
 // step performs at most one lifecycle transition.
@@ -223,18 +264,27 @@ func (s *clientState) resume() {
 
 // startPrompt sends one deterministic turn and returns immediately, allowing a
 // lifetime expiry or disconnect to happen while the provider is still running.
+// It is called with s.mu held.
 func (s *clientState) startPrompt() {
 	s.turn++
-	s.expected = fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.runner.metrics.prompts.Load()+1)
+	s.attempt++
+	// Capture the connection and session for this attempt: both fields are
+	// cleared by exit() under the same mutex, and reading them from the goroutine
+	// would both race and let a reply be sent on the next attempt's connection.
+	client, session := s.client, s.sessionID
+	outcome := turnOutcome{
+		attempt:  s.attempt,
+		expected: fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.runner.metrics.prompts.Load()+1),
+		client:   client,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.running = true
-	done := s.outcomes
 	s.runner.metrics.prompts.Add(1)
-	s.runner.log.write("prompt_started", map[string]any{"client": s.id, "session": s.sessionID, "turn": s.turn, "prompt": s.expected})
+	s.runner.log.write("prompt_started", map[string]any{"client": s.id, "session": session, "turn": s.turn, "prompt": outcome.expected})
 	go func() {
-		result, err := s.client.Prompt(ctx, s.sessionID, s.expected)
-		done <- turnOutcome{result: result, err: err}
+		outcome.result, outcome.err = client.Prompt(ctx, session, outcome.expected)
+		s.deliverOutcome(outcome)
 	}()
 }
 
@@ -243,11 +293,18 @@ func (s *clientState) startPrompt() {
 func (s *clientState) handleOutcome(outcome turnOutcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if outcome.attempt != s.attempt {
+		// A late result from an abandoned attempt (the client exited mid-turn and
+		// has since reconnected). It says nothing about the current attempt, so it
+		// must not clear its running flag or move its next prompt.
+		s.runner.log.write("stale_outcome", map[string]any{"client": s.id, "attempt": outcome.attempt, "current": s.attempt})
+		return
+	}
 	s.running = false
 	s.cancel = nil
 	if outcome.err != nil {
-		if s.client == nil {
-			// Expected when exit closes the connection during a turn.
+		if s.client == nil || s.client != outcome.client {
+			// Expected when exit() closed the connection during the turn.
 			return
 		}
 		if isCode(outcome.err, hostapi.CodeBusy) || isCode(outcome.err, hostapi.CodeForbidden) {
@@ -267,7 +324,9 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		s.runner.metrics.aborted.Add(1)
 	} else {
 		s.runner.metrics.completed.Add(1)
-		if want := "mock:" + s.expected; outcome.result.Text != want {
+		// Compare against this attempt's prompt, not the state field: a crossed
+		// reply is exactly what this check exists to catch.
+		if want := "mock:" + outcome.expected; outcome.result.Text != want {
 			s.runner.recordProtocol("reply_mismatch", fmt.Errorf("got %q, want %q", outcome.result.Text, want))
 		}
 	}
@@ -346,13 +405,24 @@ func (s *clientState) replay(events []hostapi.SessionEvent) {
 }
 
 // verifyReconnect confirms that a session with persisted history is resumable
-// and that every sequence gap seen by this client has been repaired.
+// and that every sequence gap seen by this client has been repaired. It runs
+// after the client goroutine has stopped, so it may reconnect and replay
+// directly; every slot is accounted for in the summary either way, so a silent
+// skip cannot look like a passing verification.
 func (s *clientState) verifyReconnect() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sessionID == "" || s.turn == 0 {
+	if s.sessionID == "" {
+		s.runner.metrics.verificationSkips.Add(1)
+		s.runner.log.write("verification_skipped", map[string]any{"client": s.id, "reason": "no session"})
 		return
 	}
+	if s.turn == 0 {
+		s.runner.metrics.verificationSkips.Add(1)
+		s.runner.log.write("verification_skipped", map[string]any{"client": s.id, "reason": "no turn sent"})
+		return
+	}
+	s.runner.metrics.verifications.Add(1)
 	if s.client == nil {
 		s.connect()
 	}
@@ -379,6 +449,7 @@ func (s *clientState) verifyReconnect() {
 		s.runner.metrics.missingEvents.Add(int64(missing))
 		s.runner.recordProtocol("unrepaired_event_gap", fmt.Errorf("client %d has %d missing events", s.id, missing))
 	}
+	s.runner.log.write("verification_complete", map[string]any{"client": s.id, "session": s.sessionID, "turns": s.turn})
 }
 
 // delay chooses a duration uniformly in [min,max].

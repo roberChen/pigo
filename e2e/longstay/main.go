@@ -37,9 +37,14 @@ type runner struct {
 	hostExitErr error
 	hostLog     *os.File
 	monitor     *hostclient.Client
-	states      []*clientState
-	clients     sync.WaitGroup
-	clientCtx   context.Context
+	// statesMu guards states. The monitor goroutine appends client slots while the
+	// main goroutine snapshots them for verification, so an unguarded slice would
+	// be a data race (and appending past the cap would silently exceed
+	// -max-clients).
+	statesMu  sync.Mutex
+	states    []*clientState
+	clients   sync.WaitGroup
+	clientCtx context.Context
 
 	connectedClients atomic.Int64
 }
@@ -129,13 +134,15 @@ func (r *runner) run(parent context.Context) int {
 	r.clientCtx = ctx
 	timer := time.AfterFunc(r.cfg.Duration, cancel)
 	defer timer.Stop()
-	go r.monitorHealth(ctx)
 
 	r.log.write("run_started", map[string]any{"seed": r.cfg.Seed, "duration": r.cfg.Duration.String()})
 	for i := 0; i < r.cfg.InitialClients; i++ {
 		r.addClient()
 	}
 	go r.printSummaries(ctx)
+	// Exactly one monitor: it both spawns clients up to the cap and probes host
+	// health. Starting it twice (as this used to) doubled the join rate past
+	// -max-clients and double-counted every health failure.
 	healthDone := make(chan struct{})
 	go func() {
 		r.monitorHealth(ctx)
@@ -153,7 +160,10 @@ func (r *runner) run(parent context.Context) int {
 	r.clients.Wait()
 	cancel()
 	<-healthDone
-	for _, state := range r.states {
+	// Verification runs after the clients have stopped, over a snapshot: the
+	// count in the summary must match the clients actually checked.
+	states := r.clientStates()
+	for _, state := range states {
 		state.verifyReconnect()
 		state.exit("verification complete")
 	}
@@ -238,38 +248,67 @@ func (r *runner) resolveBinary(ctx context.Context) (string, error) {
 	return target, nil
 }
 
-// addClient starts a new independent UI lifecycle.
+// addClient starts a new independent UI lifecycle, never exceeding -max-clients.
 func (r *runner) addClient() {
+	r.statesMu.Lock()
+	defer r.statesMu.Unlock()
+	if len(r.states) >= r.cfg.MaxClients {
+		return
+	}
 	state := newClientState(r, len(r.states)+1)
 	r.states = append(r.states, state)
 	r.clients.Add(1)
 	go state.run(r.clientCtx)
 }
 
+// clientStates returns a snapshot of every client slot started so far.
+func (r *runner) clientStates() []*clientState {
+	r.statesMu.Lock()
+	defer r.statesMu.Unlock()
+	return append([]*clientState(nil), r.states...)
+}
+
 // monitorHealth checks the host and prints periodic progress independently of
-// any client's callback or prompt.
+// any client's callback or prompt. A single transport failure is not a host
+// fault: the socket may be mid-reconnect, so only consecutive failures count
+// (and one recovery resets the streak).
 func (r *runner) monitorHealth(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	streak := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			// New UIs may join while existing sessions are running.
-			if len(r.states) < r.cfg.MaxClients {
+			r.statesMu.Lock()
+			slots := len(r.states)
+			r.statesMu.Unlock()
+			if slots < r.cfg.MaxClients {
 				r.addClient()
 			}
 			if r.monitor == nil {
 				continue
 			}
 			if _, err := r.monitor.ServerStatus(); err != nil {
-				r.metrics.hostErrors.Add(1)
-				r.log.write("health_error", map[string]any{"error": err.Error()})
+				streak++
+				r.log.write("health_error", map[string]any{"error": err.Error(), "streak": streak})
+				if streak >= healthFailureThreshold {
+					r.metrics.hostErrors.Add(1)
+					streak = 0
+				}
+				continue
 			}
+			streak = 0
 		}
 	}
 }
+
+// healthFailureThreshold is how many consecutive failed probes make a host
+// failure. Two probes is ~4s with the default interval, which is long enough
+// that a transient reconnect never fails a multi-hour run.
+const healthFailureThreshold = 3
 
 // printSummaries emits a compact operational view without flooding the log with
 // every text delta.
@@ -358,32 +397,34 @@ func (r *runner) finish(ok bool) int {
 func (r *runner) summary(ok bool) map[string]any {
 	m := &r.metrics
 	return map[string]any{
-		"pass":            ok,
-		"seed":            r.cfg.Seed,
-		"duration":        r.cfg.Duration.String(),
-		"clientsStarted":  m.clientsStarted.Load(),
-		"peakClients":     m.peakClients.Load(),
-		"reconnects":      m.reconnects.Load(),
-		"adoptions":       m.adoptions.Load(),
-		"prompts":         m.prompts.Load(),
-		"completed":       m.completed.Load(),
-		"aborted":         m.aborted.Load(),
-		"providerErrors":  m.providerErrors.Load(),
-		"protocolErrors":  m.protocolErrors.Load(),
-		"transportErrors": m.transportErrors.Load(),
-		"hostErrors":      m.hostErrors.Load(),
-		"duplicates":      m.duplicates.Load(),
-		"missingEvents":   m.missingEvents.Load(),
-		"queueOverflows":  m.queueOverflows.Load(),
-		"replayTruncated": m.replayTruncated.Load(),
-		"mockRequests":    r.mock.requests.Load(),
-		"mockFailures":    r.mock.failures.Load(),
-		"mockPeakActive":  r.mock.peak.Load(),
-		"startGoroutines": m.startGoroutines,
-		"endGoroutines":   m.endGoroutines,
-		"startHeapBytes":  m.startHeapBytes,
-		"endHeapBytes":    m.endHeapBytes,
-		"artifacts":       r.outputDir,
+		"pass":              ok,
+		"seed":              r.cfg.Seed,
+		"duration":          r.cfg.Duration.String(),
+		"clientsStarted":    m.clientsStarted.Load(),
+		"peakClients":       m.peakClients.Load(),
+		"reconnects":        m.reconnects.Load(),
+		"adoptions":         m.adoptions.Load(),
+		"prompts":           m.prompts.Load(),
+		"completed":         m.completed.Load(),
+		"aborted":           m.aborted.Load(),
+		"providerErrors":    m.providerErrors.Load(),
+		"protocolErrors":    m.protocolErrors.Load(),
+		"transportErrors":   m.transportErrors.Load(),
+		"hostErrors":        m.hostErrors.Load(),
+		"duplicates":        m.duplicates.Load(),
+		"verifications":     m.verifications.Load(),
+		"verificationSkips": m.verificationSkips.Load(),
+		"missingEvents":     m.missingEvents.Load(),
+		"queueOverflows":    m.queueOverflows.Load(),
+		"replayTruncated":   m.replayTruncated.Load(),
+		"mockRequests":      r.mock.requests.Load(),
+		"mockFailures":      r.mock.failures.Load(),
+		"mockPeakActive":    r.mock.peak.Load(),
+		"startGoroutines":   m.startGoroutines,
+		"endGoroutines":     m.endGoroutines,
+		"startHeapBytes":    m.startHeapBytes,
+		"endHeapBytes":      m.endHeapBytes,
+		"artifacts":         r.outputDir,
 	}
 }
 

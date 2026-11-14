@@ -278,6 +278,19 @@ interactive REPL/TUI.
   sessions a daemon hosts all day. The host now chains it onto the caller's
   `DrainStream` handler (caller first, so a hook can never delay or drop the
   protocol event stream), which is a no-op when no hooks are configured.
+- **The long-stay harness now reports what it actually did**: it started its
+  health monitor twice, so clients joined at double the intended rate (past
+  `-max-clients`) and every host probe failure was counted twice; it mutated and
+  read the client-slot slice from two goroutines without a lock; and it counted
+  final reconnects in events but never in the summary, leaving the documented
+  `verifications`/`verificationSkips` keys absent. A turn that outlived its
+  client's disconnect could also land on the *next* attempt's state (clearing its
+  running flag and comparing against the wrong prompt), and one failed host probe
+  was enough to fail a multi-hour run. The harness now runs one monitor, guards
+  the slice, attributes each outcome to its attempt token, serializes every
+  reconnect through the queue so a dropped result can never wedge a client,
+  requires three consecutive probe failures before blaming the host, and reports
+  both verification counters.
 
 ### Changed
 - **`pigo serve` / `pigo attach` now work on Windows**: the host protocol was
