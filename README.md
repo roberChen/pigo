@@ -471,7 +471,7 @@ pigo attach --list
 - **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`always` 只授权当前会话，不会扩散到其它连接或同目录的其它会话；`--permission-timeout` 可配置等待时限（默认直到回答或断开）。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
 - **host 拥有 turn**：客户端断开不会中断正在跑的轮次；运行中可通过 `session.resume` 只读重连，按 `turnId` 与递增 `seq` 回放保留的事件并继续接收后续事件（回放窗口有界，溢出会明确标记）；轮次结束后再 resume 可拿回完整历史（含压缩点之后的上下文）。
 - **取消是一轮正常的结局，不是故障**：`cancel`（`attach` 里的 Ctrl-C）让这一轮以 `aborted` 结束，已经流式输出给客户端的文字留在结果里、也写进磁盘上的历史，`error` 字段保持为空——客户端据此渲染中止提示而不是报错。还没产出任何文字就被取消时，host 同样补一条 `aborted` 的空轮次，否则 resume 会停在一句没人回答的提问上。取消后会话照常可用。
-- **host 组装真实 run**：`pigo serve` 接受与普通运行相同的 `-m/--provider/--base-url/-n/--allowed-tools/--system-prompt` 等参数，`run.SetupEnvIn` 以会话的 cwd 为根装配工具与系统提示词，因此同一个 host 可以服务不同目录下的会话。
+- **host 组装真实 run**：`pigo serve` 接受与普通运行相同的 `-m/--provider/--base-url/-n/--allowed-tools/--system-prompt` 等参数，`run.SetupEnvIn` 以会话的 cwd 为根装配工具与系统提示词，因此同一个 host 可以服务不同目录下的会话。hook 也是同一套：host 会话会触发与 REPL / TUI / `-p` 完全相同的 9 个 hook 点（含 `SessionStart`、`UserPromptSubmit`、`SessionEnd`、`PreCompact`），不存在"守护进程里少了几个事件"的情况。
 
 `serve`/`attach` 目前都不取代 TUI：它们证明拆分可行，并给 Web UI 与 `-p --server` 留好了接口。
 

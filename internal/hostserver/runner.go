@@ -142,6 +142,12 @@ type envAgent struct {
 	// are configured. It is kept for UserPromptSubmit, which must run before the
 	// prompt enters the loop.
 	dispatcher *hooks.Dispatcher
+	// hookEvent is the observer seam InstallDriverHooks returns — SessionEnd and
+	// PreCompact fan out through it (#424). Dropping it (as passing a nil event
+	// handler would) silently disables those two hook points for every host
+	// session, which is exactly the per-driver drift InstallDriverHooks exists to
+	// prevent. Nil when no hooks are configured.
+	hookEvent func(agentcore.AgentEvent)
 }
 
 func (a *envAgent) buildRunConfig(ctx context.Context, spec AgentSpec, thinking agentcore.ThinkingLevel) error {
@@ -179,12 +185,13 @@ func (a *envAgent) buildRunConfig(ctx context.Context, spec AgentSpec, thinking 
 	if err != nil {
 		return err
 	}
-	d, _ := run.InstallDriverHooks(ctx, &cfg, set, run.HookDeps{
+	d, hookEvent := run.InstallDriverHooks(ctx, &cfg, set, run.HookDeps{
 		SessionID:  spec.SessionID,
 		ProjectDir: a.env.Cwd,
 		WarnLog:    diag.Writer(),
 	}, "startup", nil)
 	a.dispatcher = d
+	a.hookEvent = hookEvent
 	a.cfg = cfg
 	return nil
 }
@@ -207,7 +214,28 @@ func (a *envAgent) Run(ctx context.Context, prompt string, h runtime.StreamHandl
 		}
 	}
 	stream := runtime.StartRun(ctx, a.agentCtx, a.cfg)
-	return runtime.DrainStream(ctx, stream, h)
+	return runtime.DrainStream(ctx, stream, chainEventObserver(h, a.hookEvent))
+}
+
+// chainEventObserver appends obs to h's OnEvent seam, keeping whatever handler the
+// caller installed first.
+//
+// It is a separate function so the ordering contract is testable without a
+// provider: the caller's handler owns the protocol event stream and must run
+// before any hook, and a nil observer must leave the handler untouched (so a
+// session with no hooks pays nothing and behaves exactly as before).
+func chainEventObserver(h runtime.StreamHandler, obs func(agentcore.AgentEvent)) runtime.StreamHandler {
+	if obs == nil {
+		return h
+	}
+	prev := h.OnEvent
+	h.OnEvent = func(ev agentcore.AgentEvent) {
+		if prev != nil {
+			prev(ev)
+		}
+		obs(ev)
+	}
+	return h
 }
 
 func (a *envAgent) Messages() agentcore.MessageList {

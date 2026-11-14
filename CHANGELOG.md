@@ -268,6 +268,16 @@ interactive REPL/TUI.
   checkpoint attaches to the last summarized entry and the retained tail follows it,
   so `/tree`, export and a later resume still have the full history. A second
   compaction attaches at the right node when the session was resumed first.
+- **Host sessions now fire `SessionEnd` and `PreCompact` hooks**: `pigo serve`
+  is a fourth driver of the same loop, and it was the one that dropped the
+  observer seam `run.InstallDriverHooks` returns — it took the dispatcher for
+  `UserPromptSubmit` and discarded the event handler. Every other front-end
+  (REPL, TUI, headless) chains that handler onto its stream so
+  `SessionEnd`/`PreCompact` hooks run; a host session therefore silently ran
+  neither, so a hook that flushed state or recorded a compaction never saw the
+  sessions a daemon hosts all day. The host now chains it onto the caller's
+  `DrainStream` handler (caller first, so a hook can never delay or drop the
+  protocol event stream), which is a no-op when no hooks are configured.
 
 ### Changed
 - **`pigo serve` / `pigo attach` now work on Windows**: the host protocol was

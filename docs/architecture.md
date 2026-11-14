@@ -72,6 +72,8 @@ final, err := runtime.DrainStream(ctx, stream, handler) // 消费者，永远 dr
 
 三者都调用 `run.NewConfig` 构造 `runtime.RunConfig`（provider stream、`GetAPIKey`、`Batch`、follow-up、MCP 刷新），并在每轮把 hooks seam 装到**当轮新建的** cfg 上（`run.InstallSeams`）。
 
+`pigo serve` 是同一套装配的第四个驱动方（`hostserver` 的 `envAgent`）：它同样经 `run.NewConfig` + `run.InstallDriverHooks`，并把返回的事件观察者链到 `DrainStream` 的 handler 上（调用方 handler 先跑，hook 不能延迟或丢弃协议事件流），因此 `SessionEnd` / `PreCompact` 与其它前端一致。**不要**只取 dispatcher 而丢掉第二个返回值——那会让 host 会话静默少两个 hook 点。
+
 `internal/cli/host.go` 定义 `Host` 接口，让 `/goal`、`/btw`、`/status` 这些控制命令读写会话状态而不依赖 `replDeps` 具体聚合体。
 
 ## 4. 并发与会话
