@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // *Error is the protocol's error value; the hostserver and hostclient both carry
@@ -347,20 +347,20 @@ func TestPayloadFieldNamesAreStable(t *testing.T) {
 		"HelloResult":            {"version", "pid", "build", "startedAt"},
 		"ServerStatusResult":     {"pid", "build", "startedAt", "sessions", "socket", "daemon"},
 		"SessionCreateParams":    {"cwd", "model", "title"},
-		"SessionInfo":            {"id", "cwd", "model", "provider", "title", "createdAt", "updatedAt", "running"},
+		"SessionInfo":            {"id", "cwd", "model", "provider", "title", "createdAt", "updatedAt", "running", "turnId"},
 		"SessionCreateResult":    {"session"},
 		"SessionListResult":      {"sessions"},
 		"SessionResumeParams":    {"id"},
-		"SessionResumeResult":    {"session", "messages"},
+		"SessionResumeResult":    {"session", "messages", "turnId", "eventSeq", "events", "eventsTruncated"},
 		"SessionCloseParams":     {"id"},
 		"PromptParams":           {"sessionId", "text"},
 		"PromptResult":           {"sessionId", "text", "stopReason", "error"},
 		"CancelParams":           {"sessionId"},
 		"PermissionDecideParams": {"sessionId", "requestId", "approve", "always"},
-		"PermissionRequest":      {"sessionId", "requestId", "toolName", "summary", "timeoutMs"},
+		"PermissionRequest":      {"sessionId", "requestId", "turnId", "toolName", "summary", "timeoutMs"},
 		"SessionClosedEvent":     {"sessionId", "reason"},
 		"ServerShutdownEvent":    {"reason"},
-		"SessionEvent": {"sessionId", "type", "text", "toolCallId", "toolName", "arguments", "result",
+		"SessionEvent": {"sessionId", "type", "turnId", "seq", "text", "toolCallId", "toolName", "arguments", "result",
 			"isError", "message", "tokensBefore", "tokensAfter", "summarizedCount", "keptCount",
 			"compactionError", "description", "activity"},
 	}

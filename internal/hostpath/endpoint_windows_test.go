@@ -23,7 +23,9 @@ import (
 )
 
 func TestSocketPathIsAPipeName(t *testing.T) {
-	dir := t.TempDir()
+	// Use a non-hex base name: TempDir's random suffix can itself be a substring
+	// of the hash by chance, which is not a directory-layout leak.
+	dir := filepath.Join(t.TempDir(), "host-state-private")
 	got := SocketPath(dir)
 	if !strings.HasPrefix(got, pipePrefix) {
 		t.Fatalf("SocketPath(%q) = %q, want a name under %q", dir, got, pipePrefix)

@@ -34,13 +34,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostpath"
-	"github.com/smallnest/pigo/internal/hostserver"
-	"github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostclient"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/hostserver"
+	"github.com/roberChen/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // ---- helpers ----------------------------------------------------------
@@ -1540,6 +1541,50 @@ func TestNewFactoryResolvesThinkingLevel(t *testing.T) {
 // directory), which costs the full 10s deadline per run and deliberately leaves a
 // live child behind. The failure path that matters — a child that exits during
 // startup — is covered by TestServeDaemonRefusedWhenHostAlreadyRunning above.
+
+// TestAttachObservedTurnIsAdoptedBeforeNextPrompt covers the full CLI handoff:
+// a running session is resumed read-only, its final events are rendered, then
+// the connection adopts it so a typed-ahead prompt runs instead of being refused.
+func TestAttachObservedTurnIsAdoptedBeforeNextPrompt(t *testing.T) {
+	dir := t.TempDir()
+	startHost(t, dir, &scriptedFactory{reply: "observed-done", delay: 300 * time.Millisecond})
+	c, err := hostclient.Connect(hostclient.Options{Dir: dir, Client: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.CreateSession(t.TempDir(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptDone := make(chan error, 1)
+	go func() {
+		_, err := c.Prompt(context.Background(), info.ID, "first")
+		promptDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		list, err := c.ListSessions()
+		if err == nil && len(list) == 1 && list[0].Running {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-promptDone
+
+	stdout, stderr, code := attachAndRead(t, dir, "second\n/exit\n", func(o *AttachOptions) { o.SessionID = info.ID })
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %q, stdout = %q", code, stderr, stdout)
+	}
+	if got := strings.Count(stdout, "observed-done"); got != 2 {
+		t.Fatalf("observed/adopted replies = %d, want both turns: %q", got, stdout)
+	}
+	if strings.Contains(stdout, "forbidden") || strings.Contains(stdout, "already running") {
+		t.Fatalf("observed session was not adopted before prompting: %q", stdout)
+	}
+}
 
 // TestConcurrentAttachClientsOwnSeparateSessions is the multi-UI shape at the CLI
 // boundary: one host, four attach processes, four different sessions. Each client

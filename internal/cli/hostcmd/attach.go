@@ -19,6 +19,7 @@ package hostcmd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,11 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostclient"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostclient"
 )
 
 // AttachOptions configures `pigo attach`.
@@ -104,6 +106,11 @@ type attacher struct {
 	// shutDown is set by a server_shutdown event so the loop can stop instead of
 	// prompting a host that is going away.
 	shutDown bool
+	// observedDone closes when a running session resumed in read-only mode
+	// finishes. The client then adopts it before accepting another prompt.
+	observedDone chan struct{}
+	// replayEvents is the retained log returned by a running resume.
+	replayEvents []hostapi.SessionEvent
 }
 
 func newAttacher(c *hostclient.Client, out, errOut io.Writer) *attacher {
@@ -156,6 +163,10 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 			return 1
 		}
 		a.printOut("resumed %s (%d messages, %s) in %s\n", rr.Session.ID, len(rr.Messages), rr.Session.Model, rr.Session.Cwd)
+		if rr.Session.Running {
+			a.observedDone = make(chan struct{})
+			a.replayEvents = rr.Events
+		}
 	} else {
 		info, err := a.client.CreateSession(opts.Cwd, opts.Model, "")
 		if err != nil {
@@ -164,6 +175,14 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 		}
 		sessionID = info.ID
 		a.printOut("session %s in %s\n", sessionID, info.Cwd)
+	}
+	// Render the retained replay before installing live subscriptions. The
+	// server's resume response precedes every queued live event by construction.
+	for _, ev := range a.replayEvents {
+		env := hostapi.Envelope{Event: hostapi.EventSession}
+		raw, _ := json.Marshal(ev)
+		env.Params = raw
+		a.render(env)
 	}
 	a.installHandlers()
 
@@ -196,7 +215,7 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 	// "wait for the turn" loop) is what lets a permission question arrive while
 	// the turn is mid-flight without either side starving.
 	exit := false
-	running := false
+	running := a.observedDone != nil
 	// exitPending is set when stdin closed while a turn was running: finish the
 	// turn, then detach.
 	exitPending := false
@@ -288,27 +307,27 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 		case r := <-turnDone:
 			running = false
 			a.finishTurn(r)
-			// Anything typed while the turn ran is processed now, in order. Stop as
-			// soon as a line starts the next turn: startTurn refuses a second
-			// concurrent turn, so continuing here would report "a turn is already
-			// running" and drop the rest. The remainder stays queued for when that
-			// turn completes.
-			for !exit {
-				line, ok := a.popQueued()
-				if !ok {
-					break
-				}
-				if !a.handleLine(sessionID, line, turnDone, &running) {
-					exit = true
-					break
-				}
-				if running {
-					break
-				}
+			if !a.drainQueued(sessionID, turnDone, &running) {
+				exit = true
 			}
 			// EOF was seen while a turn was running. If the queue started another
 			// turn (typed-ahead prompts), let it finish too instead of detaching
 			// under it; the next turnDone re-enters here with an empty queue.
+			if exitPending && !running {
+				exit = true
+			}
+		case <-a.observedDone:
+			// Observation is read-only. Adopt only after the original turn has
+			// finished and its handler has released the session reservation.
+			if !a.adoptObserved(sessionID) {
+				a.printErr("pigo attach: could not adopt %s after its turn\n", sessionID)
+				exit = true
+				break
+			}
+			running = false
+			if !a.drainQueued(sessionID, turnDone, &running) {
+				exit = true
+			}
 			if exitPending && !running {
 				exit = true
 			}
@@ -318,6 +337,39 @@ func (a *attacher) run(opts AttachOptions, in io.Reader) int {
 	// `attach <id>` (or the REPL's --resume) picks it up.
 	a.printOut("\ndetached from %s\n", sessionID)
 	return 0
+}
+
+// drainQueued starts at most one typed-ahead prompt. Remaining lines are handled
+// when that turn finishes, rather than being rejected as concurrent prompts.
+func (a *attacher) drainQueued(sessionID string, turnDone chan<- turnResult, running *bool) bool {
+	for {
+		line, ok := a.popQueued()
+		if !ok {
+			return true
+		}
+		if !a.handleLine(sessionID, line, turnDone, running) {
+			return false
+		}
+		if *running {
+			return true
+		}
+	}
+}
+
+// adoptObserved converts a finished read-only observation into ownership. The
+// turn's final persist and tombstone removal happen just after turn_end, so a
+// short bounded retry is required before sending the next prompt.
+func (a *attacher) adoptObserved(sessionID string) bool {
+	a.observedDone = nil
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rr, err := a.client.Resume(sessionID)
+		if err == nil && !rr.Session.Running {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // handleLine applies one input line when no turn is running. It reports whether
@@ -509,6 +561,12 @@ func (a *attacher) installHandlers() {
 		var ev hostapi.SessionClosedEvent
 		_ = env.DecodeParams(&ev)
 		a.printOut("\nsession closed: %s\n", ev.Reason)
+		a.mu.Lock()
+		if a.observedDone != nil {
+			close(a.observedDone)
+			a.observedDone = nil
+		}
+		a.mu.Unlock()
 	})
 }
 
@@ -576,6 +634,10 @@ func (a *attacher) render(env hostapi.Envelope) {
 		if !a.atLineStart {
 			fmt.Fprint(a.out, "\n")
 			a.atLineStart = true
+		}
+		if a.observedDone != nil {
+			close(a.observedDone)
+			a.observedDone = nil
 		}
 	}
 }

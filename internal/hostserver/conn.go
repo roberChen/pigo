@@ -13,11 +13,15 @@ package hostserver
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"sync"
+	"time"
+
+	"github.com/roberChen/pigo/internal/hostapi"
 )
 
 // conn is one authenticated client connection.
@@ -35,6 +39,13 @@ type conn struct {
 	client string
 	owned  map[string]*sessionState
 
+	// watched are read-only sessions observed after a reconnect. They never
+	// authorize prompt, cancel, decide or close. ready is flipped only after the
+	// resume response has been written, so replayed events precede live ones.
+	watched    map[string]*sessionState
+	watchReady map[string]bool
+	watchQueue map[string][]hostapi.SessionEvent
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -42,10 +53,13 @@ type conn struct {
 // newConn wraps an accepted socket.
 func newConn(srv *Server, nc net.Conn) *conn {
 	return &conn{
-		srv:    srv,
-		nc:     nc,
-		owned:  make(map[string]*sessionState),
-		closed: make(chan struct{}),
+		srv:        srv,
+		nc:         nc,
+		owned:      make(map[string]*sessionState),
+		watched:    make(map[string]*sessionState),
+		watchReady: make(map[string]bool),
+		watchQueue: make(map[string][]hostapi.SessionEvent),
+		closed:     make(chan struct{}),
 	}
 }
 
@@ -71,6 +85,25 @@ func (c *conn) serve() {
 	}
 }
 
+// assemblyContext binds agent assembly to shutdown and the requesting
+// connection. A running prompt deliberately uses only runCtx instead.
+func (c *conn) assemblyContext() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(c.srv.runCtx)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-c.closed:
+			cancel()
+		case <-ctx.Done():
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		cancel()
+	}
+}
+
 // handle dispatches one envelope and writes exactly one response.
 func (c *conn) handle(env envelope) {
 	if env.IsEvent() {
@@ -81,7 +114,10 @@ func (c *conn) handle(env envelope) {
 		c.replyError(env.ID, codeInvalidRequest, "request needs an id and a method")
 		return
 	}
-	c.srv.wg.Add(1)
+	if !c.srv.beginRequest() {
+		c.replyError(env.ID, codeUnavailable, "host is shutting down")
+		return
+	}
 	defer c.srv.wg.Done()
 	if env.Method != methodHello && !c.isAuthed() {
 		c.replyError(env.ID, codeUnauthorized, "send hello with the server token first")
@@ -145,6 +181,13 @@ func (c *conn) close() {
 				c.srv.detachSession(s)
 			}
 		}
+		for _, s := range c.snapshotWatched() {
+			s.mu.Lock()
+			delete(s.observers, c)
+			s.mu.Unlock()
+			// If this was the last observer, an idle orphan can now be reaped.
+			c.srv.closeSessionIfUnattached(s, "client disconnected")
+		}
 	})
 }
 
@@ -155,6 +198,73 @@ func (c *conn) snapshotOwned() []*sessionState {
 	defer c.mu.Unlock()
 	out := make([]*sessionState, 0, len(c.owned))
 	for _, s := range c.owned {
+		out = append(out, s)
+	}
+	return out
+}
+
+// watch records a read-only session subscription.
+func (c *conn) watch(s *sessionState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.watched[s.id] = s
+	c.watchReady[s.id] = false
+	c.watchQueue[s.id] = nil
+}
+
+// watchReadyAfterResume releases events that arrived while the resume response
+// was being written, preserving replay-then-live ordering.
+func (c *conn) watchReadyAfterResume(id string) {
+	c.mu.Lock()
+	c.watchReady[id] = true
+	pending := append([]hostapi.SessionEvent(nil), c.watchQueue[id]...)
+	c.watchQueue[id] = nil
+	c.mu.Unlock()
+	for _, ev := range pending {
+		_ = c.notify(eventSession, ev)
+	}
+}
+
+// notifyObserver queues an event until the resume reply is flushed, then sends
+// live events in order.
+func (c *conn) notifyObserver(ev hostapi.SessionEvent) error {
+	c.mu.Lock()
+	if _, ok := c.watched[ev.SessionID]; !ok {
+		c.mu.Unlock()
+		return nil
+	}
+	if !c.watchReady[ev.SessionID] {
+		c.watchQueue[ev.SessionID] = append(c.watchQueue[ev.SessionID], ev)
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	return c.notify(eventSession, ev)
+}
+
+// unwatch removes a read-only subscription.
+func (c *conn) unwatch(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.watched, id)
+	delete(c.watchReady, id)
+	delete(c.watchQueue, id)
+}
+
+// watching reports whether c already observes id.
+func (c *conn) watching(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.watched[id]
+	return ok
+}
+
+// snapshotWatched copies read-only subscriptions for connection teardown.
+func (c *conn) snapshotWatched() []*sessionState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*sessionState, 0, len(c.watched))
+	for _, s := range c.watched {
 		out = append(out, s)
 	}
 	return out
@@ -184,9 +294,13 @@ func (c *conn) release(id string) {
 	delete(c.owned, id)
 }
 
+// connWriteGrace prevents a client that stopped reading from blocking event
+// delivery forever. A write failure detaches the connection and its sessions.
+const connWriteGrace = 2 * time.Second
+
 // writeLine marshals v and writes it as one line. Writes are serialized and
-// never block the caller indefinitely: a dead socket makes the write fail,
-// which callers report and then drop the notification.
+// bounded. A dead or wedged socket makes the write fail and the connection is
+// closed, so a slow client cannot pin the host's handlers indefinitely.
 func (c *conn) writeLine(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -194,8 +308,12 @@ func (c *conn) writeLine(v any) error {
 	}
 	data = append(data, '\n')
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	_ = c.nc.SetWriteDeadline(time.Now().Add(connWriteGrace))
 	_, err = c.nc.Write(data)
+	c.writeMu.Unlock()
+	if err != nil && !c.isClosed() {
+		c.close()
+	}
 	return err
 }
 

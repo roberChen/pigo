@@ -34,12 +34,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostpath"
-	"github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // ---- scripted factory -------------------------------------------------
@@ -60,12 +60,18 @@ type scriptFactory struct {
 	// hold, when non-nil, blocks every Run until it is closed or the turn's ctx is
 	// cancelled. The test owns when a turn finishes, so no test needs a sleep.
 	hold chan struct{}
+	// ignoreCancel keeps a held turn blocked after ctx cancellation, allowing a
+	// lifecycle test to prove agent.Close waits for Run to return.
+	ignoreCancel bool
 	// createGate, when non-nil, blocks NewAgent until it is closed, so a test can
 	// kill a connection while the host is still assembling its agent.
 	createGate chan struct{}
 	// createEntered, when non-nil, receives one value when NewAgent is entered, so
 	// a test knows the handler is inside the factory before killing the client.
 	createEntered chan struct{}
+	// ignoreCreateCancel models an uncooperative factory that returns an agent
+	// after shutdown instead of honoring its context.
+	ignoreCreateCancel bool
 	// compactAfter, when > 0, makes the agent on its Nth turn replace its context
 	// with the last two messages, which is what the loop's compaction does to
 	// agentCtx.Messages (a shorter list, not a rewritten prefix).
@@ -91,10 +97,14 @@ func (f *scriptFactory) NewAgent(ctx context.Context, spec AgentSpec) (Agent, er
 		}
 	}
 	if f.createGate != nil {
-		select {
-		case <-f.createGate:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		if f.ignoreCreateCancel {
+			<-f.createGate
+		} else {
+			select {
+			case <-f.createGate:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 	}
 	f.mu.Lock()
@@ -180,11 +190,15 @@ func (a *scriptAgent) Run(ctx context.Context, prompt string, h runtime.StreamHa
 	a.mu.Unlock()
 
 	if f.hold != nil {
-		select {
-		case <-f.hold:
-		case <-ctx.Done():
-			f.observeCancel()
-			return nil, ctx.Err()
+		if f.ignoreCancel {
+			<-f.hold
+		} else {
+			select {
+			case <-f.hold:
+			case <-ctx.Done():
+				f.observeCancel()
+				return nil, ctx.Err()
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -1158,11 +1172,119 @@ func TestResumeOwnershipRules(t *testing.T) {
 	expectError(t, owner.mustCall(hostapi.MethodSessionResume, hostapi.SessionResumeParams{}), hostapi.CodeInvalidParams)
 }
 
-// TestResumeBusyWhileLiveTurnRunsElsewhere covers the reconnect-mid-turn window: a
-// session whose client vanished is still live (the host keeps the turn running),
-// so a second connection cannot attach a competing writer; it is told busy until
-// the turn settles. Afterwards the transcript is resumable normally.
-func TestResumeBusyWhileLiveTurnRunsElsewhere(t *testing.T) {
+// TestCreateDuringShutdownClosesAgent covers the assembly/shutdown race: the
+// factory returns after Shutdown has begun. The host must not publish the new
+// session or leak the assembled agent; the request fails as unavailable.
+func TestCreateDuringShutdownClosesAgent(t *testing.T) {
+	f := newScriptFactory()
+	f.createGate = make(chan struct{})
+	f.createEntered = make(chan struct{}, 1)
+	f.ignoreCreateCancel = true
+	fx := newFixture(t, f)
+	lc := newLineConn(t, fx)
+	if resp := lc.handshake(fx.token); resp.Error != nil {
+		t.Fatalf("hello: %v", resp.Error)
+	}
+	lc.request("create", hostapi.MethodSessionCreate, hostapi.SessionCreateParams{Cwd: t.TempDir()})
+	select {
+	case <-f.createEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("factory was not entered")
+	}
+	fx.srv.Shutdown("test shutdown")
+	close(f.createGate)
+	waitFor(t, 10*time.Second, "the factory to return", func() bool { return f.specCount() == 1 })
+	t.Logf("factory returned: closeCount=%d, liveSessions=%d", f.closeCount(), fx.srv.liveSessionCount())
+	waitFor(t, 10*time.Second, "the assembled agent to be released", func() bool {
+		return f.closeCount() == 1
+	})
+	if got := fx.srv.liveSessionCount(); got != 0 {
+		t.Fatalf("%d sessions were published after shutdown", got)
+	}
+}
+
+// TestCloseRunningSessionReleasesAgentAfterPersistence proves close is ordered:
+// cancel the turn, persist its partial result, and only then close the agent.
+// Closing the agent first would race Run's cleanup.
+func TestCloseRunningSessionReleasesAgentAfterPersistence(t *testing.T) {
+	f := newScriptFactory()
+	f.hold = make(chan struct{})
+	f.ignoreCancel = true
+	fx := newFixture(t, f)
+	c := fx.dial(t)
+	sid := decodeResult[hostapi.SessionCreateResult](t,
+		c.mustCall(hostapi.MethodSessionCreate, hostapi.SessionCreateParams{Cwd: t.TempDir()})).Session.ID
+	promptDone := make(chan *hostapi.Envelope, 1)
+	go func() {
+		resp, _ := c.call(hostapi.MethodPrompt, hostapi.PromptParams{SessionID: sid, Text: "long"})
+		promptDone <- resp
+	}()
+	waitFor(t, 10*time.Second, "the turn to start", func() bool { return isRunning(fx, sid) })
+	st := fx.srv.liveSession(sid)
+	fx.srv.closeSession(st, "closed during turn")
+	if got := f.closeCount(); got != 0 {
+		t.Fatalf("agent was closed before the running turn settled: %d", got)
+	}
+	close(f.hold)
+	select {
+	case <-promptDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled turn did not settle")
+	}
+	waitFor(t, 10*time.Second, "the agent to close after persistence", func() bool {
+		return f.closeCount() == 1
+	})
+	if _, _, err := fx.store.LoadPath(sid); err != nil {
+		t.Fatalf("cancelled turn was not persisted: %v", err)
+	}
+}
+
+// TestClosedPromptPersistenceFailureRollsBack proves a failed append cannot
+// strand a closed session in the live map. The failed turn is reported, the
+// agent is released, and the id can be resumed again.
+func TestClosedPromptPersistenceFailureRollsBack(t *testing.T) {
+	f := newScriptFactory()
+	f.hold = make(chan struct{})
+	f.ignoreCancel = true
+	storeDir := t.TempDir()
+	store, err := session.NewStore(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixture(t, f, func(cfg *Config) { cfg.Store = store })
+	c := fx.dial(t)
+	sid := decodeResult[hostapi.SessionCreateResult](t,
+		c.mustCall(hostapi.MethodSessionCreate, hostapi.SessionCreateParams{Cwd: t.TempDir()})).Session.ID
+	promptDone := make(chan *hostapi.Envelope, 1)
+	go func() {
+		resp, _ := c.call(hostapi.MethodPrompt, hostapi.PromptParams{SessionID: sid, Text: "long"})
+		promptDone <- resp
+	}()
+	waitFor(t, 10*time.Second, "the turn to start", func() bool { return isRunning(fx, sid) })
+	// A directory at the transcript path makes every atomic create fail.
+	if err := os.Mkdir(filepath.Join(storeDir, sid+".jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fx.srv.closeSession(fx.srv.liveSession(sid), "closed during turn")
+	close(f.hold)
+	select {
+	case resp := <-promptDone:
+		if resp == nil || resp.Error == nil {
+			t.Fatal("persistence failure was reported as a successful turn")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("failed turn did not settle")
+	}
+	waitFor(t, 10*time.Second, "the failed session reservation to roll back", func() bool {
+		return fx.srv.liveSessionCount() == 0 && f.closeCount() == 1
+	})
+}
+
+// TestResumeRunningSessionAllowsReadOnlyObservation covers the reconnect-mid-turn
+// window: a session whose client vanished is still live, so a new connection may
+// observe its event log without becoming a competing writer. Once it settles,
+// the transcript is resumable normally.
+func TestResumeRunningSessionAllowsReadOnlyObservation(t *testing.T) {
 	f := newScriptFactory()
 	f.hold = make(chan struct{})
 	fx := newFixture(t, f)
@@ -1183,12 +1305,16 @@ func TestResumeBusyWhileLiveTurnRunsElsewhere(t *testing.T) {
 	})
 
 	c2 := fx.dial(t)
-	expectError(t, c2.mustCall(hostapi.MethodSessionResume, hostapi.SessionResumeParams{ID: sid}), hostapi.CodeBusy)
+	observed := decodeResult[hostapi.SessionResumeResult](t, c2.mustCall(hostapi.MethodSessionResume, hostapi.SessionResumeParams{ID: sid}))
+	if observed.TurnID == "" || !observed.Session.Running {
+		t.Fatalf("resume did not observe the running turn: %+v", observed)
+	}
 
-	// Let the turn finish; the orphan is then reaped and the history is resumable.
+	// Let the turn finish. The observer keeps the idle session alive so the same
+	// connection can adopt it; only an explicit close then reaps it.
 	close(f.hold)
-	waitFor(t, 10*time.Second, "the orphaned session to be reaped", func() bool {
-		return fx.srv.liveSessionCount() == 0
+	waitFor(t, 10*time.Second, "the observed turn to finish", func() bool {
+		return !isRunning(fx, sid)
 	})
 	rr := decodeResult[hostapi.SessionResumeResult](t, c2.mustCall(hostapi.MethodSessionResume, hostapi.SessionResumeParams{ID: sid}))
 	if rr.Session.ID != sid {
@@ -1197,6 +1323,10 @@ func TestResumeBusyWhileLiveTurnRunsElsewhere(t *testing.T) {
 	if len(rr.Messages) < 2 {
 		t.Fatalf("resume replayed %d messages, want at least 2", len(rr.Messages))
 	}
+	c2.mustCall(hostapi.MethodSessionClose, hostapi.SessionCloseParams{ID: sid})
+	waitFor(t, 10*time.Second, "the adopted session to be reaped", func() bool {
+		return fx.srv.liveSessionCount() == 0
+	})
 }
 
 // TestCreateWithVanishedClientDoesNotLeakSession covers the create/disconnect
@@ -1233,11 +1363,11 @@ func TestCreateWithVanishedClientDoesNotLeakSession(t *testing.T) {
 	})
 	close(f.createGate)
 
-	// The agent is built (so the session was published), and it must then be
-	// reaped together with its agent rather than pinned with a dead owner.
-	waitFor(t, 10*time.Second, "the agent to be built", func() bool { return f.specCount() == 1 })
-	waitFor(t, 10*time.Second, "the orphaned session and its agent to be released", func() bool {
-		return fx.srv.liveSessionCount() == 0 && f.closeCount() > 0
+	// Closing the connection cancels assembly. A cooperative factory returns no
+	// agent; an uncooperative one may still return it, in which case it must be
+	// closed. Either way the reservation is rolled back.
+	waitFor(t, 10*time.Second, "the orphaned reservation and any agent to be released", func() bool {
+		return fx.srv.liveSessionCount() == 0 && (f.specCount() == 0 || f.closeCount() > 0)
 	})
 }
 
@@ -1284,9 +1414,10 @@ func TestResumeWithVanishedClientDoesNotLeakSession(t *testing.T) {
 	})
 	close(f.createGate)
 
-	waitFor(t, 10*time.Second, "the agent to be built", func() bool { return f.specCount() == 1 })
-	waitFor(t, 10*time.Second, "the orphaned session and its agent to be released", func() bool {
-		return fx.srv.liveSessionCount() == 0 && f.closeCount() > 0
+	// Assembly is cancelled by the vanished connection; if the factory still
+	// returns an agent it must be closed rather than pinned by the reservation.
+	waitFor(t, 10*time.Second, "the orphaned reservation and any agent to be released", func() bool {
+		return fx.srv.liveSessionCount() == 0 && (f.specCount() == 0 || f.closeCount() > 0)
 	})
 }
 
@@ -1585,11 +1716,11 @@ func TestSessionEventWireFieldNames(t *testing.T) {
 	}
 
 	cases := map[string][]string{
-		hostapi.SessionEventAgentStart: {"sessionId", "type"},
-		hostapi.SessionEventTextDelta:  {"sessionId", "text", "type"},
-		hostapi.SessionEventToolStart:  {"arguments", "sessionId", "toolCallId", "toolName", "type"},
-		hostapi.SessionEventTurnEnd:    {"message", "sessionId", "type"},
-		hostapi.SessionEventAgentEnd:   {"sessionId", "type"},
+		hostapi.SessionEventAgentStart: {"seq", "sessionId", "turnId", "type"},
+		hostapi.SessionEventTextDelta:  {"seq", "sessionId", "text", "turnId", "type"},
+		hostapi.SessionEventToolStart:  {"arguments", "seq", "sessionId", "toolCallId", "toolName", "turnId", "type"},
+		hostapi.SessionEventTurnEnd:    {"message", "seq", "sessionId", "turnId", "type"},
+		hostapi.SessionEventAgentEnd:   {"seq", "sessionId", "turnId", "type"},
 	}
 	for typ, want := range cases {
 		got, ok := keys[typ]
@@ -1703,25 +1834,36 @@ func TestPermissionApproveAlwaysTrustsSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the gate never returned after approval")
 	}
-	if !fx.srv.trust.IsTrusted(cwd) {
-		t.Fatal("approve-always did not grant session trust for the session's directory")
+	if fx.srv.trust.IsTrusted(cwd) {
+		t.Fatal("approve-always leaked into the host-wide directory trust store")
+	}
+	st = fx.srv.liveSession(sid)
+	st.mu.Lock()
+	approved := st.alwaysApproved
+	st.mu.Unlock()
+	if !approved {
+		t.Fatal("approve-always did not grant trust to this session")
 	}
 
-	// The next side-effect call in the same directory passes without a prompt.
+	// The next side-effect call in the same session passes without a prompt.
 	if dec := gate(context.Background(), agentcore.AgentToolCall{Name: "write"}); dec != nil {
 		t.Fatalf("second side-effect call was still gated: %+v", dec)
 	}
 	syncAndCheckNoEvents(t, c, "a side-effect call in a session-trusted directory")
 
-	// Trust is per directory, so a second session rooted there inherits it.
+	// Trust is per session, not per directory: a second session rooted there must
+	// still answer for itself.
 	sid2 := decodeResult[hostapi.SessionCreateResult](t,
 		c.mustCall(hostapi.MethodSessionCreate, hostapi.SessionCreateParams{Cwd: cwd})).Session.ID
 	st2 := fx.srv.liveSession(sid2)
 	if st2 == nil {
 		t.Fatal("second session is not live")
 	}
-	if dec := fx.srv.permissionGate(st2)(context.Background(), agentcore.AgentToolCall{Name: "edit"}); dec != nil {
-		t.Fatalf("a second session in the trusted directory was still gated: %+v", dec)
+	st2.mu.Lock()
+	approved = st2.alwaysApproved
+	st2.mu.Unlock()
+	if approved {
+		t.Fatal("approval leaked into a second session in the same directory")
 	}
 }
 

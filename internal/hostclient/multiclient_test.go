@@ -23,10 +23,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostserver"
-	"github.com/smallnest/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/hostserver"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // scriptSpec is one session's behaviour, selected by the model name passed to
@@ -199,6 +200,36 @@ type promptOutcome struct {
 func isCode(err error, code int) bool {
 	var protoErr *hostapi.Error
 	return errors.As(err, &protoErr) && protoErr.Code == code
+}
+
+// TestHelloStateIsValidatedBeforeAuthentication covers invalid protocol versions
+// and a repeated handshake. A rejected second hello does not tear down a valid
+// connection, but an invalid version must never authenticate it.
+func TestHelloStateIsValidatedBeforeAuthentication(t *testing.T) {
+	dir := startHost(t, &scriptedFactory{reply: "ok"})
+	c := connect(t, dir)
+	if _, err := c.Hello(hostpathToken(t, dir)); err == nil {
+		t.Fatal("a second hello succeeded")
+	}
+	if _, err := c.ServerStatus(); err != nil {
+		t.Fatalf("valid connection broke after a repeated hello: %v", err)
+	}
+
+	var ignored hostapi.HelloResult
+	err := c.callAs(context.Background(), hostapi.MethodHello, hostapi.HelloParams{Version: -1, Token: hostpathToken(t, dir)}, &ignored)
+	if err == nil {
+		t.Fatal("a negative protocol version was accepted")
+	}
+}
+
+// hostpathToken reads the current host token without a trailing newline.
+func hostpathToken(t *testing.T, dir string) string {
+	t.Helper()
+	token, err := hostpath.ReadToken(dir)
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	return token
 }
 
 // TestManyClientsOwnIndependentSessions is the base case: four UIs, four
@@ -427,6 +458,82 @@ func TestPermissionRequestsReachOnlyTheirOwner(t *testing.T) {
 	}
 }
 
+// TestAlwaysApprovalDoesNotLeakBetweenConnections proves that "always" is scoped
+// to the session that was approved, not to the host's directory trust store. A
+// second connection must still answer for its own session in the same directory.
+func TestAlwaysApprovalDoesNotLeakBetweenConnections(t *testing.T) {
+	dir, _ := startHostWithServer(t, &multiFactory{specs: map[string]scriptSpec{
+		"tool": {tool: "bash", reply: "allowed"},
+	}})
+	a := connectAs(t, dir, "ui-a")
+	b := connectAs(t, dir, "ui-b")
+	cwd := t.TempDir()
+	aInfo := mustCreate(t, a, cwd, "tool", "")
+	bInfo := mustCreate(t, b, cwd, "tool", "")
+
+	aDone := make(chan promptOutcome, 1)
+	go func() {
+		res, err := a.Prompt(context.Background(), aInfo.ID, "run")
+		aDone <- promptOutcome{res, err}
+	}()
+	reqA := <-subscribePermissions(a)
+	if err := a.Decide(aInfo.ID, reqA.RequestID, true, true); err != nil {
+		t.Fatalf("owner always: %v", err)
+	}
+	if out := <-aDone; out.err != nil || out.res.Text != "allowed" {
+		t.Fatalf("approved turn = (%q, %v)", out.res.Text, out.err)
+	}
+
+	bDone := make(chan promptOutcome, 1)
+	go func() {
+		res, err := b.Prompt(context.Background(), bInfo.ID, "run")
+		bDone <- promptOutcome{res, err}
+	}()
+	select {
+	case reqB := <-subscribePermissions(b):
+		if err := b.Decide(bInfo.ID, reqB.RequestID, true, false); err != nil {
+			t.Fatalf("second connection decide: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the other client's approval leaked into this session")
+	}
+	if out := <-bDone; out.err != nil || out.res.Text != "allowed" {
+		t.Fatalf("second connection turn = (%q, %v)", out.res.Text, out.err)
+	}
+}
+
+// TestSlowSessionCallbackDoesNotBlockPermission ensures streaming and permission
+// events are dispatched independently. A wedged renderer must not leave the tool
+// gate waiting forever.
+func TestSlowSessionCallbackDoesNotBlockPermission(t *testing.T) {
+	dir := startHost(t, &scriptedFactory{tool: "bash", reply: "allowed"})
+	c := connectAs(t, dir, "ui")
+	info := mustCreate(t, c, t.TempDir(), "", "")
+
+	block := make(chan struct{})
+	c.OnEvent(hostapi.EventSession, func(hostapi.Envelope) { <-block })
+	answered := make(chan error, 1)
+	c.OnEvent(hostapi.EventPermission, func(env hostapi.Envelope) {
+		var req hostapi.PermissionRequest
+		if env.DecodeParams(&req) == nil {
+			answered <- c.Decide(req.SessionID, req.RequestID, true, false)
+		}
+	})
+	res, err := c.Prompt(context.Background(), info.ID, "run")
+	if err != nil || res.Text != "allowed" {
+		t.Fatalf("permission stalled behind a blocked session callback: (%q, %v)", res.Text, err)
+	}
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("decide: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("permission callback did not run")
+	}
+	close(block)
+}
+
 // TestCancelIsOwnerOnlyAndOtherClientsContinue runs a slow turn on one UI while
 // another UI works normally: the fast client is unaffected, only the owner may
 // cancel, and the aborted turn settles in-band.
@@ -528,7 +635,7 @@ func TestDisconnectMidTurnKeepsTheOtherClientAndResumes(t *testing.T) {
 	var rr hostapi.SessionResumeResult
 	waitFor(t, "the orphaned session to settle and become resumable", func() bool {
 		res, err := c.Resume(aInfo.ID)
-		if err != nil {
+		if err != nil || len(res.Messages) != 2 {
 			return false
 		}
 		rr = res
@@ -539,6 +646,101 @@ func TestDisconnectMidTurnKeepsTheOtherClientAndResumes(t *testing.T) {
 	}
 	if list, err := b.ListSessions(); err != nil || len(list) != 1 || list[0].ID != bInfo.ID {
 		t.Fatalf("surviving client's session list changed: %+v (err %v)", list, err)
+	}
+}
+
+// TestResumeRunningSessionReplaysAndStreams is the live counterpart of
+// TestDisconnectMidTurnKeepsTheOtherClientAndResumes: a new connection can
+// observe an ownerless running turn immediately, replay its retained events and
+// receive the rest in sequence, without acquiring write permission.
+func TestResumeRunningSessionReplaysAndStreams(t *testing.T) {
+	dir, _ := startHostWithServer(t, &multiFactory{specs: map[string]scriptSpec{
+		"slow": {reply: "slow-done", chunks: 60, chunkDelay: 20 * time.Millisecond},
+	}})
+	a := connectAs(t, dir, "ui-a")
+	info := mustCreate(t, a, t.TempDir(), "slow", "")
+	first := newEventSink()
+	a.OnEvent(hostapi.EventSession, first.add)
+	promptDone := make(chan promptOutcome, 1)
+	go func() {
+		res, err := a.Prompt(context.Background(), info.ID, "slow")
+		promptDone <- promptOutcome{res, err}
+	}()
+	waitFor(t, "the first event to arrive", func() bool {
+		_, events := first.snapshot()
+		return events > 0
+	})
+	if err := a.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case <-promptDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old prompt waiter did not fail")
+	}
+
+	b := connectAs(t, dir, "ui-b")
+	rr, err := b.Resume(info.ID)
+	if err != nil {
+		t.Fatalf("observe running session: %v", err)
+	}
+	if !rr.Session.Running || rr.TurnID == "" {
+		t.Fatalf("resume is not observing a running turn: %+v", rr)
+	}
+	if len(rr.Events) == 0 {
+		t.Fatal("no retained events were replayed")
+	}
+	if rr.EventSeq != rr.Events[len(rr.Events)-1].Seq {
+		t.Fatalf("last replayed seq = %d, want %d", rr.EventSeq, rr.Events[len(rr.Events)-1].Seq)
+	}
+	if _, err := b.Prompt(context.Background(), info.ID, "write"); !isCode(err, hostapi.CodeForbidden) {
+		t.Fatalf("observer was allowed to prompt: %v", err)
+	}
+	// Repeated inspection is read-only and idempotent; it does not block resume
+	// or change ownership.
+	again, err := b.Resume(info.ID)
+	if err != nil || !again.Session.Running || again.TurnID != rr.TurnID {
+		t.Fatalf("repeated running resume = (%+v, %v)", again, err)
+	}
+
+	var mu sync.Mutex
+	var live []hostapi.SessionEvent
+	b.OnEvent(hostapi.EventSession, func(env hostapi.Envelope) {
+		var ev hostapi.SessionEvent
+		if env.DecodeParams(&ev) == nil {
+			mu.Lock()
+			live = append(live, ev)
+			mu.Unlock()
+		}
+	})
+	waitFor(t, "the observed turn to finish", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, ev := range live {
+			if ev.Type == hostapi.SessionEventTurnEnd {
+				return true
+			}
+		}
+		return false
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	lastSeq := rr.EventSeq
+	turnEnds := 0
+	for _, ev := range live {
+		if ev.Type == hostapi.SessionEventTurnEnd {
+			turnEnds++
+		}
+		if ev.TurnID != rr.TurnID {
+			t.Fatalf("live event turn = %q, want %q", ev.TurnID, rr.TurnID)
+		}
+		if ev.Seq <= lastSeq {
+			t.Fatalf("live event seq = %d after replay seq %d", ev.Seq, lastSeq)
+		}
+		lastSeq = ev.Seq
+	}
+	if turnEnds != 1 {
+		t.Fatalf("received %d turn_end events after repeated resume, want exactly one", turnEnds)
 	}
 }
 

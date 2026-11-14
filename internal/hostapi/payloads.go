@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // HelloParams is the first message a client sends. Token must match the host's
@@ -63,6 +63,8 @@ type SessionInfo struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 	// Running reports whether a turn is currently in flight for the session.
 	Running bool `json:"running,omitempty"`
+	// TurnID identifies the in-flight turn when Running is true.
+	TurnID string `json:"turnId,omitempty"`
 }
 
 // SessionCreateResult returns the new session's id and metadata.
@@ -90,6 +92,15 @@ type SessionResumeParams struct {
 type SessionResumeResult struct {
 	Session  SessionInfo           `json:"session"`
 	Messages agentcore.MessageList `json:"messages"`
+	// TurnID and EventSeq identify the running turn when a client reattaches to
+	// an ownerless, in-flight session. Events replays the retained log; live
+	// events continue with Seq values greater than EventSeq.
+	TurnID   string         `json:"turnId,omitempty"`
+	EventSeq uint64         `json:"eventSeq,omitempty"`
+	Events   []SessionEvent `json:"events,omitempty"`
+	// EventsTruncated means the bounded replay log lost its prefix. The client
+	// must use the final persisted transcript for an authoritative history.
+	EventsTruncated bool `json:"eventsTruncated,omitempty"`
 }
 
 // SessionCloseParams ends a session on the host. The conversation is already
@@ -141,6 +152,7 @@ type PermissionDecideParams struct {
 type PermissionRequest struct {
 	SessionID string `json:"sessionId"`
 	RequestID string `json:"requestId"`
+	TurnID    string `json:"turnId,omitempty"`
 	ToolName  string `json:"toolName"`
 	Summary   string `json:"summary,omitempty"`
 	// TimeoutMS is how long the host will wait before treating the request as
@@ -175,12 +187,23 @@ const (
 	SessionEventSubAgentDone = "subagent_end"
 )
 
+// EventQueueOverflow is emitted locally by hostclient when its bounded event
+// queue dropped older streaming events. The final RPC result is authoritative.
+const EventQueueOverflow = "event_queue_overflow"
+
+// QueueOverflowEvent reports how many events were discarded before this notice.
+type QueueOverflowEvent struct {
+	Dropped uint64 `json:"dropped"`
+}
+
 // SessionEvent is one increment of a running session, pushed as an
 // EventSession notification. Only the fields relevant to Type are populated,
 // which keeps the wire shape small and the mapper trivial.
 type SessionEvent struct {
 	SessionID string `json:"sessionId"`
 	Type      string `json:"type"`
+	TurnID    string `json:"turnId,omitempty"`
+	Seq       uint64 `json:"seq,omitempty"`
 
 	// Text deltas (text_delta / thinking_delta) and the final turn text.
 	Text string `json:"text,omitempty"`

@@ -24,13 +24,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostpath"
 )
 
 // maxLineBytes matches the server's cap, so a client can read any result the
 // server can produce (a resume result is the largest).
 const maxLineBytes = 32 << 20
+
+// maxQueuedEvents bounds each event dispatcher queue. The final prompt result
+// is always available through RPC even if intermediate deltas overflow.
+const maxQueuedEvents = 4096
 
 // Options configures Connect.
 type Options struct {
@@ -62,18 +66,23 @@ type Client struct {
 	nextSub uint64
 	pending map[string]chan result
 	subs    []subscriber
-	// queue holds events waiting for the dispatcher. It is an explicit slice
-	// rather than a channel so a burst of text deltas can never block the read
-	// loop (which would stall the responses a callback may be waiting for).
-	queue   []hostapi.Envelope
-	closed  bool
-	readErr error
+	// queue holds events waiting for the dispatcher. It is bounded: a slow UI
+	// drops the oldest streaming increments and receives an overflow event
+	// telling it to re-read the final result, rather than growing without limit.
+	queue          []hostapi.Envelope
+	dropped        uint64
+	permQueue      []hostapi.Envelope
+	closed         bool
+	readErr        error
+	callbackErrors uint64
 
 	hello    hostapi.HelloResult
 	closeCh  chan struct{}
 	doneCh   chan struct{}
 	queueSig chan struct{}
+	permSig  chan struct{}
 	dispDone chan struct{}
+	permDone chan struct{}
 }
 
 // result is one request's outcome.
@@ -134,10 +143,13 @@ func Connect(opts Options) (*Client, error) {
 		closeCh:  make(chan struct{}),
 		doneCh:   make(chan struct{}),
 		queueSig: make(chan struct{}, 1),
+		permSig:  make(chan struct{}, 1),
 		dispDone: make(chan struct{}),
+		permDone: make(chan struct{}),
 	}
 	go c.read()
 	go c.dispatchLoop()
+	go c.dispatchPermissions()
 	hello, err := c.Hello(token)
 	if err != nil {
 		nc.Close()
@@ -170,7 +182,11 @@ func (c *Client) read() {
 			return
 		}
 		if env.IsEvent() {
-			c.enqueue(env)
+			if env.Event == hostapi.EventPermission {
+				c.enqueuePermission(env)
+			} else {
+				c.enqueue(env)
+			}
 			continue
 		}
 		c.mu.Lock()
@@ -206,13 +222,34 @@ func (c *Client) fail(err error) {
 	}
 }
 
-// enqueue adds an event to the dispatcher queue and wakes the dispatcher.
+// enqueue adds an event to the bounded dispatcher queue and wakes the
+// dispatcher. The oldest streaming increments are dropped on overflow.
 func (c *Client) enqueue(env hostapi.Envelope) {
 	c.mu.Lock()
+	if len(c.queue) >= maxQueuedEvents {
+		c.queue = c.queue[1:]
+		c.dropped++
+	}
 	c.queue = append(c.queue, env)
 	c.mu.Unlock()
 	select {
 	case c.queueSig <- struct{}{}:
+	default:
+	}
+}
+
+// enqueuePermission queues a permission request independently of streaming
+// events. A slow text renderer must not starve the tool confirmation path.
+func (c *Client) enqueuePermission(env hostapi.Envelope) {
+	c.mu.Lock()
+	if len(c.permQueue) >= maxQueuedEvents {
+		c.permQueue = c.permQueue[1:]
+		c.dropped++
+	}
+	c.permQueue = append(c.permQueue, env)
+	c.mu.Unlock()
+	select {
+	case c.permSig <- struct{}{}:
 	default:
 	}
 }
@@ -239,23 +276,87 @@ func (c *Client) dispatchLoop() {
 func (c *Client) drainEvents() {
 	for {
 		c.mu.Lock()
+		if c.dropped > 0 {
+			dropped := c.dropped
+			c.dropped = 0
+			c.mu.Unlock()
+			c.deliver(hostapi.Envelope{Event: hostapi.EventQueueOverflow, Params: json.RawMessage(fmt.Sprintf(`{"dropped":%d}`, dropped))})
+			continue
+		}
 		if len(c.queue) == 0 {
 			c.mu.Unlock()
 			return
 		}
 		env := c.queue[0]
 		c.queue = c.queue[1:]
-		subs := make([]subscriber, len(c.subs))
-		copy(subs, c.subs)
 		c.mu.Unlock()
+		c.deliver(env)
+	}
+}
 
-		for _, s := range subs {
-			if s.event != "" && s.event != env.Event {
-				continue
-			}
-			s.fn(env)
+// dispatchPermissions serves permission requests on their own goroutine, so a
+// blocked streaming callback cannot stall them.
+func (c *Client) dispatchPermissions() {
+	defer close(c.permDone)
+	for {
+		select {
+		case <-c.closeCh:
+			c.drainPermissions()
+			return
+		case <-c.permSig:
+			c.drainPermissions()
 		}
 	}
+}
+
+// drainPermissions delivers queued permission requests in arrival order.
+func (c *Client) drainPermissions() {
+	for {
+		c.mu.Lock()
+		if len(c.permQueue) == 0 {
+			c.mu.Unlock()
+			return
+		}
+		env := c.permQueue[0]
+		c.permQueue = c.permQueue[1:]
+		c.mu.Unlock()
+		c.deliver(env)
+	}
+}
+
+// deliver invokes a snapshot of subscribers. A panicking subscriber is isolated
+// instead of taking down the entire UI process; the connection remains usable.
+func (c *Client) deliver(env hostapi.Envelope) {
+	c.mu.Lock()
+	subs := make([]subscriber, len(c.subs))
+	copy(subs, c.subs)
+	c.mu.Unlock()
+	for _, s := range subs {
+		if s.event != "" && s.event != env.Event {
+			continue
+		}
+		c.callSubscriber(s, env)
+	}
+}
+
+// callSubscriber contains one callback's panic.
+func (c *Client) callSubscriber(s subscriber, env hostapi.Envelope) {
+	defer func() {
+		if recover() != nil {
+			c.mu.Lock()
+			c.callbackErrors++
+			c.mu.Unlock()
+		}
+	}()
+	s.fn(env)
+}
+
+// CallbackErrors reports how many subscriber callbacks panicked. A UI can
+// surface this to its diagnostics instead of losing the whole connection.
+func (c *Client) CallbackErrors() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.callbackErrors
 }
 
 // OnEvent registers a callback for server events. An empty name subscribes to
@@ -321,6 +422,10 @@ func (c *Client) Close() error {
 	}
 	select {
 	case <-c.dispDone:
+	case <-time.After(2 * time.Second):
+	}
+	select {
+	case <-c.permDone:
 	case <-time.After(2 * time.Second):
 	}
 	return err

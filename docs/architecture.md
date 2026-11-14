@@ -164,8 +164,10 @@ hostserver.Server
 
 - 每个请求在自己的 goroutine 里处理，读循环永不被长 turn 阻塞（否则 `cancel` / `permission.decide` 会死锁）。`Server.wg` 让 `Shutdown` 等这些 handler 收口。
 - 会话的 `prompt` 串行化：busy 时返回 `CodeBusy` 而不是排队。
+- `turnId` + 递增 `seq` 标识事件。属主断开后，新连接可对**仍在运行的无属主会话**发起 `session.resume`：服务端以只读观察者身份注册，先返回上下文快照与有限事件回放，再按序发送新事件；观察者不能 prompt/cancel/decide/close。turn 结束后保留该会话供观察者再次 resume 升级为属主；`attach` 自动完成这一步后才接受下一条 prompt。最后一个观察者离开时才回收空闲会话。回放窗口溢出时 `eventsTruncated=true`，最终历史仍以落盘为准。
+- create/resume 在调用 Factory 前预留会话 ID，阻止并发 writer；运行中 close 保留 tombstone，等持久化完成再释放 agent。shutdown 则立即取消并释放资源，保证退出不被不合作 agent 卡住；写盘失败会回滚 reservation 而不是永久占用 ID。
 - 落盘复用 `internal/session` 的分支追加模型；每个 turn 结束把新产生的消息作为当前叶子的分支追加，压缩后改走 `PersistCompactedContext`。宿主重启后 `session.resume` 可以继续。
-- trust 目录直接放行；非信任目录的副作用工具（bash/write/edit）通过 `permission_request` 询问**所有者连接**，无答案（超时、turn 取消、连接断开）一律拒绝。`pigo serve --approve` 在 `NewServer` **之前**构造 `trust.Manager` 并对启动目录 `SetSessionTrust`，再把这个 manager 交给 server——session trust 存在 manager 实例里，交给另一个实例等于没授权。
+- trust 目录直接放行；非信任目录的副作用工具（bash/write/edit）通过 `permission_request` 询问**所有者连接**，无答案（超时、turn 取消、连接断开）一律拒绝。`always` 只记录在 `sessionState.alwaysApproved`，不写入 host 级目录信任，因此不会扩散到其它会话。`--permission-timeout` 可配置等待上限。`pigo serve --approve` 在 `NewServer` **之前**构造 `trust.Manager` 并对启动目录 `SetSessionTrust`，再把这个 manager 交给 server——session trust 存在 manager 实例里，交给另一个实例等于没授权。
 - 会话以 `cwd` 为根装配：`run.SetupEnvIn(cwd, …)` 取代 `run.SetupEnv` 的 `os.Getwd()`，所以一个 host 进程可以服务任意目录下的会话，而不必被启动目录绑定。
 
 ### 6.6 客户端（`pigo attach`）的并发契约
@@ -174,6 +176,7 @@ hostserver.Server
 
 - 一个 goroutine 独占 stdin 并把它灌进 channel（`pumpLines`）；主循环 `select` 于「输入行 / 权限请求信号 / turn 完成」三者。
 - `Prompt` 在后台 goroutine 里跑，完成结果回到主循环；因此权限问题到达时主循环仍然活着。
+- `hostclient` 的流式事件队列有界，溢出时发送本地 `event_queue_overflow` 通知；权限事件独立调度，慢渲染回调不会饿死授权。回调 panic 被隔离并计入 `CallbackErrors`，不会直接杀掉 UI 进程。
 - 权限问题的答案就是**下一条输入行**（stdin 天然有序，不会与问题竞争）。turn 运行期间键入的行进入 `queued`，既可能是这个问题的答案，也可能是 turn 结束后要执行的下一条命令——不会被丢掉。
 - Ctrl-C 取消当前 turn（空闲时断开连接）；`/exit`、Ctrl-D 在 turn 运行中先取消再断开。stdin 关闭时若还有未回答的权限请求，按拒绝处理（静默绝不放行）。
 

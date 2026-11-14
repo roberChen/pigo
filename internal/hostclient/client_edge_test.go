@@ -31,13 +31,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostpath"
-	"github.com/smallnest/pigo/internal/hostserver"
-	pigoruntime "github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/hostserver"
+	pigoruntime "github.com/roberChen/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // edgeTimeout bounds every wait in this file. Tests poll a condition against it
@@ -903,26 +903,15 @@ func TestBlockedCallbackDoesNotStallRequests(t *testing.T) {
 	}
 }
 
-func TestCallbackPanicIsNotCoveredByClient(t *testing.T) {
-	// The client calls callbacks directly and does not recover them (dispatchLoop
-	// has no recover), so an *unrecovered* panic in a callback takes the dispatch
-	// goroutine — and the process — down. A UI must recover in its own callback;
-	// this test does exactly that and then asserts the client keeps working, which
-	// is the behaviour the code documents by omission.
+func TestCallbackPanicIsIsolatedByClient(t *testing.T) {
+	// A subscriber panic is contained by the client: other subscribers keep
+	// receiving events and the connection stays usable.
 	dir := startHost(t, &scriptedFactory{reply: "abcdef"})
 	c := connect(t, dir)
 
 	var mu sync.Mutex
-	panics := 0
 	after := 0
 	c.OnEvent(hostapi.EventSession, func(hostapi.Envelope) {
-		defer func() {
-			if r := recover(); r != nil {
-				mu.Lock()
-				panics++
-				mu.Unlock()
-			}
-		}()
 		panic("callback boom")
 	})
 	// A second subscriber must keep being served even though its neighbour panics.
@@ -943,7 +932,7 @@ func TestCallbackPanicIsNotCoveredByClient(t *testing.T) {
 	waitFor(t, "both subscribers to see the turn", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return panics == perTurn && after == perTurn
+		return c.CallbackErrors() == perTurn && after == perTurn
 	})
 
 	// The connection is still usable after the recovered panics.
@@ -953,7 +942,7 @@ func TestCallbackPanicIsNotCoveredByClient(t *testing.T) {
 	waitFor(t, "the second turn to be dispatched", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return panics == 2*perTurn
+		return c.CallbackErrors() == 2*perTurn
 	})
 }
 
@@ -1818,5 +1807,42 @@ func (a *gatedAgent) Close() {
 		case a.closed <- struct{}{}:
 		default:
 		}
+	}
+}
+
+// TestEventQueueIsBoundedAndReportsOverflow prevents a slow subscriber from
+// growing the client queue without limit. Older streaming events are discarded
+// and a single overflow notice tells the UI to rely on the final RPC result.
+func TestEventQueueIsBoundedAndReportsOverflow(t *testing.T) {
+	c := &Client{
+		queueSig: make(chan struct{}, 1),
+		permSig:  make(chan struct{}, 1),
+		closeCh:  make(chan struct{}),
+	}
+	for i := 0; i < maxQueuedEvents+100; i++ {
+		c.enqueue(hostapi.Envelope{Event: hostapi.EventSession})
+	}
+	if len(c.queue) != maxQueuedEvents {
+		t.Fatalf("queued %d events, want cap %d", len(c.queue), maxQueuedEvents)
+	}
+	if c.dropped != 100 {
+		t.Fatalf("dropped = %d, want 100", c.dropped)
+	}
+
+	overflow := make(chan hostapi.QueueOverflowEvent, 1)
+	c.OnEvent(hostapi.EventQueueOverflow, func(env hostapi.Envelope) {
+		var ev hostapi.QueueOverflowEvent
+		if err := env.DecodeParams(&ev); err == nil {
+			overflow <- ev
+		}
+	})
+	c.drainEvents()
+	select {
+	case ev := <-overflow:
+		if ev.Dropped != 100 {
+			t.Fatalf("overflow dropped = %d, want 100", ev.Dropped)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overflow was not reported")
 	}
 }

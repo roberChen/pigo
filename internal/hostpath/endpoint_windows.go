@@ -160,6 +160,10 @@ func ownerOnlyPipeSDDL() (string, error) {
 	return "D:P(A;;GA;;;" + sid.String() + ")", nil
 }
 
+// CanCleanEndpoint is always true on Windows: a named pipe is not a file, so
+// there is no on-disk artifact to protect from accidental deletion.
+func CanCleanEndpoint(string) bool { return true }
+
 // CleanEndpoint is a no-op on Windows: a named pipe exists only while some
 // process holds it, so a crashed host leaves nothing to remove.
 func CleanEndpoint(string) {}

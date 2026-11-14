@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/cli"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/session"
 )
 
 // sessionState is one live session on the host. The mutable fields are guarded
@@ -42,6 +42,10 @@ type sessionState struct {
 	header    session.SessionHeader
 	curLeaf   string
 	persisted int
+	// alwaysApproved is scoped to this session, not to the host's directory trust
+	// store. A client may only lift its own permission gate; another session on
+	// the same host must still answer for itself.
+	alwaysApproved bool
 	// running is true while a prompt request is in flight; a second prompt is
 	// refused with CodeBusy rather than queued (a UI that wants to wait can watch
 	// the turn's events).
@@ -51,8 +55,119 @@ type sessionState struct {
 	// perms is the wait table for permission requests issued by this session's
 	// tool gate.
 	perms *permissionTable
+	// turnID identifies the in-flight turn, and eventSeq is its last event's
+	// sequence number. events is the bounded replay log used by a read-only
+	// reconnect; observers are watchers, never writers.
+	turnID    string
+	eventSeq  uint64
+	events    []hostapi.SessionEvent
+	observers map[*conn]struct{}
+	truncated bool
+	// turnBase is the context at the turn's start. The live agent's message list
+	// is not safe to snapshot while the turn is running.
+	turnBase agentcore.MessageList
+	// closeOnFinish tells the prompt handler to release the agent after it has
+	// persisted the cancelled turn. Closing it earlier races Run's cleanup.
+	closeOnFinish bool
 	// closed makes a second close a no-op.
 	closed bool
+}
+
+// maxReplayEvents bounds a running turn's replay log. Overflow is reported in
+// SessionResumeResult.EventsTruncated, so a UI knows it must re-read the final
+// transcript rather than treating the replay as complete.
+const maxReplayEvents = 4096
+
+// startTurn resets the replay log for a new turn.
+func (s *sessionState) startTurn(turnID string, base agentcore.MessageList) {
+	s.turnID = turnID
+	s.eventSeq = 0
+	s.events = nil
+	s.truncated = false
+	s.turnBase = append(agentcore.MessageList(nil), base...)
+	s.observers = make(map[*conn]struct{})
+}
+
+// emit appends an event to the turn log and fans it out to the owner and any
+// read-only observers. Sequence numbers are assigned before the first send, so
+// a reconnect never sees the same event under two ids.
+func (s *sessionState) emit(ev hostapi.SessionEvent) {
+	s.mu.Lock()
+	s.eventSeq++
+	ev.TurnID = s.turnID
+	ev.Seq = s.eventSeq
+	s.events = append(s.events, ev)
+	if len(s.events) > maxReplayEvents {
+		s.events = append([]hostapi.SessionEvent(nil), s.events[len(s.events)-maxReplayEvents:]...)
+		s.truncated = true
+	}
+	owner := s.owner
+	observers := make([]*conn, 0, len(s.observers))
+	for c := range s.observers {
+		observers = append(observers, c)
+	}
+	s.mu.Unlock()
+
+	if owner != nil {
+		_ = owner.notify(eventSession, ev)
+	}
+	for _, c := range observers {
+		_ = c.notifyObserver(ev)
+	}
+}
+
+// replay returns the current running-turn snapshot without changing observer
+// registration. Repeated read-only resumes are therefore safe.
+func (s *sessionState) replay() (hostapi.SessionResumeResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !s.running || s.owner != nil || s.agent == nil {
+		return hostapi.SessionResumeResult{}, false
+	}
+	return hostapi.SessionResumeResult{
+		Session:         s.info(),
+		Messages:        append(agentcore.MessageList(nil), s.turnBase...),
+		TurnID:          s.turnID,
+		EventSeq:        s.eventSeq,
+		Events:          append([]hostapi.SessionEvent(nil), s.events...),
+		EventsTruncated: s.truncated,
+	}, true
+}
+
+// observe registers c as a read-only watcher of a running, ownerless turn. The
+// registration and replay snapshot share one lock section, so new events are
+// either in the replay or queued behind the resume response, never lost.
+func (s *sessionState) observe(c *conn) (hostapi.SessionResumeResult, bool) {
+	rr, ok := s.replay()
+	if !ok {
+		return hostapi.SessionResumeResult{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !s.running || s.owner != nil || s.agent == nil {
+		return hostapi.SessionResumeResult{}, false
+	}
+	if s.observers == nil {
+		s.observers = make(map[*conn]struct{})
+	}
+	s.observers[c] = struct{}{}
+	return rr, true
+}
+
+// closeObservers ends every read-only subscription and detaches it from its
+// connection. Observers are not owners and cannot keep a session alive.
+func (s *sessionState) closeObservers(reason string) {
+	s.mu.Lock()
+	observers := make([]*conn, 0, len(s.observers))
+	for c := range s.observers {
+		observers = append(observers, c)
+	}
+	s.observers = nil
+	s.mu.Unlock()
+	for _, c := range observers {
+		_ = c.notify(eventSessionClosed, hostapi.SessionClosedEvent{SessionID: s.id, Reason: reason})
+		c.unwatch(s.id)
+	}
 }
 
 // info renders the session's public metadata. A caller must hold s.mu.
@@ -71,6 +186,7 @@ func (s *sessionState) info() hostapi.SessionInfo {
 		CreatedAt: s.header.CreatedAt,
 		UpdatedAt: s.header.UpdatedAt,
 		Running:   s.running,
+		TurnID:    s.turnID,
 	}
 }
 

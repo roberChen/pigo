@@ -11,12 +11,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	flag "github.com/spf13/pflag"
 
-	"github.com/smallnest/pigo/internal/cli/hostcmd"
-	"github.com/smallnest/pigo/internal/cli/run"
-	"github.com/smallnest/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/cli/hostcmd"
+	"github.com/roberChen/pigo/internal/cli/run"
+	"github.com/roberChen/pigo/internal/diag"
 )
 
 // isHostSubcommand reports whether args selects the host verbs, i.e.
@@ -45,8 +46,9 @@ func runHostSubcommand(args []string, version string, out, errOut io.Writer) int
 // they mean in a normal run, and adds the host-only ones.
 type serveFlags struct {
 	cliOptions
-	daemon bool
-	dir    string
+	daemon            bool
+	dir               string
+	permissionTimeout time.Duration
 }
 
 func runServe(args []string, version string, out, errOut io.Writer) int {
@@ -58,6 +60,7 @@ func runServe(args []string, version string, out, errOut io.Writer) int {
 	registerFlags(fs, &sf.cliOptions)
 	fs.BoolVar(&sf.daemon, "daemon", false, "detach: start the host in the background and return once it is listening")
 	fs.StringVar(&sf.dir, "dir", "", "host state directory (socket, token, log); default $PIGO_HOME")
+	fs.DurationVar(&sf.permissionTimeout, "permission-timeout", 0, "how long a tool permission request waits for its client before denial (0 waits until answer or disconnect)")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -101,11 +104,12 @@ func runServe(args []string, version string, out, errOut io.Writer) int {
 	}
 
 	return hostcmd.Run(fs.Args(), hostcmd.ServeOptions{
-		Dir:     sf.dir,
-		Daemon:  sf.daemon,
-		Approve: resolved.approve,
-		Build:   version,
-		Factory: factory,
+		Dir:               sf.dir,
+		Daemon:            sf.daemon,
+		Approve:           resolved.approve,
+		PermissionTimeout: sf.permissionTimeout,
+		Build:             version,
+		Factory:           factory,
 		// The daemon child re-execs with the same argv minus --daemon, so it
 		// resolves the same providers, flags and config layers as the parent.
 		ChildArgs: args,

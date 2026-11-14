@@ -11,6 +11,7 @@
 package hostserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/diag"
-	"github.com/smallnest/pigo/internal/hostapi"
-	"github.com/smallnest/pigo/internal/hostpath"
-	"github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/runtime"
+	"github.com/roberChen/pigo/internal/session"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // maxLineBytes bounds one NDJSON line. A prompt can be large (a pasted file), and
@@ -38,6 +39,10 @@ const maxLineBytes = 32 << 20
 // stopped reading would otherwise block the write until its pipe is drained,
 // which shutdown must not wait for.
 const shutdownWriteGrace = 2 * time.Second
+
+// handlerShutdownGrace bounds the wait for request handlers to cancel, persist
+// and close their agents during shutdown.
+const handlerShutdownGrace = 5 * time.Second
 
 // Config controls a host server.
 type Config struct {
@@ -89,9 +94,15 @@ type Server struct {
 	lastIDTime time.Time
 
 	// wg tracks in-flight request handlers so Shutdown can wait for them.
-	wg sync.WaitGroup
+	wg      sync.WaitGroup
+	turnSeq uint64
 
 	shutdownOnce sync.Once
+	// runCtx cancels agent assembly and in-flight turns during shutdown. It is
+	// deliberately not tied to a client connection: an ordinary disconnect must
+	// not cancel a running turn.
+	runCtx    context.Context
+	runCancel context.CancelFunc
 	// done is closed as soon as shutdown begins, which is what unblocks clients
 	// and the accept loop; stopped is closed after the last cleanup step, so
 	// Wait reports a host whose files are actually gone.
@@ -158,6 +169,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	// Store the resolved clock on cfg: handlers reach it through cfg.Now().
 	cfg.Now = now
+	runCtx, runCancel := context.WithCancel(context.Background())
 	return &Server{
 		cfg:       cfg,
 		dir:       dir,
@@ -168,6 +180,8 @@ func NewServer(cfg Config) (*Server, error) {
 		sessions:  make(map[string]*sessionState),
 		startedAt: now(),
 		pid:       os.Getpid(),
+		runCtx:    runCtx,
+		runCancel: runCancel,
 		done:      make(chan struct{}),
 		stopped:   make(chan struct{}),
 	}, nil
@@ -190,8 +204,11 @@ func (s *Server) Listen() error {
 		}
 		return &ErrAlreadyRunning{PID: pid}
 	}
-	// No live host: anything at the path is stale (a unix socket file; on
-	// Windows there is nothing to clean).
+	// Only remove an endpoint when the platform proves it is stale. A timeout or
+	// permission failure is not evidence that a live listener may be unlinked.
+	if !hostpath.CanCleanEndpoint(s.socket) {
+		return fmt.Errorf("host: cannot verify endpoint %s", s.socket)
+	}
 	CleanEndpoint(s.socket)
 	// The transport restricts the endpoint to its owner (socket mode on POSIX,
 	// a one-ACE pipe DACL on Windows); the token is the explicit second factor
@@ -281,8 +298,13 @@ func (s *Server) serve(ctx context.Context) error {
 			}
 			return fmt.Errorf("host: accept: %w", err)
 		}
-		c := newConn(s, nc)
 		s.mu.Lock()
+		if s.isShuttingDown() {
+			s.mu.Unlock()
+			_ = nc.Close()
+			return nil
+		}
+		c := newConn(s, nc)
 		s.conns[c] = struct{}{}
 		s.mu.Unlock()
 		go s.serveConn(c)
@@ -305,6 +327,7 @@ func (s *Server) Shutdown(reason string) {
 	s.shutdownOnce.Do(func() {
 		s.shutdownReason = reason
 		close(s.done)
+		s.runCancel()
 		if s.ln != nil {
 			_ = s.ln.Close()
 		}
@@ -323,16 +346,41 @@ func (s *Server) Shutdown(reason string) {
 		for _, c := range conns {
 			c.close()
 		}
+		// Detached sessions have no owning connection to close. They must still
+		// be cancelled and tombstoned so no turn can commit after shutdown.
+		for _, st := range s.snapshotSessions() {
+			s.closeSession(st, "server shutdown")
+		}
 		cleanup(s.dir)
 		close(s.stopped)
 	})
 }
 
-// Wait blocks until shutdown has finished, including the removal of the host's
-// files. It does not wait for in-flight handlers forever: a handler blocked on a
-// provider cannot be interrupted by anything but its turn context, and Shutdown
-// cancels those via conn.close.
-func (s *Server) Wait() { <-s.stopped }
+// Wait blocks until shutdown cleanup has finished and request handlers have
+// had a bounded window to cancel, persist and close their agents.
+func (s *Server) Wait() {
+	<-s.stopped
+	handlers := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(handlers)
+	}()
+	select {
+	case <-handlers:
+	case <-time.After(handlerShutdownGrace):
+	}
+}
+
+// snapshotSessions copies the live session set for shutdown.
+func (s *Server) snapshotSessions() []*sessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*sessionState, 0, len(s.sessions))
+	for _, st := range s.sessions {
+		out = append(out, st)
+	}
+	return out
+}
 
 // snapshotConns copies the connection set.
 func (s *Server) snapshotConns() []*conn {
@@ -367,23 +415,39 @@ func (s *Server) closeSession(st *sessionState, reason string) {
 	s.closeSessionIf(st, reason, nil)
 }
 
-// closeSessionIfUnattached closes a session only if no client has adopted it and
-// no turn is in flight. It is the disconnect path: dropping the last client must
-// not kill a turn that is still running, but an idle orphan has no reason to stay
-// resident — its history is already on disk.
+// closeSessionIfUnattached closes a session only if no client has adopted it,
+// no turn is in flight and no read-only observer remains. The disconnect path
+// must not kill a running turn, and an observed session must survive its turn's
+// completion long enough for the observer to adopt it.
 func (s *Server) closeSessionIfUnattached(st *sessionState, reason string) {
 	s.closeSessionIf(st, reason, func(st *sessionState) bool {
-		return st.owner == nil && !st.running
+		return st.owner == nil && !st.running && len(st.observers) == 0
 	})
 }
 
-// closeSessionIf ends a session when keep reports true (called with st.mu held).
-// The map entry, the closed flag and the ownership check are decided under one
-// lock so a reconnecting client cannot adopt a session that is being closed.
+// closeSessionIf ends a session when keep reports true. Closing a running
+// session normally leaves a tombstone until its prompt has persisted; shutdown
+// instead releases resources immediately so an uncooperative agent cannot hang
+// process exit.
 func (s *Server) closeSessionIf(st *sessionState, reason string, keep func(*sessionState) bool) {
 	s.mu.Lock()
 	if _, ok := s.sessions[st.id]; !ok {
 		s.mu.Unlock()
+		// A create/resume handler may be aborted before it ever published the
+		// session. It still owns an assembled agent that must be released.
+		st.mu.Lock()
+		if st.closed {
+			st.mu.Unlock()
+			return
+		}
+		st.closed = true
+		agent := st.agent
+		st.agent = nil
+		st.mu.Unlock()
+		st.perms.abortAll()
+		if agent != nil {
+			agent.Close()
+		}
 		return
 	}
 	st.mu.Lock()
@@ -398,21 +462,27 @@ func (s *Server) closeSessionIf(st *sessionState, reason string, keep func(*sess
 	agent := st.agent
 	st.agent = nil
 	owner := st.owner
+	closeOnFinish := st.running && !s.isShuttingDown()
+	st.closeOnFinish = closeOnFinish
+	st.owner = nil
 	st.mu.Unlock()
-	delete(s.sessions, st.id)
+	if !closeOnFinish {
+		delete(s.sessions, st.id)
+	}
 	s.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
 	st.perms.abortAll()
-	if agent != nil {
+	if agent != nil && !closeOnFinish {
 		agent.Close()
 	}
 	if owner != nil {
 		_ = owner.notify(eventSessionClosed, hostapi.SessionClosedEvent{SessionID: st.id, Reason: reason})
 		owner.release(st.id)
 	}
+	st.closeObservers(reason)
 }
 
 // detachSession forgets the connection that owned a session without necessarily
@@ -445,6 +515,14 @@ func (s *Server) adoptSession(id string, c *conn) (*sessionState, bool) {
 	return st, true
 }
 
+// nextTurnID allocates a unique id for one prompt's event log.
+func (s *Server) nextTurnID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.turnSeq++
+	return fmt.Sprintf("turn-%d", s.turnSeq)
+}
+
 // nextSessionTime returns a clock value for a new session id. Allocations are
 // strictly increasing (at microsecond granularity, which is what session.NewID
 // encodes), so concurrent creates cannot collide; the clock only advances into the
@@ -460,20 +538,51 @@ func (s *Server) nextSessionTime() time.Time {
 	return now
 }
 
-// publishSession records a session that was just built (created or resumed) and
-// reaps it when its owner disappeared while the agent was being assembled.
-//
-// Building an agent can take a while (provider probing, a memory DB, MCP clients),
-// and conn.close snapshots the owned set — so a client that vanishes inside
-// Factory.NewAgent leaves nothing for that snapshot to detach. Without this check
-// the session would stay in the live map with a dead owner for the host's
-// lifetime, pinning the agent's resources and making the id un-resumable (it still
-// looks attached to another client).
-func (s *Server) publishSession(c *conn, st *sessionState) {
-	c.claim(st)
+// reserveSession publishes a placeholder before Factory.NewAgent runs. A second
+// resume sees the owner and cannot build a second writer over the same file.
+// The placeholder has no agent and is removed by abandonSession on failure.
+func (s *Server) reserveSession(c *conn, st *sessionState) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.isShuttingDown() || s.sessions[st.id] != nil {
+		return false
+	}
+	s.sessions[st.id] = st
+	c.claim(st)
+	return true
+}
+
+// abandonSession rolls back a failed create/resume reservation.
+func (s *Server) abandonSession(c *conn, st *sessionState) {
+	s.mu.Lock()
+	if s.sessions[st.id] == st {
+		delete(s.sessions, st.id)
+	}
+	s.mu.Unlock()
+	st.mu.Lock()
+	st.closed = true
+	st.mu.Unlock()
+	st.perms.abortAll()
+	c.release(st.id)
+}
+
+// publishSession commits a previously reserved session, or closes it if the
+// host began shutting down or its owner vanished during agent assembly.
+func (s *Server) publishSession(c *conn, st *sessionState) bool {
+	if s.isShuttingDown() {
+		s.closeSession(st, "server shutdown")
+		return false
+	}
+	s.mu.Lock()
+	current := s.sessions[st.id]
+	if current != nil && current != st {
+		s.mu.Unlock()
+		s.closeSession(st, "session replaced")
+		return false
+	}
 	s.sessions[st.id] = st
 	s.mu.Unlock()
+	c.claim(st)
 
 	st.mu.Lock()
 	owner := st.owner
@@ -481,6 +590,19 @@ func (s *Server) publishSession(c *conn, st *sessionState) {
 	if owner == nil || owner.isClosed() {
 		s.detachSession(st)
 	}
+	return true
+}
+
+// beginRequest admits a handler into the shutdown wait group atomically. Once
+// shutdown starts, no new handler may commit work.
+func (s *Server) beginRequest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.isShuttingDown() {
+		return false
+	}
+	s.wg.Add(1)
+	return true
 }
 
 // isShuttingDown reports whether Shutdown has begun. A disconnect during shutdown
@@ -506,8 +628,17 @@ func (c *conn) handleHello(env envelope) {
 		c.replyError(env.ID, codeUnavailable, "host is shutting down")
 		return
 	}
+	if len(env.Params) == 0 || bytes.Equal(bytes.TrimSpace(env.Params), []byte("null")) {
+		c.replyError(env.ID, codeUnauthorized, "hello with the server token is required")
+		go c.close()
+		return
+	}
 	if p.Version > Version {
 		c.replyError(env.ID, codeInvalidParams, fmt.Sprintf("protocol version %d is newer than this host (%d)", p.Version, Version))
+		return
+	}
+	if p.Version < 0 {
+		c.replyError(env.ID, codeInvalidParams, fmt.Sprintf("protocol version %d is not supported by this host (%d)", p.Version, Version))
 		return
 	}
 	if !tokenMatches(c.srv.token, p.Token) {
@@ -518,14 +649,14 @@ func (c *conn) handleHello(env envelope) {
 		return
 	}
 	c.mu.Lock()
-	already := c.authed
-	c.authed = true
-	c.client = p.Client
-	c.mu.Unlock()
-	if already {
+	if c.authed {
+		c.mu.Unlock()
 		c.replyError(env.ID, codeUnauthorized, "hello has already been sent on this connection")
 		return
 	}
+	c.authed = true
+	c.client = p.Client
+	c.mu.Unlock()
 	c.reply(env.ID, hostapi.HelloResult{
 		Version: Version,
 		PID:     c.srv.pid,
@@ -570,6 +701,10 @@ func (c *conn) handleSessionCreate(env envelope) {
 		c.replyError(env.ID, codeInvalidParams, err.Error())
 		return
 	}
+	if c.srv.isShuttingDown() {
+		c.replyError(env.ID, codeUnavailable, "host is shutting down")
+		return
+	}
 	fallback, _ := os.Getwd()
 	cwd := resolveCwd(p.Cwd, fallback)
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
@@ -586,22 +721,38 @@ func (c *conn) handleSessionCreate(env envelope) {
 		title: p.Title,
 		perms: newPermissionTable(),
 	}
-	agent, err := c.srv.cfg.Factory.NewAgent(context.Background(), AgentSpec{
+	if !c.srv.reserveSession(c, st) {
+		c.replyError(env.ID, codeUnavailable, "session cannot be created")
+		return
+	}
+	ctx, stop := c.assemblyContext()
+	defer stop()
+	agent, err := c.srv.cfg.Factory.NewAgent(ctx, AgentSpec{
 		SessionID:      id,
 		Cwd:            cwd,
 		Model:          p.Model,
 		BeforeToolCall: c.srv.permissionGate(st),
 	})
 	if err != nil {
+		c.srv.abandonSession(c, st)
 		c.replyError(env.ID, codeInternal, err.Error())
 		return
 	}
 	st.mu.Lock()
+	if st.closed {
+		st.mu.Unlock()
+		agent.Close()
+		c.replyError(env.ID, codeUnavailable, "session was closed during assembly")
+		return
+	}
 	st.agent = agent
 	st.header = newSessionHeader(id, now, cwd, agent.Model(), agent.Provider(), agent.SystemPrompt())
 	st.mu.Unlock()
 
-	c.srv.publishSession(c, st)
+	if !c.srv.publishSession(c, st) {
+		c.replyError(env.ID, codeUnavailable, "host is shutting down")
+		return
+	}
 	c.reply(env.ID, hostapi.SessionCreateResult{Session: st.infoLocked()})
 }
 
@@ -637,15 +788,51 @@ func (c *conn) handleSessionResume(env envelope) {
 		c.replyError(env.ID, codeBusy, "session is already attached to this connection")
 		return
 	}
+	if c.watching(p.ID) {
+		st := c.srv.liveSession(p.ID)
+		if st == nil {
+			c.unwatch(p.ID)
+		} else if rr, ok := st.replay(); ok {
+			// Repeated read-only inspection is idempotent: return the latest
+			// snapshot without registering another observer or changing ownership.
+			c.reply(env.ID, rr)
+			return
+		} else {
+			st.mu.Lock()
+			busy := st.running || st.closed
+			if !busy {
+				delete(st.observers, c)
+				c.unwatch(p.ID)
+			}
+			st.mu.Unlock()
+			if busy {
+				c.replyError(env.ID, codeBusy, "session is still running")
+				return
+			}
+		}
+	}
 	if other := c.srv.ownerOf(p.ID); other != nil && other != c {
 		c.replyError(env.ID, codeForbidden, "session is attached to another client")
 		return
+	}
+	// A running, ownerless session may be observed read-only. This preserves
+	// live progress and the bounded event log without allowing a second writer.
+	if st := c.srv.liveSession(p.ID); st != nil {
+		if rr, ok := st.observe(c); ok {
+			c.watch(st)
+			c.reply(env.ID, rr)
+			c.watchReadyAfterResume(st.id)
+			return
+		}
 	}
 	// A session whose client disconnected mid-turn is still live (the host keeps
 	// the turn running). Adopt it when it is idle rather than rebuilding a second
 	// agent over the same on-disk transcript.
 	if st, ok := c.srv.adoptSession(p.ID, c); ok {
-		c.srv.publishSession(c, st)
+		if !c.srv.publishSession(c, st) {
+			c.replyError(env.ID, codeUnavailable, "host is shutting down")
+			return
+		}
 		st.mu.Lock()
 		msgs := st.agent.Messages()
 		info := st.info()
@@ -654,9 +841,14 @@ func (c *conn) handleSessionResume(env envelope) {
 		return
 	}
 	// Still live but busy: creating a second writer for the same session would
-	// interleave two transcripts. The client retries when the turn completes.
+	// interleave two transcripts. A running session that still has an owner can
+	// only be observed by that owner, not by another connection.
 	if c.srv.liveSession(p.ID) != nil {
 		c.replyError(env.ID, codeBusy, "session is finishing a turn; retry when it completes")
+		return
+	}
+	if c.srv.isShuttingDown() {
+		c.replyError(env.ID, codeUnavailable, "host is shutting down")
 		return
 	}
 	header, path, err := c.srv.store.LoadPath(p.ID)
@@ -683,7 +875,13 @@ func (c *conn) handleSessionResume(env envelope) {
 		curLeaf:   session.TipLeaf(path),
 		persisted: len(msgs),
 	}
-	agent, err := c.srv.cfg.Factory.NewAgent(context.Background(), AgentSpec{
+	if !c.srv.reserveSession(c, st) {
+		c.replyError(env.ID, codeBusy, "session is being resumed")
+		return
+	}
+	ctx, stop := c.assemblyContext()
+	defer stop()
+	agent, err := c.srv.cfg.Factory.NewAgent(ctx, AgentSpec{
 		SessionID:      header.ID,
 		Cwd:            st.cwd,
 		Model:          header.Model,
@@ -692,10 +890,17 @@ func (c *conn) handleSessionResume(env envelope) {
 		BeforeToolCall: c.srv.permissionGate(st),
 	})
 	if err != nil {
+		c.srv.abandonSession(c, st)
 		c.replyError(env.ID, codeInternal, err.Error())
 		return
 	}
 	st.mu.Lock()
+	if st.closed {
+		st.mu.Unlock()
+		agent.Close()
+		c.replyError(env.ID, codeUnavailable, "session was closed during assembly")
+		return
+	}
 	st.agent = agent
 	// A resumed session keeps its original prompt; only a header without one (an
 	// older file) adopts the freshly assembled prompt.
@@ -710,7 +915,10 @@ func (c *conn) handleSessionResume(env envelope) {
 	}
 	st.mu.Unlock()
 
-	c.srv.publishSession(c, st)
+	if !c.srv.publishSession(c, st) {
+		c.replyError(env.ID, codeUnavailable, "host is shutting down")
+		return
+	}
 	c.reply(env.ID, hostapi.SessionResumeResult{Session: st.infoLocked(), Messages: msgs})
 }
 
@@ -772,11 +980,13 @@ func (c *conn) handlePermissionDecide(env envelope) {
 		c.replyError(env.ID, codeNotFound, "no pending permission request "+p.RequestID)
 		return
 	}
-	if p.Approve && p.Always && c.srv.trust != nil {
-		// "always" grants session trust for the session's directory, so later
-		// side-effect calls skip the prompt — the same contract as the REPL's
-		// "a" answer.
-		c.srv.trust.SetSessionTrust(st.cwd)
+	if p.Approve && p.Always {
+		// "always" is scoped to this session. Granting it on the host-wide trust
+		// manager would silently approve every other client's session in the same
+		// directory, which is precisely what connection isolation forbids.
+		st.mu.Lock()
+		st.alwaysApproved = true
+		st.mu.Unlock()
 	}
 	c.reply(env.ID, struct {
 		OK bool `json:"ok"`
@@ -816,9 +1026,10 @@ func (c *conn) handlePrompt(env envelope) {
 		return
 	}
 	agent := st.agent
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.srv.runCtx)
 	st.running = true
 	st.cancel = cancel
+	st.startTurn(c.srv.nextTurnID(), agent.Messages())
 	st.mu.Unlock()
 
 	defer func() {
@@ -838,12 +1049,12 @@ func (c *conn) handlePrompt(env envelope) {
 	handler := runtime.StreamHandler{
 		OnText: func(delta string) {
 			if ev := mapper.TextDelta(delta); ev != nil {
-				_ = c.notify(eventSession, ev)
+				st.emit(*ev)
 			}
 		},
 		OnEvent: func(ev agentcore.AgentEvent) {
 			for _, out := range mapper.Handle(ev) {
-				_ = c.notify(eventSession, out)
+				st.emit(out)
 			}
 		},
 	}
@@ -856,8 +1067,11 @@ func (c *conn) handlePrompt(env envelope) {
 	perr := st.appendTail(msgs)
 	st.mu.Unlock()
 	if perr != nil {
-		diag.Diagf("host: persist session %s: %v", st.id, perr)
+		c.srv.discardClosedPrompt(st, agent)
+		c.replyError(env.ID, codeInternal, "persist session: "+perr.Error())
+		return
 	}
+	c.srv.finishPromptSession(st, agent)
 
 	res := hostapi.PromptResult{SessionID: st.id}
 	if msg != nil {
@@ -888,6 +1102,49 @@ func (c *conn) handlePrompt(env envelope) {
 	default:
 		c.replyError(env.ID, codeInternal, runErr.Error())
 	}
+}
+
+// discardClosedPrompt rolls back a session tombstoned while its turn was
+// running when persistence fails. It releases the agent and the reservation so
+// the id cannot remain closed and un-resumable forever.
+func (s *Server) discardClosedPrompt(st *sessionState, agent Agent) {
+	st.mu.Lock()
+	closed := st.closed
+	closeAgent := st.closeOnFinish
+	st.closeOnFinish = false
+	st.mu.Unlock()
+	if !closed {
+		return
+	}
+	if closeAgent && agent != nil {
+		agent.Close()
+	}
+	s.mu.Lock()
+	if s.sessions[st.id] == st {
+		delete(s.sessions, st.id)
+	}
+	s.mu.Unlock()
+}
+
+// finishPromptSession releases a session tombstoned while its turn was running.
+// It runs after persistence, so a close cannot race a late transcript append or
+// let a second writer resume the session before the first handler has finished.
+func (s *Server) finishPromptSession(st *sessionState, agent Agent) {
+	st.mu.Lock()
+	closeAgent := st.closeOnFinish
+	st.closeOnFinish = false
+	st.mu.Unlock()
+	if !closeAgent {
+		return
+	}
+	if agent != nil {
+		agent.Close()
+	}
+	s.mu.Lock()
+	if s.sessions[st.id] == st {
+		delete(s.sessions, st.id)
+	}
+	s.mu.Unlock()
 }
 
 // ownerOf reports which connection holds a live session, or nil.
@@ -922,7 +1179,10 @@ func (s *Server) permissionGate(st *sessionState) agentcore.BeforeToolCallFunc {
 		if !trust.SideEffectTools[call.Name] {
 			return nil
 		}
-		if s.trust == nil || s.trust.IsTrusted(st.cwd) {
+		st.mu.Lock()
+		approved := st.alwaysApproved
+		st.mu.Unlock()
+		if approved || s.trust == nil || s.trust.IsTrusted(st.cwd) {
 			return nil
 		}
 		// A cancelled turn must not wait for an answer that may never come.
@@ -939,6 +1199,7 @@ func (s *Server) permissionGate(st *sessionState) agentcore.BeforeToolCallFunc {
 		req := hostapi.PermissionRequest{
 			SessionID: st.id,
 			RequestID: id,
+			TurnID:    st.turnID,
 			ToolName:  call.Name,
 			Summary:   trust.ToolCallSummary(call),
 		}
@@ -958,8 +1219,10 @@ func (s *Server) permissionGate(st *sessionState) agentcore.BeforeToolCallFunc {
 		select {
 		case ans := <-ch:
 			if ans.approve {
-				if ans.always && s.trust != nil {
-					s.trust.SetSessionTrust(st.cwd)
+				if ans.always {
+					st.mu.Lock()
+					st.alwaysApproved = true
+					st.mu.Unlock()
 				}
 				return nil
 			}

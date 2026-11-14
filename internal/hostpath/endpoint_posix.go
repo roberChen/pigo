@@ -105,6 +105,19 @@ func IsEndpointInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE)
 // socket file itself, which a crashed host does not remove.
 func socketArtifact(dir string) []string { return []string{SocketPath(dir)} }
 
+// CanCleanEndpoint reports whether a failed probe proves the endpoint is stale.
+// Only a missing socket or an explicit connection refusal is safe to remove;
+// timeouts, permission errors and transient failures must not delete a live
+// listener's path.
+func CanCleanEndpoint(endpoint string) bool {
+	conn, err := net.DialTimeout("unix", endpoint, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return false
+	}
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
 // CleanEndpoint removes a stale endpoint left behind by a crashed host. A live
 // host is not affected: Listen calls this only after Probe said nobody answers.
 func CleanEndpoint(endpoint string) { _ = os.Remove(endpoint) }

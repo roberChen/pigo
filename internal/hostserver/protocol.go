@@ -5,7 +5,7 @@
 // sides of the socket cannot drift: a change in hostapi is a change here.
 package hostserver
 
-import "github.com/smallnest/pigo/internal/hostapi"
+import "github.com/roberChen/pigo/internal/hostapi"
 
 // Envelope and its error type.
 type envelope = hostapi.Envelope

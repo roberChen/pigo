@@ -21,12 +21,12 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/smallnest/pigo/internal/cli/run"
-	"github.com/smallnest/pigo/internal/diag"
-	"github.com/smallnest/pigo/internal/hostclient"
-	"github.com/smallnest/pigo/internal/hostpath"
-	"github.com/smallnest/pigo/internal/hostserver"
-	"github.com/smallnest/pigo/internal/trust"
+	"github.com/roberChen/pigo/internal/cli/run"
+	"github.com/roberChen/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/hostclient"
+	"github.com/roberChen/pigo/internal/hostpath"
+	"github.com/roberChen/pigo/internal/hostserver"
+	"github.com/roberChen/pigo/internal/trust"
 )
 
 // ServeOptions is the resolved configuration for `pigo serve`.
@@ -38,6 +38,9 @@ type ServeOptions struct {
 	// Approve pre-grants session trust for the launch directory, mirroring
 	// --approve: side-effect tools then skip the permission prompt.
 	Approve bool
+	// PermissionTimeout bounds how long a tool permission request may wait for
+	// its owning client. Zero waits until answer, cancel or disconnect.
+	PermissionTimeout time.Duration
 	// Build is reported to clients.
 	Build string
 	// Factory assembles the agent behind each session. Required.
@@ -107,8 +110,9 @@ func runStart(opts ServeOptions, out, errOut io.Writer) int {
 	srv, err := hostserver.NewServer(hostserver.Config{
 		Dir:     dir,
 		Factory: opts.Factory,
-		Trust:   mgr,
-		Daemon:  false,
+		Trust:             mgr,
+		PermissionTimeout: opts.PermissionTimeout,
+		Daemon:            false,
 		Build:   opts.Build,
 	})
 	if err != nil {
