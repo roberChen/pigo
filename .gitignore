@@ -43,6 +43,7 @@ config.toml
 
 # goreleaser output
 /dist/
+/e2e-results/
 .graph_state
 graph.html
 

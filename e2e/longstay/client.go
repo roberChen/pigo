@@ -1,0 +1,402 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/roberChen/pigo/internal/hostapi"
+	"github.com/roberChen/pigo/internal/hostclient"
+)
+
+// turnOutcome is the result of one asynchronous prompt.
+type turnOutcome struct {
+	result hostapi.PromptResult
+	err    error
+}
+
+// clientState is one independent UI lifecycle. Prompt execution, event delivery
+// and connection loss are all asynchronous; the state machine never waits for a
+// turn to finish before allowing an exit or reconnect.
+type clientState struct {
+	runner *runner
+	id     int
+	rng    *rand.Rand
+	cwd    string
+
+	mu          sync.Mutex
+	client      *hostclient.Client
+	sessionID   string
+	connected   bool
+	everJoined  bool
+	needsResume bool
+	observed    bool
+	running     bool
+	exitAt      time.Time
+	reconnectAt time.Time
+	nextPrompt  time.Time
+	outcomes    chan turnOutcome
+	cancel      context.CancelFunc
+	turn        int
+	expected    string
+
+	seen    map[string]uint64
+	missing map[string]map[uint64]bool
+}
+
+// newClientState allocates a client slot with an isolated workspace and RNG.
+func newClientState(r *runner, id int) *clientState {
+	cwd := filepath.Join(r.workDir, fmt.Sprintf("client-%03d", id))
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		r.recordProtocol("create_client_workspace", err)
+	}
+	return &clientState{
+		runner:   r,
+		id:       id,
+		rng:      rand.New(rand.NewSource(r.cfg.Seed + int64(id)*7919)),
+		cwd:      cwd,
+		outcomes: make(chan turnOutcome, 1),
+		seen:     make(map[string]uint64),
+		missing:  make(map[string]map[uint64]bool),
+	}
+}
+
+// run drives this client until the harness stops.
+func (s *clientState) run(ctx context.Context) {
+	defer s.runner.clients.Done()
+	ticker := time.NewTicker(s.runner.cfg.ActionInterval)
+	defer ticker.Stop()
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.exit("run complete")
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case outcome := <-s.outcomes:
+			s.handleOutcome(outcome)
+		case <-ticker.C:
+			s.step()
+		}
+	}
+}
+
+// step performs at most one lifecycle transition.
+func (s *clientState) step() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.client == nil {
+		if now.Before(s.reconnectAt) {
+			return
+		}
+		s.connect()
+		return
+	}
+	if now.After(s.exitAt) {
+		s.exit("lifetime elapsed")
+		return
+	}
+	if s.sessionID == "" {
+		s.createSession()
+		return
+	}
+	if s.running {
+		return
+	}
+	if s.needsResume {
+		s.resume()
+		return
+	}
+	if now.After(s.nextPrompt) {
+		s.startPrompt()
+	}
+}
+
+// connect establishes a fresh host connection and installs event callbacks
+// before resuming, so live events cannot be missed during the handshake.
+func (s *clientState) connect() {
+	client, err := hostclient.Connect(hostclient.Options{
+		Dir: s.runner.homeDir, Client: fmt.Sprintf("longstay-%03d", s.id),
+		CallTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		s.reconnectAt = time.Now().Add(s.delay(s.runner.cfg.MinReconnectDelay, s.runner.cfg.MaxReconnectDelay))
+		s.runner.metrics.transportErrors.Add(1)
+		s.runner.log.write("connect_error", map[string]any{"client": s.id, "error": err.Error()})
+		return
+	}
+	s.client = client
+	s.client.OnEvent("", s.onEvent)
+	s.client.OnEvent(hostapi.EventPermission, s.onPermission)
+	s.client.OnEvent(hostapi.EventQueueOverflow, func(hostapi.Envelope) {
+		s.runner.metrics.queueOverflows.Add(1)
+	})
+	s.connected = true
+	if s.everJoined {
+		s.runner.metrics.reconnects.Add(1)
+	} else {
+		s.everJoined = true
+	}
+	s.runner.metrics.clientsStarted.Add(1)
+	countPeak(&s.runner.metrics.peakClients, s.runner.connectedClients.Add(1))
+	s.needsResume = s.sessionID != ""
+	s.exitAt = time.Now().Add(s.delay(s.runner.cfg.MinClientLifetime, s.runner.cfg.MaxClientLifetime))
+	s.runner.log.write("client_connected", map[string]any{"client": s.id, "session": s.sessionID})
+}
+
+// exit closes the current connection without waiting for the turn. The host may
+// continue running it; a later resume is what restores observation and writing.
+func (s *clientState) exit(reason string) {
+	if s.client == nil {
+		return
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	_ = s.client.Close()
+	s.client = nil
+	s.connected = false
+	s.running = false
+	s.cancel = nil
+	s.reconnectAt = time.Now().Add(s.delay(s.runner.cfg.MinReconnectDelay, s.runner.cfg.MaxReconnectDelay))
+	s.runner.connectedClients.Add(-1)
+	s.runner.log.write("client_exited", map[string]any{"client": s.id, "session": s.sessionID, "reason": reason})
+}
+
+// createSession starts a conversation in this client's own directory.
+func (s *clientState) createSession() {
+	info, err := s.client.CreateSession(s.cwd, "mock-chat", fmt.Sprintf("longstay-%03d", s.id))
+	if err != nil {
+		s.runner.recordProtocol("session_create", err)
+		return
+	}
+	s.sessionID = info.ID
+	s.needsResume = false
+	s.observed = false
+	s.turn = 0
+	s.nextPrompt = time.Now()
+	s.runner.log.write("session_created", map[string]any{"client": s.id, "session": info.ID, "cwd": s.cwd})
+}
+
+// resume inspects an existing session. Running sessions are observed only;
+// idle sessions are adopted and can receive the next prompt.
+func (s *clientState) resume() {
+	rr, err := s.client.Resume(s.sessionID)
+	if err != nil {
+		if isCode(err, hostapi.CodeNotFound) {
+			// A session that never persisted a turn has no file to resume.
+			s.sessionID = ""
+			return
+		}
+		if isCode(err, hostapi.CodeBusy) {
+			// Final persistence and tombstone removal race with turn_end.
+			s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+			return
+		}
+		s.runner.recordProtocol("session_resume", err)
+		return
+	}
+	s.replay(rr.Events)
+	if rr.EventsTruncated {
+		s.runner.metrics.replayTruncated.Add(1)
+	}
+	if rr.Session.Running {
+		s.observed = true
+		s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+		return
+	}
+	s.observed = false
+	s.needsResume = false
+	s.runner.metrics.adoptions.Add(1)
+	s.nextPrompt = time.Now().Add(s.delay(s.runner.cfg.MinPromptDelay, s.runner.cfg.MaxPromptDelay))
+	s.runner.log.write("session_adopted", map[string]any{"client": s.id, "session": s.sessionID, "messages": len(rr.Messages)})
+}
+
+// startPrompt sends one deterministic turn and returns immediately, allowing a
+// lifetime expiry or disconnect to happen while the provider is still running.
+func (s *clientState) startPrompt() {
+	s.turn++
+	s.expected = fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.runner.metrics.prompts.Load()+1)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.running = true
+	done := s.outcomes
+	s.runner.metrics.prompts.Add(1)
+	s.runner.log.write("prompt_started", map[string]any{"client": s.id, "session": s.sessionID, "turn": s.turn, "prompt": s.expected})
+	go func() {
+		result, err := s.client.Prompt(ctx, s.sessionID, s.expected)
+		done <- turnOutcome{result: result, err: err}
+	}()
+}
+
+// handleOutcome distinguishes expected provider faults and disconnects from
+// actual protocol failures or crossed replies.
+func (s *clientState) handleOutcome(outcome turnOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running = false
+	s.cancel = nil
+	if outcome.err != nil {
+		if s.client == nil {
+			// Expected when exit closes the connection during a turn.
+			return
+		}
+		if isCode(outcome.err, hostapi.CodeBusy) || isCode(outcome.err, hostapi.CodeForbidden) {
+			// Observer-to-owner adoption can race with the old turn's final write.
+			s.needsResume = true
+			s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+			return
+		}
+		s.runner.metrics.transportErrors.Add(1)
+		s.runner.log.write("prompt_transport_error", map[string]any{"client": s.id, "session": s.sessionID, "error": outcome.err.Error()})
+		return
+	}
+	if outcome.result.Error != "" {
+		s.runner.metrics.providerErrors.Add(1)
+		s.runner.log.write("provider_error", map[string]any{"client": s.id, "session": s.sessionID, "turn": s.turn})
+	} else if outcome.result.StopReason == "aborted" {
+		s.runner.metrics.aborted.Add(1)
+	} else {
+		s.runner.metrics.completed.Add(1)
+		if want := "mock:" + s.expected; outcome.result.Text != want {
+			s.runner.recordProtocol("reply_mismatch", fmt.Errorf("got %q, want %q", outcome.result.Text, want))
+		}
+	}
+	s.nextPrompt = time.Now().Add(s.delay(s.runner.cfg.MinPromptDelay, s.runner.cfg.MaxPromptDelay))
+}
+
+// onPermission answers a side-effect request only for this client's session.
+func (s *clientState) onPermission(env hostapi.Envelope) {
+	var req hostapi.PermissionRequest
+	if env.DecodeParams(&req) != nil {
+		return
+	}
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+	if client != nil {
+		_ = client.Decide(req.SessionID, req.RequestID, true, false)
+	}
+}
+
+// onEvent validates event ownership and sequence continuity, including events
+// recovered by a later replay. Missing sequence numbers are filled out of order.
+func (s *clientState) onEvent(env hostapi.Envelope) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordEvent(env)
+}
+
+// recordEvent is called with s.mu held, by either a live callback or replay.
+func (s *clientState) recordEvent(env hostapi.Envelope) {
+	if env.Event != hostapi.EventSession {
+		return
+	}
+	var ev hostapi.SessionEvent
+	if env.DecodeParams(&ev) != nil {
+		s.runner.recordProtocol("decode_session_event", errors.New("invalid session event"))
+		return
+	}
+	if s.sessionID != "" && ev.SessionID != s.sessionID {
+		s.runner.recordProtocol("cross_session_event", fmt.Errorf("client %d got %s, own %s", s.id, ev.SessionID, s.sessionID))
+		return
+	}
+	if ev.TurnID == "" || ev.Seq == 0 {
+		return
+	}
+	previous := s.seen[ev.TurnID]
+	if ev.Seq > previous {
+		if previous > 0 && ev.Seq > previous+1 {
+			if s.missing[ev.TurnID] == nil {
+				s.missing[ev.TurnID] = make(map[uint64]bool)
+			}
+			for seq := previous + 1; seq < ev.Seq; seq++ {
+				s.missing[ev.TurnID][seq] = true
+			}
+		}
+		s.seen[ev.TurnID] = ev.Seq
+	} else {
+		s.runner.metrics.duplicates.Add(1)
+	}
+	if missing := s.missing[ev.TurnID]; missing != nil {
+		delete(missing, ev.Seq)
+		if len(missing) == 0 {
+			delete(s.missing, ev.TurnID)
+		}
+	}
+	if ev.Type == hostapi.SessionEventTurnEnd && s.observed {
+		s.needsResume = true
+	}
+}
+
+// replay feeds retained events through the same continuity checks as live ones.
+func (s *clientState) replay(events []hostapi.SessionEvent) {
+	for _, ev := range events {
+		s.recordEvent(hostapi.Envelope{Event: hostapi.EventSession, Params: mustJSON(ev)})
+	}
+}
+
+// verifyReconnect confirms that a session with persisted history is resumable
+// and that every sequence gap seen by this client has been repaired.
+func (s *clientState) verifyReconnect() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID == "" || s.turn == 0 {
+		return
+	}
+	if s.client == nil {
+		s.connect()
+	}
+	if s.client == nil {
+		s.runner.recordProtocol("final_reconnect", errors.New("could not reconnect"))
+		return
+	}
+	rr, err := s.client.Resume(s.sessionID)
+	if err != nil {
+		if !isCode(err, hostapi.CodeBusy) {
+			s.runner.recordProtocol("final_resume", err)
+		}
+	} else {
+		s.replay(rr.Events)
+		if rr.EventsTruncated {
+			s.runner.metrics.replayTruncated.Add(1)
+		}
+	}
+	missing := 0
+	for _, seqs := range s.missing {
+		missing += len(seqs)
+	}
+	if missing != 0 {
+		s.runner.metrics.missingEvents.Add(int64(missing))
+		s.runner.recordProtocol("unrepaired_event_gap", fmt.Errorf("client %d has %d missing events", s.id, missing))
+	}
+}
+
+// delay chooses a duration uniformly in [min,max].
+func (s *clientState) delay(min, max time.Duration) time.Duration {
+	if max <= min {
+		return min
+	}
+	return min + time.Duration(s.rng.Int63n(int64(max-min)+1))
+}
+
+// isCode reports whether err is a protocol error with the given code.
+func isCode(err error, code int) bool {
+	var protocolError *hostapi.Error
+	return errors.As(err, &protocolError) && protocolError.Code == code
+}
+
+// mustJSON is used only for locally replayed values known to be serializable.
+func mustJSON(value any) []byte {
+	data, _ := json.Marshal(value)
+	return data
+}
