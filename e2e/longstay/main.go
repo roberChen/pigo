@@ -89,6 +89,9 @@ func newRunner(cfg Config) (*runner, error) {
 			return nil, err
 		}
 	}
+	if err := writeWorkspaceFixtures(r.workDir, cfg.WorkspacePool, cfg.MaxClients); err != nil {
+		return nil, err
+	}
 	log, err := openEventLog(filepath.Join(output, "events.jsonl"))
 	if err != nil {
 		return nil, err
@@ -98,7 +101,11 @@ func newRunner(cfg Config) (*runner, error) {
 		_ = log.Close()
 		return nil, err
 	}
-	mock, err := startMockLLM(cfg.LLMLatency, cfg.LLMJitter, cfg.LLMErrorRate, log)
+	mock, err := startMockLLM(cfg.LLMLatency, cfg.LLMJitter, cfg.LLMErrorRate, validateOptions{
+		Model:  "mock-chat",
+		APIKey: "longstay",
+		Tools:  cfg.toolsEnabled(),
+	}, log)
 	if err != nil {
 		_ = log.Close()
 		return nil, err
@@ -190,7 +197,10 @@ func (r *runner) startHost(ctx context.Context) error {
 		"serve", "--dir", r.homeDir,
 		"--provider", "openai", "-m", "mock-chat",
 		"--base-url", r.mock.URL(), "-k", "longstay",
-		"--no-skills", "--no-tools",
+		"--no-skills",
+	}
+	if !r.cfg.toolsEnabled() {
+		args = append(args, "--no-tools")
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = r.workDir
@@ -330,6 +340,16 @@ func (r *runner) printSummaries(ctx context.Context) {
 	}
 }
 
+// injectedFailure reports whether the mock answered one of this turn's requests
+// with a deliberate 500. It is the only evidence that separates an expected
+// provider fault from a real defect in the host.
+func (r *runner) injectedFailure(token string) bool { return r.mock.injectedFailure(token) }
+
+// toolsEnabled reports whether this run advertises tools. The host flags, the
+// mock's validation and every client's plan derive from this one answer, so the
+// three can never disagree about a turn's expected shape.
+func (r *runner) toolsEnabled() bool { return r.cfg.toolsEnabled() }
+
 // recordProtocol marks a reliability violation with structured evidence.
 func (r *runner) recordProtocol(kind string, err error) {
 	r.metrics.protocolErrors.Add(1)
@@ -397,34 +417,42 @@ func (r *runner) finish(ok bool) int {
 func (r *runner) summary(ok bool) map[string]any {
 	m := &r.metrics
 	return map[string]any{
-		"pass":              ok,
-		"seed":              r.cfg.Seed,
-		"duration":          r.cfg.Duration.String(),
-		"clientsStarted":    m.clientsStarted.Load(),
-		"peakClients":       m.peakClients.Load(),
-		"reconnects":        m.reconnects.Load(),
-		"adoptions":         m.adoptions.Load(),
-		"prompts":           m.prompts.Load(),
-		"completed":         m.completed.Load(),
-		"aborted":           m.aborted.Load(),
-		"providerErrors":    m.providerErrors.Load(),
-		"protocolErrors":    m.protocolErrors.Load(),
-		"transportErrors":   m.transportErrors.Load(),
-		"hostErrors":        m.hostErrors.Load(),
-		"duplicates":        m.duplicates.Load(),
-		"verifications":     m.verifications.Load(),
-		"verificationSkips": m.verificationSkips.Load(),
-		"missingEvents":     m.missingEvents.Load(),
-		"queueOverflows":    m.queueOverflows.Load(),
-		"replayTruncated":   m.replayTruncated.Load(),
-		"mockRequests":      r.mock.requests.Load(),
-		"mockFailures":      r.mock.failures.Load(),
-		"mockPeakActive":    r.mock.peak.Load(),
-		"startGoroutines":   m.startGoroutines,
-		"endGoroutines":     m.endGoroutines,
-		"startHeapBytes":    m.startHeapBytes,
-		"endHeapBytes":      m.endHeapBytes,
-		"artifacts":         r.outputDir,
+		"pass":                ok,
+		"seed":                r.cfg.Seed,
+		"duration":            r.cfg.Duration.String(),
+		"clientsStarted":      m.clientsStarted.Load(),
+		"peakClients":         m.peakClients.Load(),
+		"reconnects":          m.reconnects.Load(),
+		"adoptions":           m.adoptions.Load(),
+		"prompts":             m.prompts.Load(),
+		"completed":           m.completed.Load(),
+		"aborted":             m.aborted.Load(),
+		"providerErrors":      m.providerErrors.Load(),
+		"protocolErrors":      m.protocolErrors.Load(),
+		"transportErrors":     m.transportErrors.Load(),
+		"hostErrors":          m.hostErrors.Load(),
+		"duplicates":          m.duplicates.Load(),
+		"verifications":       m.verifications.Load(),
+		"verificationSkips":   m.verificationSkips.Load(),
+		"missingEvents":       m.missingEvents.Load(),
+		"queueOverflows":      m.queueOverflows.Load(),
+		"replayTruncated":     m.replayTruncated.Load(),
+		"toolVerifications":   m.toolVerifications.Load(),
+		"degradedResults":     m.degradedResults.Load(),
+		"turnsVerified":       m.turnsVerified.Load(),
+		"turnsUnverified":     m.turnsUnverified.Load(),
+		"turnsDegraded":       m.turnsDegraded.Load(),
+		"transcriptsVerified": m.transcriptsVerified.Load(),
+		"scenario":            r.cfg.Scenario,
+		"workspacePool":       r.cfg.WorkspacePool,
+		"mockRequests":        r.mock.requests.Load(),
+		"mockFailures":        r.mock.failures.Load(),
+		"mockPeakActive":      r.mock.peak.Load(),
+		"startGoroutines":     m.startGoroutines,
+		"endGoroutines":       m.endGoroutines,
+		"startHeapBytes":      m.startHeapBytes,
+		"endHeapBytes":        m.endHeapBytes,
+		"artifacts":           r.outputDir,
 	}
 }
 

@@ -27,9 +27,28 @@ type Config struct {
 	LLMLatency        time.Duration
 	LLMJitter         time.Duration
 	LLMErrorRate      float64
-	OutputDir         string
-	PigoBinary        string
+	// Scenario selects what the run exercises. "normal" gives the host its
+	// read-only tool set so turns include real tool round-trips; "stress" runs
+	// with --no-tools so every turn is a single stage and the host spends its
+	// time on lifecycle churn instead.
+	Scenario string
+	// WorkspacePool, when greater than zero, makes clients share that many
+	// workspaces (two sessions in one directory); 0 gives each client its own.
+	WorkspacePool int
+	OutputDir     string
+	PigoBinary    string
 }
+
+// Scenario names accepted by -scenario.
+const (
+	ScenarioNormal = "normal"
+	ScenarioStress = "stress"
+)
+
+// toolsEnabled reports whether this scenario lets the model call tools. The mock
+// LLM and the clients derive their plans from the same answer, so they must not
+// disagree with the host's flags.
+func (c Config) toolsEnabled() bool { return c.Scenario != ScenarioStress }
 
 // parseConfig reads command-line options. The defaults intentionally create
 // frequent reconnects while leaving enough time for real turns to complete.
@@ -50,6 +69,8 @@ func parseConfig() Config {
 	flag.DurationVar(&cfg.LLMLatency, "llm-latency", 25*time.Millisecond, "base latency for every mock LLM request")
 	flag.DurationVar(&cfg.LLMJitter, "llm-jitter", 75*time.Millisecond, "additional random latency for every mock LLM request")
 	flag.Float64Var(&cfg.LLMErrorRate, "llm-error-rate", 0.01, "mock HTTP 500 rate, from 0 to 1")
+	flag.StringVar(&cfg.Scenario, "scenario", ScenarioNormal, "normal (read-only tools and multi-round turns) or stress (no tools, lifecycle churn only)")
+	flag.IntVar(&cfg.WorkspacePool, "workspace-pool", 0, "clients per workspace: >0 shares that many directories, 0 gives each client its own")
 	flag.StringVar(&cfg.OutputDir, "output", "", "artifact directory (default e2e-results/longstay-<timestamp>)")
 	flag.StringVar(&cfg.PigoBinary, "pigo", "", "path to an existing pigo binary; default builds ./cmd/pigo into the artifact directory")
 	flag.Parse()
@@ -81,6 +102,12 @@ func (c Config) validate() error {
 	}
 	if c.LLMErrorRate < 0 || c.LLMErrorRate > 1 {
 		return errors.New("llm-error-rate must be between 0 and 1")
+	}
+	if c.Scenario != ScenarioNormal && c.Scenario != ScenarioStress {
+		return fmt.Errorf("scenario %q must be %q or %q", c.Scenario, ScenarioNormal, ScenarioStress)
+	}
+	if c.WorkspacePool < 0 {
+		return errors.New("workspace-pool must be non-negative")
 	}
 	return nil
 }

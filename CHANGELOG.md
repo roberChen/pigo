@@ -20,6 +20,27 @@ interactive REPL/TUI.
   machine-readable summary, and exits non-zero on protocol, transport, host or
   unrepaired-event failures. It is intentionally a command, not a Go test, so
   runs can last hours with bounded artifacts.
+- **The harness verifies what a turn actually produced, not just that it ended.**
+  The mock's reply is a pure function of a marker token in the prompt, so the
+  mock and every client derive the same plan independently: thinking, text and
+  zero-to-two rounds of read/grep/find calls. Clients compare the authoritative
+  `turn_end` messages and verify each tool result against a marker only that
+  workspace file contains, proving the call really ran; the final reconnect
+  re-checks the persisted transcript stage by stage. The mock also rejects any
+  Chat Completions request that violates the wire contract (unknown fields,
+  unadvertised tools, broken call/result pairing, duplicate `tool_call_id`,
+  batch gaps) with HTTP 400, turning a host-side regression into evidence
+  instead of a silently tolerated request.
+- **Interrupted turns are classified instead of blamed on the host.** The mock
+  records which tokens it answered with an injected 500, so the documented
+  repair path (degrade the tool output to an abnormal placeholder, retry once)
+  counts as an expected `turnsDegraded` outcome. A provider error the harness did
+  not inject is reported as `unexpected_provider_error`, which it is.
+- **`-scenario normal|stress`** selects read-only tools with multi-round turns or
+  `--no-tools` lifecycle churn, and **`-workspace-pool N`** makes clients share
+  N workspaces so two sessions in one directory are exercised. Summary metrics
+  gained `toolVerifications`, `turnsVerified`, `turnsUnverified`, `turnsDegraded`,
+  `degradedResults` and `transcriptsVerified`.
 
 ### Fixed
 - **Host sessions now preserve isolation during reconnects, permission grants and

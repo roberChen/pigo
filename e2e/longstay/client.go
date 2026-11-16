@@ -8,9 +8,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/hostapi"
 	"github.com/roberChen/pigo/internal/hostclient"
 )
@@ -20,11 +22,34 @@ import (
 // before the abandoned turn's goroutine returns, and without the token that late
 // result would be attributed to (and corrupt the state of) the newer attempt.
 type turnOutcome struct {
-	attempt  int
-	expected string
-	client   *hostclient.Client
-	result   hostapi.PromptResult
-	err      error
+	attempt int
+	token   string
+	client  *hostclient.Client
+	result  hostapi.PromptResult
+	err     error
+}
+
+// turnTrace is the stream/plan verification state of one attempt. The mock's
+// reply is a pure function of the prompt token, so the client can check the
+// authoritative turn_end messages and tool results it receives against the plan
+// it derives for the same token. Nothing is shared between the two processes.
+type turnTrace struct {
+	token string
+	// stage is how many assistant messages matched their planned shape, in order.
+	stage int
+	// turnID/maxSeq dedupe replay: a reconnect re-delivers events this trace has
+	// already counted, and counting them twice would look like an extra stage.
+	turnID string
+	maxSeq uint64
+	// pending maps a tool call id of the current stage to the call it must be.
+	pending map[string]plannedCall
+	// results buffers tool_end events that arrived before the turn_end naming
+	// their calls: the executor emits each tool's result as it completes, which
+	// is one event ahead of the TurnEndEvent carrying the assistant message, so
+	// a result can never be matched to a plan at the moment it arrives.
+	results map[string]hostapi.SessionEvent
+	// active is false once the run settled (agent_end) or the client exited.
+	active bool
 }
 
 // clientState is one independent UI lifecycle. Prompt execution, event delivery
@@ -53,6 +78,9 @@ type clientState struct {
 	// attempt numbers prompts across reconnects. A late outcome whose attempt no
 	// longer matches is discarded instead of being applied to a newer turn.
 	attempt int
+	// trace is the in-flight attempt's verification state, or nil when this
+	// client is only observing a turn it did not start.
+	trace *turnTrace
 
 	// pending holds finished prompts until the loop drains them, and outcomeSignal
 	// wakes it. A prompt goroutine must never block on delivery (the loop may have
@@ -69,7 +97,7 @@ type clientState struct {
 
 // newClientState allocates a client slot with an isolated workspace and RNG.
 func newClientState(r *runner, id int) *clientState {
-	cwd := filepath.Join(r.workDir, fmt.Sprintf("client-%03d", id))
+	cwd := r.workspaceFor(id)
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		r.recordProtocol("create_client_workspace", err)
 	}
@@ -208,6 +236,13 @@ func (s *clientState) exit(reason string) {
 	s.connected = false
 	s.running = false
 	s.cancel = nil
+	// The attempt's events can no longer arrive on this connection. Its trace is
+	// dropped rather than merged into whatever the next lifetime observes, and
+	// pending gaps are forgotten: a turn this client walked away from cannot be
+	// repaired by a replay it is not entitled to, so holding the gap against the
+	// host would blame a disconnect on the server.
+	s.trace = nil
+	clear(s.missing)
 	s.reconnectAt = time.Now().Add(s.delay(s.runner.cfg.MinReconnectDelay, s.runner.cfg.MaxReconnectDelay))
 	s.runner.connectedClients.Add(-1)
 	s.runner.log.write("client_exited", map[string]any{"client": s.id, "session": s.sessionID, "reason": reason})
@@ -257,14 +292,16 @@ func (s *clientState) resume() {
 	}
 	s.observed = false
 	s.needsResume = false
+	// A resumed idle session keeps its history; the plan is keyed by the token in
+	// each user prompt, so the next turn verifies exactly like the first one did.
 	s.runner.metrics.adoptions.Add(1)
 	s.nextPrompt = time.Now().Add(s.delay(s.runner.cfg.MinPromptDelay, s.runner.cfg.MaxPromptDelay))
 	s.runner.log.write("session_adopted", map[string]any{"client": s.id, "session": s.sessionID, "messages": len(rr.Messages)})
 }
 
-// startPrompt sends one deterministic turn and returns immediately, allowing a
-// lifetime expiry or disconnect to happen while the provider is still running.
-// It is called with s.mu held.
+// startPrompt sends one random prompt carrying a marker token and returns
+// immediately, allowing a lifetime expiry or disconnect to happen while the
+// provider is still running. It is called with s.mu held.
 func (s *clientState) startPrompt() {
 	s.turn++
 	s.attempt++
@@ -272,18 +309,22 @@ func (s *clientState) startPrompt() {
 	// cleared by exit() under the same mutex, and reading them from the goroutine
 	// would both race and let a reply be sent on the next attempt's connection.
 	client, session := s.client, s.sessionID
-	outcome := turnOutcome{
-		attempt:  s.attempt,
-		expected: fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.runner.metrics.prompts.Load()+1),
-		client:   client,
+	token := fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.attempt)
+	prompt := promptFor(s.rng, token)
+	outcome := turnOutcome{attempt: s.attempt, token: token, client: client}
+	s.trace = &turnTrace{
+		token:   token,
+		pending: make(map[string]plannedCall),
+		results: make(map[string]hostapi.SessionEvent),
+		active:  true,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.running = true
 	s.runner.metrics.prompts.Add(1)
-	s.runner.log.write("prompt_started", map[string]any{"client": s.id, "session": session, "turn": s.turn, "prompt": outcome.expected})
+	s.runner.log.write("prompt_started", map[string]any{"client": s.id, "session": session, "turn": s.turn, "token": token})
 	go func() {
-		outcome.result, outcome.err = client.Prompt(ctx, session, outcome.expected)
+		outcome.result, outcome.err = client.Prompt(ctx, session, prompt)
 		s.deliverOutcome(outcome)
 	}()
 }
@@ -318,15 +359,28 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		return
 	}
 	if outcome.result.Error != "" {
-		s.runner.metrics.providerErrors.Add(1)
-		s.runner.log.write("provider_error", map[string]any{"client": s.id, "session": s.sessionID, "turn": s.turn})
+		// Only the mock knows whether this failure was the one it injected. An
+		// unexpected provider error is evidence of a defect, not a scenario.
+		if s.runner.injectedFailure(outcome.token) {
+			s.runner.metrics.providerErrors.Add(1)
+			s.runner.log.write("provider_error", map[string]any{"client": s.id, "session": s.sessionID, "turn": s.turn, "injected": true})
+		} else {
+			s.runner.recordProtocol("unexpected_provider_error", fmt.Errorf("token %s: %s", outcome.token, outcome.result.Error))
+		}
 	} else if outcome.result.StopReason == "aborted" {
 		s.runner.metrics.aborted.Add(1)
+	} else if s.runner.injectedFailure(outcome.token) {
+		// The turn saw a deliberate 500. pigo's repair path may have degraded a
+		// tool result and finished on a shorter path than the plan describes, so
+		// the reply cannot be compared against the full plan; the verified stages
+		// and the persisted transcript still are.
+		s.runner.metrics.turnsDegraded.Add(1)
+		s.runner.log.write("turn_degraded", map[string]any{"client": s.id, "session": s.sessionID, "token": outcome.token})
 	} else {
 		s.runner.metrics.completed.Add(1)
-		// Compare against this attempt's prompt, not the state field: a crossed
-		// reply is exactly what this check exists to catch.
-		if want := "mock:" + outcome.expected; outcome.result.Text != want {
+		// The reply must be exactly what the plan for this attempt's token says,
+		// not what the state field claims: a crossed reply is what this catches.
+		if want := expectedFinalText(outcome.token, s.runner.toolsEnabled()); outcome.result.Text != want {
 			s.runner.recordProtocol("reply_mismatch", fmt.Errorf("got %q, want %q", outcome.result.Text, want))
 		}
 	}
@@ -383,6 +437,9 @@ func (s *clientState) recordEvent(env hostapi.Envelope) {
 			}
 		}
 		s.seen[ev.TurnID] = ev.Seq
+		// Only a newly seen event is verified: a replay re-delivers events this
+		// client already counted.
+		s.verifyEvent(ev)
 	} else {
 		s.runner.metrics.duplicates.Add(1)
 	}
@@ -392,9 +449,163 @@ func (s *clientState) recordEvent(env hostapi.Envelope) {
 			delete(s.missing, ev.TurnID)
 		}
 	}
-	if ev.Type == hostapi.SessionEventTurnEnd && s.observed {
+	if ev.Type == hostapi.SessionEventAgentEnd && s.observed {
+		// The run settled. agent_end, not turn_end, is the settle point: turn_end
+		// fires for every assistant message, including the ones inside a tool loop.
 		s.needsResume = true
 	}
+}
+
+// verifyEvent checks one newly seen event against the in-flight attempt's plan.
+// It is called with s.mu held.
+func (s *clientState) verifyEvent(ev hostapi.SessionEvent) {
+	t := s.trace
+	if t == nil || !t.active {
+		return
+	}
+	if t.turnID == "" {
+		t.turnID = ev.TurnID
+	} else if t.turnID != ev.TurnID {
+		return // a later attempt's events; the trace belongs to an older turn
+	}
+	if ev.Seq <= t.maxSeq {
+		return
+	}
+	t.maxSeq = ev.Seq
+	switch ev.Type {
+	case hostapi.SessionEventTurnEnd:
+		if ev.Message != nil {
+			s.verifyStage(t, *ev.Message)
+		}
+	case hostapi.SessionEventToolEnd:
+		s.bufferToolResult(t, ev)
+	case hostapi.SessionEventAgentEnd:
+		s.finishTrace(t)
+	}
+}
+
+// verifyStage compares one assistant message with the plan's next stage: its
+// thinking, its text, and the names and arguments of its tool calls.
+func (s *clientState) verifyStage(t *turnTrace, msg agentcore.AssistantMessage) {
+	if msg.StopReason == agentcore.StopReasonAborted || msg.StopReason == agentcore.StopReasonError {
+		// A cancelled or failed turn legitimately stops before the plan's end.
+		return
+	}
+	if s.runner.toolsEnabled() && msg.StopReason != agentcore.StopReasonToolUse && t.stage < planRounds(t.token) {
+		if s.runner.injectedFailure(t.token) {
+			// The repair path degraded this turn's output; it is allowed to stop
+			// before the plan's round count.
+			return
+		}
+		s.runner.recordProtocol("stage_missing_tool_calls", fmt.Errorf("token %s stage %d stopped with %q", t.token, t.stage, msg.StopReason))
+		return
+	}
+	want := planFor(t.token, t.stage, s.runner.toolsEnabled())
+	gotText := agentcore.ContentToText(msg.Content)
+	gotThinking := agentcore.ThinkingText(msg.Content)
+	if gotText != want.Text {
+		s.runner.recordProtocol("stage_text_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", t.token, t.stage, gotText, want.Text))
+		return
+	}
+	if gotThinking != want.Thinking {
+		s.runner.recordProtocol("stage_thinking_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", t.token, t.stage, gotThinking, want.Thinking))
+		return
+	}
+	calls := msg.ToolCalls()
+	if len(calls) != len(want.Calls) {
+		s.runner.recordProtocol("stage_call_count_mismatch", fmt.Errorf("token %s stage %d: got %d calls, want %d", t.token, t.stage, len(calls), len(want.Calls)))
+		return
+	}
+	t.pending = make(map[string]plannedCall, len(calls))
+	for i, call := range calls {
+		planned := want.Calls[i]
+		if call.Name != planned.Name || string(call.Arguments) != planned.Arguments {
+			s.runner.recordProtocol("stage_call_mismatch", fmt.Errorf("token %s stage %d call %d: got %s%s, want %s%s",
+				t.token, t.stage, i, call.Name, call.Arguments, planned.Name, planned.Arguments))
+			return
+		}
+		t.pending[call.ID] = planned
+		// The result normally arrived while this message was still streaming.
+		if ev, ok := t.results[call.ID]; ok {
+			delete(t.pending, call.ID)
+			delete(t.results, call.ID)
+			s.checkToolResult(t, call.ID, planned, ev)
+		}
+	}
+	if len(want.Calls) > 0 {
+		s.runner.log.write("stage_verified", map[string]any{"client": s.id, "token": t.token, "stage": t.stage, "calls": len(want.Calls)})
+	}
+	t.stage++
+}
+
+// bufferToolResult holds a completed call's result until the turn_end that names
+// the call arrives; the ordering is fixed by the runtime (see turnTrace.results).
+// A result for a call already planned is verified at once, which keeps verification
+// correct if that ordering ever changes.
+func (s *clientState) bufferToolResult(t *turnTrace, ev hostapi.SessionEvent) {
+	t.results[ev.ToolCallID] = ev
+	if planned, ok := t.pending[ev.ToolCallID]; ok {
+		delete(t.pending, ev.ToolCallID)
+		delete(t.results, ev.ToolCallID)
+		s.checkToolResult(t, ev.ToolCallID, planned, ev)
+	}
+}
+
+// checkToolResult proves a planned call really executed inside a workspace: the
+// result must carry the marker that only that file contains.
+//
+// The one tolerated error is a tool result the runtime itself degraded into an
+// abnormal placeholder after the provider rejected the request: that is the
+// documented recovery path for an injected upstream failure (the harness runs
+// with a nonzero -llm-error-rate on purpose), not a defect in the call. The
+// original output is kept ahead of the placeholder, so the marker check still
+// proves the tool ran.
+func (s *clientState) checkToolResult(t *turnTrace, callID string, planned plannedCall, ev hostapi.SessionEvent) {
+	degraded := strings.Contains(ev.Result, agentcore.AbnormalToolResultMarker)
+	if ev.IsError && !degraded {
+		s.runner.recordProtocol("tool_call_error", fmt.Errorf("token %s tool %s: %s", t.token, ev.ToolName, strings.TrimSpace(ev.Result)))
+		return
+	}
+	if !strings.Contains(ev.Result, planned.Expect) {
+		s.runner.recordProtocol("tool_result_mismatch", fmt.Errorf("token %s tool %s: result %q lacks %q", t.token, ev.ToolName, truncate(ev.Result, 160), planned.Expect))
+		return
+	}
+	if degraded {
+		s.runner.metrics.degradedResults.Add(1)
+	}
+	s.runner.metrics.toolVerifications.Add(1)
+}
+
+// finishTrace closes the attempt's verification and counts it when every planned
+// stage was seen. A turn cut short by an exit is not a failure: the client's own
+// `aborted`/`stale_outcome` handling accounts for those separately.
+func (s *clientState) finishTrace(t *turnTrace) {
+	t.active = false
+	for callID, planned := range t.pending {
+		if ev, ok := t.results[callID]; ok {
+			s.checkToolResult(t, callID, planned, ev)
+			continue
+		}
+		s.runner.metrics.turnsUnverified.Add(1)
+		s.runner.log.write("tool_result_missing", map[string]any{"client": s.id, "token": t.token, "call": callID})
+	}
+	stages := 1
+	if s.runner.toolsEnabled() {
+		stages += planRounds(t.token)
+	}
+	if t.stage == stages {
+		s.runner.metrics.turnsVerified.Add(1)
+		return
+	}
+	if s.runner.injectedFailure(t.token) {
+		// A turn cut short by the harness's own 500 is an expected outcome; it is
+		// counted, not treated as an unexplained incomplete turn.
+		s.runner.metrics.turnsDegraded.Add(1)
+		s.runner.log.write("turn_short_after_injection", map[string]any{"client": s.id, "token": t.token, "stages": t.stage, "want": stages})
+		return
+	}
+	s.runner.metrics.turnsUnverified.Add(1)
+	s.runner.log.write("turn_incomplete", map[string]any{"client": s.id, "token": t.token, "stages": t.stage, "want": stages})
 }
 
 // replay feeds retained events through the same continuity checks as live ones.
@@ -440,6 +651,10 @@ func (s *clientState) verifyReconnect() {
 		if rr.EventsTruncated {
 			s.runner.metrics.replayTruncated.Add(1)
 		}
+		// The persisted transcript is the authoritative record of the session:
+		// every assistant message in it must still be a planned stage of the
+		// prompt it answers, including the ones from turns this lifetime never saw.
+		s.verifyTranscript(rr.Messages)
 	}
 	missing := 0
 	for _, seqs := range s.missing {
@@ -452,12 +667,69 @@ func (s *clientState) verifyReconnect() {
 	s.runner.log.write("verification_complete", map[string]any{"client": s.id, "session": s.sessionID, "turns": s.turn})
 }
 
+// verifyTranscript re-derives every turn's plan from the markers in the persisted
+// user messages and checks the assistant messages that answer them. It is the
+// end-of-run, authoritative complement to the live event checks.
+func (s *clientState) verifyTranscript(msgs agentcore.MessageList) {
+	var token string
+	stages := 0
+	tools := s.runner.toolsEnabled()
+	for _, m := range msgs {
+		switch msg := m.(type) {
+		case agentcore.UserMessage:
+			token = promptToken(agentcore.ContentToText(msg.Content))
+			stages = 0
+		case agentcore.CompactionMessage:
+			// The checkpoint stands in for the history before it, so nothing
+			// before it can answer a later turn's plan.
+			token, stages = "", 0
+		case agentcore.AssistantMessage:
+			if token == "" {
+				// Not a harness turn (a compacted summary, or a message from a
+				// session this client did not create).
+				continue
+			}
+			if msg.StopReason == agentcore.StopReasonAborted || msg.StopReason == agentcore.StopReasonError {
+				continue
+			}
+			want := planFor(token, stages, tools)
+			if got := agentcore.ContentToText(msg.Content); got != want.Text {
+				s.runner.recordProtocol("transcript_text_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", token, stages, got, want.Text))
+			}
+			if got := agentcore.ThinkingText(msg.Content); got != want.Thinking {
+				s.runner.recordProtocol("transcript_thinking_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", token, stages, got, want.Thinking))
+			}
+			calls := msg.ToolCalls()
+			if len(calls) != len(want.Calls) {
+				s.runner.recordProtocol("transcript_calls_mismatch", fmt.Errorf("token %s stage %d: got %d calls, want %d", token, stages, len(calls), len(want.Calls)))
+			} else {
+				for i, call := range calls {
+					if call.Name != want.Calls[i].Name || string(call.Arguments) != want.Calls[i].Arguments {
+						s.runner.recordProtocol("transcript_call_mismatch", fmt.Errorf("token %s stage %d call %d", token, stages, i))
+					}
+				}
+			}
+			stages++
+		}
+	}
+	s.runner.metrics.transcriptsVerified.Add(1)
+}
+
 // delay chooses a duration uniformly in [min,max].
 func (s *clientState) delay(min, max time.Duration) time.Duration {
 	if max <= min {
 		return min
 	}
 	return min + time.Duration(s.rng.Int63n(int64(max-min)+1))
+}
+
+// truncate shortens s for a log line without splitting a rune.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // isCode reports whether err is a protocol error with the given code.
@@ -470,4 +742,15 @@ func isCode(err error, code int) bool {
 func mustJSON(value any) []byte {
 	data, _ := json.Marshal(value)
 	return data
+}
+
+// workspaceFor maps a client slot onto a workspace directory. With
+// -workspace-pool N, N>0, several clients share one directory, which is the
+// "two sessions in one workspace" case; N=0 gives every client its own.
+func (r *runner) workspaceFor(id int) string {
+	index := id
+	if r.cfg.WorkspacePool > 0 {
+		index = (id-1)%r.cfg.WorkspacePool + 1
+	}
+	return filepath.Join(r.workDir, fmt.Sprintf("client-%03d", index))
 }

@@ -61,3 +61,5 @@ book/*.blg
 book/*.run.xml
 # Figures pre-rendered from SVG by build_pdf.sh (rsvg-convert); source is the .svg
 book/images/*.pdf
+# `go build ./e2e/...` writes the longstay command's binary to the repo root
+/longstay

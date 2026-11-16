@@ -8,7 +8,20 @@
 - 运行中的会话只读恢复并续传事件，turn 结束后恢复写权限；
 - 多客户端并发 prompt、mock LLM 延迟、抖动和可配置 5xx；
 - `turnId` / `seq` 连续性检查、跨会话串流检查、最终回复一致性检查；
+- 工具往返：mock 按确定性计划发出 read/grep/find 调用，客户端校验工具的**真实执行结果**（结果里必须带上只存在于该文件中的标记），从而证明 turn 里的工具调用和回放历史都真实可用；
 - host 健康检查、最终重连验证和优雅关闭。
+
+### 校验模型：一份计划，两个进程各自推导
+
+mock LLM 的回复是 prompt 中标记 token 的纯函数：`[[longstay:<token>]]` 决定这条回复的 thinking、正文、以及 0～2 轮工具调用。客户端从**同一个 token** 独立推导出一份计划（`plan.go`），再拿实际收到的 `turn_end` 消息和工具结果逐阶段比对，因此双方不需要共享任何可变状态：
+
+- 正文/thinking 必须逐字节等于计划，错位或缺字都会记录 `stage_*_mismatch`；
+- 工具调用的名称、参数必须等于计划，工具结果必须包含该文件独有的标记；
+- 最终重连时用**持久化 transcript** 再校验一遍：每条 assistant 消息都必须是它所回答的那条 prompt 的计划阶段。
+
+mock 还会对每个 Chat Completions 请求做严格校验（`validate.go`）：允许的字段集、工具集合、call/result 配对、批次完整性、`tool_call_id` 可重放等。违反契约会返回 HTTP 400 并计为协议错误——这是 host 侧缺陷的直接证据，而不是被 mock 默默容忍。
+
+注入的 500 是**预期故障**：mock 记录自己注入过哪些 token，pigo 的修复路径（把工具输出降级为 abnormal 占位并重试一次）会让该 turn 提前结束，这种情况计入 `turnsDegraded` / `degradedResults`，不会被误判为计划不符。反过来，没有注入却返回错误则记为 `unexpected_provider_error`。
 
 Windows 使用真实命名管道，POSIX 使用真实 unix socket；不会用内存 transport 替代。
 
@@ -47,6 +60,8 @@ go tool longstay -duration 2h -pigo ./pigo.exe
 | `-min-prompt-delay` / `-max-prompt-delay` | `200ms` / `1.5s` | turn 之间的等待范围 |
 | `-llm-latency` / `-llm-jitter` | `25ms` / `75ms` | 每次 LLM 请求的基础延迟和随机增量 |
 | `-llm-error-rate` | `0.01` | mock HTTP 500 比例，属于预期故障，不算协议失败 |
+| `-scenario` | `normal` | `normal` 给 host 只读工具集，turn 包含真实工具往返；`stress` 用 `--no-tools` 跑单阶段 turn，专注生命周期抖动 |
+| `-workspace-pool` | `0` | 大于 0 时让多个客户端共享该数量的工作目录（同一目录里的两个 session）；`0` 表示每个客户端独立目录 |
 | `-summary-interval` | `30s` | 控制台摘要间隔 |
 | `-pigo` | 空 | 使用指定 pigo 二进制；为空则自动构建 |
 
@@ -61,9 +76,9 @@ go tool longstay -duration 2h -pigo ./pigo.exe
 | `server.log` | 真实 pigo host 的 stdout/stderr |
 | `summary.json` | 机器可读最终指标与 `pass` 结果 |
 | `home/` | host 的临时状态目录、session 持久化文件 |
-| `work/client-*` | 各客户端独立工作目录 |
+| `work/client-*` | 各客户端工作目录；启动前预置 `notes.txt` / `log.txt` / `data.txt`，内含工具计划要读的标记 |
 
-摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。
+摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。计划校验另有独立计数：`toolVerifications`（通过标记校验的工具结果）、`turnsVerified` / `turnsUnverified`（按计划完整跑完 / 无法解释的提前结束）、`turnsDegraded` 与 `degradedResults`（由注入 500 引起的预期降级）、`transcriptsVerified`（最终 transcript 校验次数）。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。
 
 **安全提示：** 产物目录中的 `home/server.token` 可用于连接本次 host，session 文件还可能包含用户提示词。长稳结束后只应把脱敏后的 `summary.json` 和必要的错误片段用于 CI/问题报告，不要直接公开整个产物目录。
 
@@ -77,4 +92,6 @@ go tool longstay -duration 2h -pigo ./pigo.exe
 4. mock LLM 确实收到请求；
 5. 最终重连验证与优雅关闭完成。
 
-进程退出码：`0` 通过，`1` 可靠性失败或启动失败，`2` 参数错误。`providerErrors` 和 `mockFailures` 是 `-llm-error-rate` 注入的预期上游错误，不直接导致失败；`queueOverflows` 会被记录为背压指标，客户端仍应以最终结果和恢复事件为准。
+进程退出码：`0` 通过，`1` 可靠性失败或启动失败，`2` 参数错误。`providerErrors`、`mockFailures`、`turnsDegraded` 和 `degradedResults` 是 `-llm-error-rate` 注入的预期上游错误，不直接导致失败；`queueOverflows` 会被记录为背压指标，客户端仍应以最终结果和恢复事件为准。
+
+`normal` 场景建议先用短跑确认工具计划生效（`toolVerifications` 与 `turnsVerified` 均大于 0）；`stress` 场景 `mockRequests` 应约等于 `prompts`，因为每个 turn 只有一次 LLM 请求。
