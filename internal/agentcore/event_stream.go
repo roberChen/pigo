@@ -36,12 +36,19 @@ type EventStream[T any, R any] struct {
 	result     R
 	resultErr  error
 	resultCh   chan struct{} // closed once result (or resultErr) is set
+	emitMu     sync.Mutex
+	emitWG     sync.WaitGroup
+	closed     bool
 }
 
 // ErrStreamIncomplete is returned by Result when the event channel closed
 // without any result being set (the producer ended abnormally without a
 // terminal event).
 var ErrStreamIncomplete = errors.New("agent: event stream ended without a result")
+
+// ErrStreamClosed is returned by Emit after Close. It lets late asynchronous
+// producers finish without panicking on a closed channel.
+var ErrStreamClosed = errors.New("agent: event stream is closed")
 
 // NewEventStream constructs an EventStream with the given channel buffer size.
 // A buffer of 0 gives fully synchronous back-pressure (each Emit blocks until a
@@ -63,8 +70,18 @@ func (s *EventStream[T, R]) Events() <-chan T { return s.ch }
 // Emit sends an event to consumers, honoring cancellation. If ctx is cancelled
 // before the event is received, Emit returns ctx.Err() and the event is
 // dropped. When IsComplete is configured and reports true for the event, the
-// result is captured (once) before the send.
+// result is captured (once) before the send. Emit and Close are safe to race:
+// a late producer gets ErrStreamClosed instead of a send-on-closed panic.
 func (s *EventStream[T, R]) Emit(ctx context.Context, event T) error {
+	s.emitMu.Lock()
+	if s.closed {
+		s.emitMu.Unlock()
+		return ErrStreamClosed
+	}
+	s.emitWG.Add(1)
+	s.emitMu.Unlock()
+	defer s.emitWG.Done()
+
 	if s.IsComplete != nil && s.IsComplete(event) && s.ExtractResult != nil {
 		s.SetResult(s.ExtractResult(event))
 	}
@@ -95,9 +112,18 @@ func (s *EventStream[T, R]) SetError(err error) {
 }
 
 // Close closes the event channel, ending consumer iteration. If no result was
-// set, Result will report ErrStreamIncomplete. Call exactly once from the
-// producer after the last Emit.
+// set, Result will report ErrStreamIncomplete. Close is idempotent and waits
+// for in-flight Emit calls before closing the channel.
 func (s *EventStream[T, R]) Close() {
+	s.emitMu.Lock()
+	if s.closed {
+		s.emitMu.Unlock()
+		return
+	}
+	s.closed = true
+	s.emitMu.Unlock()
+	s.emitWG.Wait()
+
 	// Ensure a waiting Result never blocks forever if the producer forgot to
 	// set a result.
 	s.resultOnce.Do(func() {

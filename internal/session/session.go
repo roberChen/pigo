@@ -346,10 +346,11 @@ func treeOneLine(s string) string {
 }
 
 // NewID returns a time-ordered session id: a UTC timestamp stem that sorts
-// lexicographically by creation time (e.g. "20260710-142530-uniq"). The suffix
-// disambiguates sessions created within the same second.
+// lexicographically by creation time (e.g. "20260710-142530-000123-a1b2c3d4").
+// The random suffix prevents concurrent sessions in the same microsecond from
+// sharing a file, including sub-agents created by different parent sessions.
 func NewID(now time.Time) string {
-	return fmt.Sprintf("%s-%06d", now.UTC().Format("20060102-150405"), now.UTC().Nanosecond()/1000%1_000_000)
+	return fmt.Sprintf("%s-%06d-%s", now.UTC().Format("20060102-150405"), now.UTC().Nanosecond()/1000%1_000_000, newEntryID())
 }
 
 // DefaultDir returns the default session store directory: $PIGO_HOME/sessions,

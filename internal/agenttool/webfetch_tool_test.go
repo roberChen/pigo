@@ -173,6 +173,9 @@ func TestNormalizeFetchURL(t *testing.T) {
 		wantErr  bool
 	}{
 		{"http://x.com/a", "https://x.com/a", false},
+		{"http://127.0.0.1:8080/health", "http://127.0.0.1:8080/health", false},
+		{"http://localhost:9000", "http://localhost:9000", false},
+		{"http://[::1]:8080", "http://[::1]:8080", false},
 		{"https://x.com", "https://x.com", false},
 		{"x.com/a", "", true},     // no scheme
 		{"ftp://x.com", "", true}, // bad scheme

@@ -119,3 +119,30 @@ func TestEventStreamSetErrorWins(t *testing.T) {
 		t.Fatalf("want sentinel error, got %v", err)
 	}
 }
+
+func TestEventStreamLateEmitReturnsClosed(t *testing.T) {
+	s := NewEventStream[AgentEvent, []AgentMessage](1)
+	s.Close()
+	if err := s.Emit(context.Background(), SubAgentEndEvent{}); err != ErrStreamClosed {
+		t.Fatalf("late Emit error = %v, want ErrStreamClosed", err)
+	}
+	s.Close()
+}
+
+func TestEventStreamConcurrentEmitAndClose(t *testing.T) {
+	for range 100 {
+		s := NewEventStream[AgentEvent, []AgentMessage](1)
+		start := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			close(start)
+			_ = s.Emit(context.Background(), SubAgentEndEvent{})
+			close(done)
+		}()
+		<-start
+		s.Close()
+		<-done
+		for range s.Events() {
+		}
+	}
+}

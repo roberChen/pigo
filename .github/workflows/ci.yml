@@ -30,3 +30,32 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  longstay:
+    name: Longstay smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run multi-client tool smoke
+        shell: bash
+        run: go tool longstay -duration 20s -seed 42 -initial-clients 2 -max-clients 4 -min-client-lifetime 3s -max-client-lifetime 6s -min-prompt-delay 50ms -max-prompt-delay 150ms -llm-latency 0s -llm-jitter 10ms -llm-error-rate 0 -avg-tool-calls 6 -calls-per-stage 2 -thinking-blocks 2 -summary-interval 5s -output e2e-results/ci-smoke
+
+      - name: Run task sub-agent matrix
+        shell: bash
+        run: go tool longstay -duration 10s -seed 61 -initial-clients 1 -max-clients 2 -min-client-lifetime 3s -max-client-lifetime 5s -min-prompt-delay 50ms -max-prompt-delay 100ms -llm-latency 0s -llm-jitter 5ms -llm-error-rate 0 -tools task_sync,task_error,task_output,task_output_batch,task_wait_all -avg-tool-calls 6 -calls-per-stage 2 -require-task-coverage -summary-interval 5s -output e2e-results/ci-task-matrix
+
+      - name: Run automatic task follow-up
+        shell: bash
+        run: go tool longstay -duration 8s -seed 41 -initial-clients 1 -max-clients 2 -min-client-lifetime 3s -max-client-lifetime 5s -min-prompt-delay 50ms -max-prompt-delay 100ms -llm-latency 0s -llm-jitter 5ms -llm-error-rate 0 -tools task_auto -avg-tool-calls 1 -require-task-coverage -summary-interval 4s -output e2e-results/ci-task-auto

@@ -889,12 +889,12 @@ func TestCreateResolvesCwd(t *testing.T) {
 }
 
 // TestSessionIDsAreWellFormedAndUnique pins the id shape (NewID's
-// "%Y%m%d-%H%M%S-%06d") and its uniqueness, which the on-disk store and the
-// resume path both depend on.
+// "%Y%m%d-%H%M%S-%06d-randomhex") and its uniqueness, which the on-disk store
+// and the resume path both depend on.
 func TestSessionIDsAreWellFormedAndUnique(t *testing.T) {
 	fx := newFixture(t, newScriptFactory())
 	c := fx.dial(t)
-	shape := regexp.MustCompile(`^\d{8}-\d{6}-\d{6}$`)
+	shape := regexp.MustCompile(`^\d{8}-\d{6}-\d{6}-[0-9a-f]{8}$`)
 
 	cwd := t.TempDir()
 	seen := make(map[string]bool, 8)
@@ -917,10 +917,8 @@ func TestSessionIDsAreWellFormedAndUnique(t *testing.T) {
 // concurrently.
 //
 // The clock is frozen for the test, which is the adversarial case for the
-// allocator: session.NewID only carries microseconds, so a host that derived ids
-// straight from the clock would hand every one of these creates the same id — and
-// they would then share a single on-disk transcript. The transcripts are checked
-// per session for exactly that reason.
+// allocator: NewID uses a random suffix as well as microseconds, so concurrent
+// creates in one microsecond must still get distinct on-disk transcripts.
 func TestConcurrentCreatesGetDistinctSessions(t *testing.T) {
 	const n = 8
 	frozen := time.Now().UTC()

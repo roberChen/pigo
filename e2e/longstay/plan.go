@@ -16,19 +16,21 @@ const (
 	// markerPrefix and markerSuffix delimit the token embedded in every prompt.
 	markerPrefix = "[[longstay:"
 	markerSuffix = "]]"
-	// maxToolRounds is the deepest tool round-trip chain a plan can ask for. A
-	// turn therefore produces between one and maxToolRounds+1 assistant
-	// messages, which is what exercises multi-round tool feedback.
-	maxToolRounds = 2
 )
 
-// plannedCall is one tool call a stage emits, together with the text its result
-// must contain so a client can prove the call really executed in a workspace.
+// plannedCall is one tool call a stage emits, together with the result and
+// workspace assertions its real execution must satisfy.
 type plannedCall struct {
 	Name      string
 	Arguments string
-	// Expect is a marker that must appear in the tool's result.
-	Expect string
+	// ExpectAny lists acceptable result markers. AllowError marks a deliberate
+	// negative case whose error is itself the expected outcome.
+	ExpectAny   []string
+	AllowError  bool
+	Effect      *workspaceEffect
+	StageBreak  bool
+	FollowUp    bool
+	CheckResult func(string) error
 }
 
 // replyPlan is what one assistant message is supposed to carry: its thinking,
@@ -40,23 +42,45 @@ type replyPlan struct {
 	Calls    []plannedCall
 }
 
-// plannedTools is the closed set of calls a plan may choose from. Every entry is
-// read-only: trust.SideEffectTools gates bash/write/edit, so a plan that used one
-// would turn into a permission round trip on an untrusted workspace and make the
-// expected outcome depend on the client answering in time. The markers are
-// identical in every workspace, so a shared workspace verifies the same way as a
-// private one.
-var plannedTools = []plannedCall{
-	{Name: "read", Arguments: `{"path":"notes.txt"}`, Expect: "NOTES-MARKER-LINE"},
-	{Name: "read", Arguments: `{"path":"log.txt","offset":2,"limit":2}`, Expect: "LOG-MARKER-LINE"},
-	{Name: "grep", Arguments: `{"pattern":"DATA-MARKER"}`, Expect: "data.txt"},
-	{Name: "find", Arguments: `{"glob":"*.txt"}`, Expect: "notes.txt"},
+// planRounds returns how many tool round-trips this token's turn performs. It
+// is derived from the dependency-safe sequence so every stage agrees on shape.
+func planRounds(token string) int {
+	rounds := len(planStages(token))
+	if taskAutoFollowUp(token) {
+		rounds++
+	}
+	return rounds
 }
 
-// planRounds returns how many tool round-trips this token's turn performs. It is
-// derived from the token alone so every stage of one turn agrees on the shape.
-func planRounds(token string) int {
-	return int(hashToken(token, -1) % (maxToolRounds + 1))
+func taskAutoFollowUp(token string) bool {
+	followUp := false
+	for _, call := range sequence(token) {
+		if call.FollowUp {
+			followUp = true
+		}
+		if call.Name == "task_output" && strings.Contains(call.Arguments, `"wait_all":true`) {
+			followUp = false
+		}
+	}
+	return followUp
+}
+
+func planStages(token string) [][]plannedCall {
+	calls := sequence(token)
+	stages := make([][]plannedCall, 0, len(calls))
+	for _, call := range calls {
+		startStage := len(stages) == 0
+		if !startStage {
+			current := stages[len(stages)-1]
+			startStage = call.StageBreak || current[0].StageBreak || len(current) >= currentProfile.CallsPerStage
+		}
+		if startStage {
+			stages = append(stages, nil)
+		}
+		last := len(stages) - 1
+		stages[last] = append(stages[last], call)
+	}
+	return stages
 }
 
 // planFor returns the deterministic plan for one assistant message. stage 0 is
@@ -75,20 +99,22 @@ func planFor(token string, stage int, tools bool) replyPlan {
 			Thinking: phrase(h>>7, thinkingWords, 0, 3),
 			Text:     "working on " + token + " (stage " + strconv.Itoa(stage) + ")",
 		}
-		count := 1 + int((h>>17)%2)
-		for i := 0; i < count; i++ {
-			plan.Calls = append(plan.Calls, plannedTools[(int(h>>(24+8*i))+i)%len(plannedTools)])
+		stages := planStages(token)
+		if stage < len(stages) {
+			plan.Calls = append(plan.Calls, stages[stage]...)
 		}
-		if plan.Calls[0].Name == plan.Calls[len(plan.Calls)-1].Name && len(plan.Calls) > 1 {
-			// Two calls of the same kind are legal, but a batch that mixes kinds
-			// proves more about ordering; swap the second one deterministically.
-			plan.Calls[1] = plannedTools[(int(h>>40)+2)%len(plannedTools)]
+		if stage >= currentProfile.ThinkingBlocks {
+			plan.Thinking = ""
 		}
 		return plan
 	}
+	thinking := ""
+	if stage < currentProfile.ThinkingBlocks {
+		thinking = phrase(hashToken(token, stage)>>7, thinkingWords, 0, 2)
+	}
 	return replyPlan{
 		Stage:    stage,
-		Thinking: phrase(hashToken(token, stage)>>7, thinkingWords, 0, 2),
+		Thinking: thinking,
 		Text:     finalText(token, stage),
 	}
 }

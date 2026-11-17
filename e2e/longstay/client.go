@@ -48,8 +48,11 @@ type turnTrace struct {
 	// is one event ahead of the TurnEndEvent carrying the assistant message, so
 	// a result can never be matched to a plan at the moment it arrives.
 	results map[string]hostapi.SessionEvent
+	// dynamicIDs binds placeholders to ids produced earlier in this same turn.
+	dynamicIDs map[string]string
 	// active is false once the run settled (agent_end) or the client exited.
-	active bool
+	active  bool
+	summary bool
 }
 
 // clientState is one independent UI lifecycle. Prompt execution, event delivery
@@ -305,18 +308,29 @@ func (s *clientState) resume() {
 func (s *clientState) startPrompt() {
 	s.turn++
 	s.attempt++
+	token := fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.attempt)
+	// Prepare this turn's editable fixture before the first tool call, so edit
+	// never depends on an earlier write that the plan did not select.
+	for _, call := range sequence(token) {
+		if call.Name == "edit" {
+			path := filepath.Join(s.cwd, "editable-"+artifactName(token)+".txt")
+			if err := os.WriteFile(path, []byte("WRITE-MARKER\n"), 0o644); err != nil {
+				s.runner.recordProtocol("prepare_edit_fixture", err)
+			}
+		}
+	}
 	// Capture the connection and session for this attempt: both fields are
 	// cleared by exit() under the same mutex, and reading them from the goroutine
 	// would both race and let a reply be sent on the next attempt's connection.
 	client, session := s.client, s.sessionID
-	token := fmt.Sprintf("client-%03d/turn-%d/attempt-%d", s.id, s.turn, s.attempt)
 	prompt := promptFor(s.rng, token)
 	outcome := turnOutcome{attempt: s.attempt, token: token, client: client}
 	s.trace = &turnTrace{
-		token:   token,
-		pending: make(map[string]plannedCall),
-		results: make(map[string]hostapi.SessionEvent),
-		active:  true,
+		token:      token,
+		pending:    make(map[string]plannedCall),
+		results:    make(map[string]hostapi.SessionEvent),
+		dynamicIDs: make(map[string]string),
+		active:     true,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -369,6 +383,9 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		}
 	} else if outcome.result.StopReason == "aborted" {
 		s.runner.metrics.aborted.Add(1)
+	} else if s.trace != nil && s.trace.token == outcome.token && s.trace.summary {
+		s.runner.metrics.turnsCompacted.Add(1)
+		s.runner.log.write("turn_compacted", map[string]any{"client": s.id, "session": s.sessionID, "token": outcome.token})
 	} else if s.runner.injectedFailure(outcome.token) {
 		// The turn saw a deliberate 500. pigo's repair path may have degraded a
 		// tool result and finished on a shorter path than the plan describes, so
@@ -378,10 +395,12 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		s.runner.log.write("turn_degraded", map[string]any{"client": s.id, "session": s.sessionID, "token": outcome.token})
 	} else {
 		s.runner.metrics.completed.Add(1)
-		// The reply must be exactly what the plan for this attempt's token says,
-		// not what the state field claims: a crossed reply is what this catches.
-		if want := expectedFinalText(outcome.token, s.runner.toolsEnabled()); outcome.result.Text != want {
-			s.runner.recordProtocol("reply_mismatch", fmt.Errorf("got %q, want %q", outcome.result.Text, want))
+		// Compaction may replace the user-visible tail with a mock summary. The
+		// persisted plan stages are still checked by verifyTranscript.
+		if !strings.HasPrefix(outcome.result.Text, "SUMMARY-MARKER") {
+			if want := expectedFinalText(outcome.token, s.runner.toolsEnabled()); outcome.result.Text != want {
+				s.runner.recordProtocol("reply_mismatch", fmt.Errorf("got %q, want %q", outcome.result.Text, want))
+			}
 		}
 	}
 	s.nextPrompt = time.Now().Add(s.delay(s.runner.cfg.MinPromptDelay, s.runner.cfg.MaxPromptDelay))
@@ -479,6 +498,18 @@ func (s *clientState) verifyEvent(ev hostapi.SessionEvent) {
 		}
 	case hostapi.SessionEventToolEnd:
 		s.bufferToolResult(t, ev)
+	case hostapi.SessionEventSubAgent:
+		if ev.ToolCallID == "" || ev.Activity == "" {
+			s.runner.recordProtocol("subagent_progress_mismatch", fmt.Errorf("token %s: invalid progress event", t.token))
+			return
+		}
+		s.runner.metrics.subAgentProgress.Add(1)
+	case hostapi.SessionEventSubAgentDone:
+		if ev.ToolCallID == "" {
+			s.runner.recordProtocol("subagent_done_mismatch", fmt.Errorf("token %s: missing id", t.token))
+			return
+		}
+		s.runner.metrics.subAgentDone.Add(1)
 	case hostapi.SessionEventAgentEnd:
 		s.finishTrace(t)
 	}
@@ -487,11 +518,23 @@ func (s *clientState) verifyEvent(ev hostapi.SessionEvent) {
 // verifyStage compares one assistant message with the plan's next stage: its
 // thinking, its text, and the names and arguments of its tool calls.
 func (s *clientState) verifyStage(t *turnTrace, msg agentcore.AssistantMessage) {
+	if !s.connected {
+		// Exiting mid-turn is an intended lifecycle event, not a protocol error.
+		return
+	}
+	gotText := agentcore.ContentToText(msg.Content)
+	if strings.HasPrefix(gotText, "SUMMARY-MARKER") {
+		// Compaction summaries are provider work, not a planned assistant stage.
+		t.summary = true
+		t.active = false
+		return
+	}
 	if msg.StopReason == agentcore.StopReasonAborted || msg.StopReason == agentcore.StopReasonError {
 		// A cancelled or failed turn legitimately stops before the plan's end.
 		return
 	}
-	if s.runner.toolsEnabled() && msg.StopReason != agentcore.StopReasonToolUse && t.stage < planRounds(t.token) {
+	want := planFor(t.token, t.stage, s.runner.toolsEnabled())
+	if s.runner.toolsEnabled() && len(want.Calls) > 0 && msg.StopReason != agentcore.StopReasonToolUse {
 		if s.runner.injectedFailure(t.token) {
 			// The repair path degraded this turn's output; it is allowed to stop
 			// before the plan's round count.
@@ -500,8 +543,6 @@ func (s *clientState) verifyStage(t *turnTrace, msg agentcore.AssistantMessage) 
 		s.runner.recordProtocol("stage_missing_tool_calls", fmt.Errorf("token %s stage %d stopped with %q", t.token, t.stage, msg.StopReason))
 		return
 	}
-	want := planFor(t.token, t.stage, s.runner.toolsEnabled())
-	gotText := agentcore.ContentToText(msg.Content)
 	gotThinking := agentcore.ThinkingText(msg.Content)
 	if gotText != want.Text {
 		s.runner.recordProtocol("stage_text_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", t.token, t.stage, gotText, want.Text))
@@ -519,9 +560,14 @@ func (s *clientState) verifyStage(t *turnTrace, msg agentcore.AssistantMessage) 
 	t.pending = make(map[string]plannedCall, len(calls))
 	for i, call := range calls {
 		planned := want.Calls[i]
-		if call.Name != planned.Name || string(call.Arguments) != planned.Arguments {
+		expectedArgs, err := resolvePlannedArguments(planned.Arguments, t.dynamicIDs)
+		if err != nil {
+			s.runner.recordProtocol("stage_call_mismatch", fmt.Errorf("token %s stage %d call %d: %w", t.token, t.stage, i, err))
+			return
+		}
+		if call.Name != planned.Name || string(call.Arguments) != expectedArgs {
 			s.runner.recordProtocol("stage_call_mismatch", fmt.Errorf("token %s stage %d call %d: got %s%s, want %s%s",
-				t.token, t.stage, i, call.Name, call.Arguments, planned.Name, planned.Arguments))
+				t.token, t.stage, i, call.Name, call.Arguments, planned.Name, expectedArgs))
 			return
 		}
 		t.pending[call.ID] = planned
@@ -562,24 +608,112 @@ func (s *clientState) bufferToolResult(t *turnTrace, ev hostapi.SessionEvent) {
 // proves the tool ran.
 func (s *clientState) checkToolResult(t *turnTrace, callID string, planned plannedCall, ev hostapi.SessionEvent) {
 	degraded := strings.Contains(ev.Result, agentcore.AbnormalToolResultMarker)
-	if ev.IsError && !degraded {
+	if ev.IsError && !degraded && !planned.AllowError {
 		s.runner.recordProtocol("tool_call_error", fmt.Errorf("token %s tool %s: %s", t.token, ev.ToolName, strings.TrimSpace(ev.Result)))
 		return
 	}
-	if !strings.Contains(ev.Result, planned.Expect) {
-		s.runner.recordProtocol("tool_result_mismatch", fmt.Errorf("token %s tool %s: result %q lacks %q", t.token, ev.ToolName, truncate(ev.Result, 160), planned.Expect))
+	matched := false
+	for _, want := range planned.ExpectAny {
+		if strings.Contains(ev.Result, want) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		s.runner.recordProtocol("tool_result_mismatch", fmt.Errorf("token %s tool %s: result %q lacks any of %v", t.token, ev.ToolName, truncate(ev.Result, 160), planned.ExpectAny))
 		return
 	}
+	recordDynamicID(t.dynamicIDs, ev.ToolName, ev.Result)
+	if planned.Name == "task" {
+		recordTaskDynamicID(t.dynamicIDs, planned.Arguments, ev.Result)
+	}
+	if planned.CheckResult != nil {
+		if err := planned.CheckResult(ev.Result); err != nil {
+			s.runner.recordProtocol("tool_result_mismatch", fmt.Errorf("token %s tool %s: %w", t.token, ev.ToolName, err))
+			return
+		}
+	}
+	if planned.Name == "task_output" {
+		switch {
+		case planned.Arguments == `{}`:
+			s.runner.metrics.taskOutputList.Add(1)
+		case strings.Contains(planned.Arguments, `"wait_all":true`):
+			s.runner.metrics.taskOutputWaitAll.Add(1)
+		case strings.Contains(planned.Arguments, `"job_ids"`):
+			s.runner.metrics.taskOutputBatch.Add(1)
+		default:
+			s.runner.metrics.taskOutputSingle.Add(1)
+		}
+	}
+	if (planned.Name == "task" || planned.Name == "task_output") && strings.Contains(ev.Result, taskReportMarker) {
+		s.verifyTaskSessionIDs(t.token, ev.Result)
+	}
+	s.verifyWorkspaceEffect(t, planned)
 	if degraded {
 		s.runner.metrics.degradedResults.Add(1)
 	}
 	s.runner.metrics.toolVerifications.Add(1)
 }
 
+// verifyWorkspaceEffect checks the postcondition that cannot be inferred from a
+// tool's textual result alone: a write/edit actually changed the intended file.
+func (s *clientState) verifyWorkspaceEffect(t *turnTrace, planned plannedCall) {
+	if planned.Effect == nil {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.cwd, planned.Effect.Path))
+	if err != nil {
+		s.runner.recordProtocol("workspace_effect", fmt.Errorf("token %s tool %s: read %s: %w", t.token, planned.Name, planned.Effect.Path, err))
+		return
+	}
+	if !strings.Contains(string(data), planned.Effect.Contains) {
+		s.runner.recordProtocol("workspace_effect", fmt.Errorf("token %s tool %s: %s lacks %q", t.token, planned.Name, planned.Effect.Path, planned.Effect.Contains))
+	}
+}
+
+func (s *clientState) verifyTaskSessionIDs(token, result string) {
+	matches := successfulTaskSessionMatches(result)
+	seen := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		id := match[1]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if id == "" || filepath.Base(id) != id {
+			s.runner.recordProtocol("task_session_mismatch", fmt.Errorf("token %s: invalid child session id %q", token, id))
+			continue
+		}
+		path := filepath.Join(s.runner.homeDir, "sessions", id+".jsonl")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			s.runner.recordProtocol("task_session_mismatch", fmt.Errorf("token %s: read child %s: %w", token, id, err))
+			continue
+		}
+		text := string(data)
+		required := []string{
+			`"parentSession":"` + s.sessionID + `"`,
+			`"subAgent":"task"`,
+			`"toolName":"read"`,
+			notesMarker,
+			taskReportMarker,
+		}
+		for _, marker := range required {
+			if !strings.Contains(text, marker) {
+				s.runner.recordProtocol("task_session_mismatch", fmt.Errorf("token %s child %s lacks %q", token, id, marker))
+			}
+		}
+		s.runner.metrics.taskSessionsVerified.Add(1)
+	}
+}
+
 // finishTrace closes the attempt's verification and counts it when every planned
 // stage was seen. A turn cut short by an exit is not a failure: the client's own
 // `aborted`/`stale_outcome` handling accounts for those separately.
 func (s *clientState) finishTrace(t *turnTrace) {
+	if t.summary || !s.connected {
+		return
+	}
 	t.active = false
 	for callID, planned := range t.pending {
 		if ev, ok := t.results[callID]; ok {
@@ -673,20 +807,53 @@ func (s *clientState) verifyReconnect() {
 func (s *clientState) verifyTranscript(msgs agentcore.MessageList) {
 	var token string
 	stages := 0
+	dynamicIDs := make(map[string]string)
+	taskCalls := make(map[string]agentcore.ToolCallContent)
 	tools := s.runner.toolsEnabled()
 	for _, m := range msgs {
 		switch msg := m.(type) {
 		case agentcore.UserMessage:
-			token = promptToken(agentcore.ContentToText(msg.Content))
-			stages = 0
+			text := agentcore.ContentToText(msg.Content)
+			if next := promptToken(text); next != "" {
+				token = next
+				stages = 0
+				dynamicIDs = make(map[string]string)
+				taskCalls = make(map[string]agentcore.ToolCallContent)
+			} else if msg.Origin == agentcore.UserMessageOriginSubAgentReport && token != "" {
+				if taskAutoFollowUp(token) {
+					if !strings.Contains(text, "task: longstay auto") || !strings.Contains(text, taskReportMarker) {
+						s.runner.recordProtocol("task_followup_mismatch", fmt.Errorf("token %s: invalid automatic child report", token))
+					} else {
+						s.runner.metrics.taskFollowUpsVerified.Add(1)
+					}
+				}
+			} else {
+				token, stages = "", 0
+				dynamicIDs = make(map[string]string)
+				taskCalls = make(map[string]agentcore.ToolCallContent)
+			}
+		case agentcore.ToolResultMessage:
+			result := agentcore.ContentToText(msg.Content)
+			recordDynamicID(dynamicIDs, msg.ToolName, result)
+			if call, ok := taskCalls[msg.ToolCallID]; ok && msg.ToolName == "task" {
+				recordTaskDynamicID(dynamicIDs, string(call.Arguments), result)
+			}
+			if (msg.ToolName == "task" || msg.ToolName == "task_output") && strings.Contains(result, taskReportMarker) {
+				s.verifyTaskSessionIDs(token, result)
+			}
 		case agentcore.CompactionMessage:
 			// The checkpoint stands in for the history before it, so nothing
 			// before it can answer a later turn's plan.
 			token, stages = "", 0
+			dynamicIDs = make(map[string]string)
+			taskCalls = make(map[string]agentcore.ToolCallContent)
 		case agentcore.AssistantMessage:
 			if token == "" {
 				// Not a harness turn (a compacted summary, or a message from a
 				// session this client did not create).
+				continue
+			}
+			if strings.HasPrefix(agentcore.ContentToText(msg.Content), "SUMMARY-MARKER") {
 				continue
 			}
 			if msg.StopReason == agentcore.StopReasonAborted || msg.StopReason == agentcore.StopReasonError {
@@ -700,11 +867,19 @@ func (s *clientState) verifyTranscript(msgs agentcore.MessageList) {
 				s.runner.recordProtocol("transcript_thinking_mismatch", fmt.Errorf("token %s stage %d: got %q, want %q", token, stages, got, want.Thinking))
 			}
 			calls := msg.ToolCalls()
+			for _, call := range calls {
+				taskCalls[call.ID] = call
+			}
 			if len(calls) != len(want.Calls) {
 				s.runner.recordProtocol("transcript_calls_mismatch", fmt.Errorf("token %s stage %d: got %d calls, want %d", token, stages, len(calls), len(want.Calls)))
 			} else {
 				for i, call := range calls {
-					if call.Name != want.Calls[i].Name || string(call.Arguments) != want.Calls[i].Arguments {
+					expectedArgs, err := resolvePlannedArguments(want.Calls[i].Arguments, dynamicIDs)
+					if err != nil {
+						s.runner.recordProtocol("transcript_call_mismatch", fmt.Errorf("token %s stage %d call %d: %w", token, stages, i, err))
+						continue
+					}
+					if call.Name != want.Calls[i].Name || string(call.Arguments) != expectedArgs {
 						s.runner.recordProtocol("transcript_call_mismatch", fmt.Errorf("token %s stage %d call %d", token, stages, i))
 					}
 				}

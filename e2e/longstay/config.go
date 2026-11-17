@@ -27,11 +27,18 @@ type Config struct {
 	LLMLatency        time.Duration
 	LLMJitter         time.Duration
 	LLMErrorRate      float64
-	// Scenario selects what the run exercises. "normal" gives the host its
-	// read-only tool set so turns include real tool round-trips; "stress" runs
-	// with --no-tools so every turn is a single stage and the host spends its
+	// Scenario selects what the run exercises. "normal" enables the configured
+	// real-tool plans so turns include tool round-trips; "stress" runs with
+	// --no-tools so every turn is a single stage and the host spends its
 	// time on lifecycle churn instead.
 	Scenario string
+	// Tools is the comma-separated planned catalog. Dependency groups are added
+	// automatically when any member is selected.
+	Tools               string
+	AvgToolCalls        float64
+	CallsPerStage       int
+	ThinkingBlocks      int
+	RequireTaskCoverage bool
 	// WorkspacePool, when greater than zero, makes clients share that many
 	// workspaces (two sessions in one directory); 0 gives each client its own.
 	WorkspacePool int
@@ -69,7 +76,12 @@ func parseConfig() Config {
 	flag.DurationVar(&cfg.LLMLatency, "llm-latency", 25*time.Millisecond, "base latency for every mock LLM request")
 	flag.DurationVar(&cfg.LLMJitter, "llm-jitter", 75*time.Millisecond, "additional random latency for every mock LLM request")
 	flag.Float64Var(&cfg.LLMErrorRate, "llm-error-rate", 0.01, "mock HTTP 500 rate, from 0 to 1")
-	flag.StringVar(&cfg.Scenario, "scenario", ScenarioNormal, "normal (read-only tools and multi-round turns) or stress (no tools, lifecycle churn only)")
+	flag.StringVar(&cfg.Scenario, "scenario", ScenarioNormal, "normal (configured real tools and multi-round turns) or stress (no tools, lifecycle churn only)")
+	flag.StringVar(&cfg.Tools, "tools", "read,read_window,grep,find,bash,write,edit,view_image,webfetch,todo,memory_search,question,bash_jobs,task_sync,task_error,task_async,task_output_list,task_batch,task_wait_all,task_auto,schedule_create,schedule_list,schedule_delete", "comma-separated planned tool catalog; dependency groups are automatic")
+	flag.Float64Var(&cfg.AvgToolCalls, "avg-tool-calls", 3, "average tool calls per turn (0 disables tool stages)")
+	flag.IntVar(&cfg.CallsPerStage, "calls-per-stage", 1, "tool calls per assistant stage, from 1 to 8")
+	flag.IntVar(&cfg.ThinkingBlocks, "thinking-blocks", 2, "number of stages that carry thinking blocks per turn")
+	flag.BoolVar(&cfg.RequireTaskCoverage, "require-task-coverage", false, "fail unless the selected task plans produce verified child-agent evidence")
 	flag.IntVar(&cfg.WorkspacePool, "workspace-pool", 0, "clients per workspace: >0 shares that many directories, 0 gives each client its own")
 	flag.StringVar(&cfg.OutputDir, "output", "", "artifact directory (default e2e-results/longstay-<timestamp>)")
 	flag.StringVar(&cfg.PigoBinary, "pigo", "", "path to an existing pigo binary; default builds ./cmd/pigo into the artifact directory")
@@ -109,5 +121,17 @@ func (c Config) validate() error {
 	if c.WorkspacePool < 0 {
 		return errors.New("workspace-pool must be non-negative")
 	}
-	return nil
+	if c.AvgToolCalls < 0 || c.AvgToolCalls > 32 {
+		return errors.New("avg-tool-calls must be between 0 and 32")
+	}
+	if c.CallsPerStage < 1 || c.CallsPerStage > 8 {
+		return errors.New("calls-per-stage must be between 1 and 8")
+	}
+	if c.ThinkingBlocks < 0 || c.ThinkingBlocks > 32 {
+		return errors.New("thinking-blocks must be between 0 and 32")
+	}
+	if c.RequireTaskCoverage && !c.toolsEnabled() {
+		return errors.New("require-task-coverage cannot be used with the no-tools stress scenario")
+	}
+	return configureProfile(c)
 }

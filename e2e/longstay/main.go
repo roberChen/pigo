@@ -89,6 +89,11 @@ func newRunner(cfg Config) (*runner, error) {
 			return nil, err
 		}
 	}
+	if currentProfile.enabled("memory_search") {
+		if err := prepareMemoryHome(r.homeDir); err != nil {
+			return nil, err
+		}
+	}
 	if err := writeWorkspaceFixtures(r.workDir, cfg.WorkspacePool, cfg.MaxClients); err != nil {
 		return nil, err
 	}
@@ -111,6 +116,7 @@ func newRunner(cfg Config) (*runner, error) {
 		return nil, err
 	}
 	r.mock = mock
+	currentProfile.FixtureURL = mock.FixtureURL()
 	return r, nil
 }
 
@@ -204,7 +210,10 @@ func (r *runner) startHost(ctx context.Context) error {
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = r.workDir
-	cmd.Env = append(os.Environ(), "PIGO_HOME="+r.homeDir)
+	cmd.Env = append(os.Environ(), "PIGO_HOME="+r.homeDir, "PIGO_DEBUG=1")
+	if currentProfile.enabled("memory_search") {
+		cmd.Env = append(cmd.Env, "XDG_CONFIG_HOME="+filepath.Join(r.homeDir, "xdg"))
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -359,15 +368,53 @@ func (r *runner) recordProtocol(kind string, err error) {
 // healthy evaluates both correctness and whether the churn actually happened.
 func (r *runner) healthy() bool {
 	m := &r.metrics
-	return m.protocolErrors.Load() == 0 &&
-		m.transportErrors.Load() == 0 &&
-		m.hostErrors.Load() == 0 &&
-		m.missingEvents.Load() == 0 &&
-		m.replayTruncated.Load() == 0 &&
-		m.prompts.Load() > 0 &&
-		m.reconnects.Load() > 0 &&
-		m.peakClients.Load() > 1 &&
-		r.mock.requests.Load() > 0
+	if m.protocolErrors.Load() != 0 ||
+		m.transportErrors.Load() != 0 ||
+		m.hostErrors.Load() != 0 ||
+		m.missingEvents.Load() != 0 ||
+		m.replayTruncated.Load() != 0 ||
+		m.turnsUnverified.Load() != 0 ||
+		m.prompts.Load() == 0 ||
+		m.completed.Load() == 0 ||
+		m.reconnects.Load() == 0 ||
+		m.peakClients.Load() <= 1 ||
+		r.mock.requests.Load() == 0 {
+		return false
+	}
+	if !r.cfg.RequireTaskCoverage {
+		return true
+	}
+	if r.mock.taskChildRequests.Load() == 0 || m.subAgentProgress.Load() == 0 || m.subAgentDone.Load() == 0 {
+		return false
+	}
+	for _, key := range requiredTaskChildKeys(currentProfile) {
+		if r.mock.taskChildKeyCount(key, false) == 0 {
+			return false
+		}
+	}
+	if currentProfile.enabled("task_error") && r.mock.taskChildKeyCount("error", true) == 0 {
+		return false
+	}
+	if currentProfile.enabled("task_async") || currentProfile.enabled("task_output") || currentProfile.enabled("task_output_list") {
+		if m.taskOutputList.Load() == 0 || m.taskOutputSingle.Load() == 0 {
+			return false
+		}
+	}
+	if (currentProfile.enabled("task_batch") || currentProfile.enabled("task_output_batch")) && m.taskOutputBatch.Load() == 0 {
+		return false
+	}
+	if currentProfile.enabled("task_wait_all") && m.taskOutputWaitAll.Load() == 0 {
+		return false
+	}
+	if taskSessionCoverageExpected(currentProfile) &&
+		(r.mock.taskChildCompleted.Load() == 0 || r.mock.taskChildReadChecks.Load() == 0 || m.taskSessionsVerified.Load() == 0) {
+		return false
+	}
+	if currentProfile.enabled("task_auto") && !currentProfile.enabled("task_wait_all") &&
+		(r.mock.taskFollowUps.Load() == 0 || m.taskFollowUpsVerified.Load() == 0) {
+		return false
+	}
+	return true
 }
 
 // finish writes the final summary and shuts everything down.
@@ -417,42 +464,58 @@ func (r *runner) finish(ok bool) int {
 func (r *runner) summary(ok bool) map[string]any {
 	m := &r.metrics
 	return map[string]any{
-		"pass":                ok,
-		"seed":                r.cfg.Seed,
-		"duration":            r.cfg.Duration.String(),
-		"clientsStarted":      m.clientsStarted.Load(),
-		"peakClients":         m.peakClients.Load(),
-		"reconnects":          m.reconnects.Load(),
-		"adoptions":           m.adoptions.Load(),
-		"prompts":             m.prompts.Load(),
-		"completed":           m.completed.Load(),
-		"aborted":             m.aborted.Load(),
-		"providerErrors":      m.providerErrors.Load(),
-		"protocolErrors":      m.protocolErrors.Load(),
-		"transportErrors":     m.transportErrors.Load(),
-		"hostErrors":          m.hostErrors.Load(),
-		"duplicates":          m.duplicates.Load(),
-		"verifications":       m.verifications.Load(),
-		"verificationSkips":   m.verificationSkips.Load(),
-		"missingEvents":       m.missingEvents.Load(),
-		"queueOverflows":      m.queueOverflows.Load(),
-		"replayTruncated":     m.replayTruncated.Load(),
-		"toolVerifications":   m.toolVerifications.Load(),
-		"degradedResults":     m.degradedResults.Load(),
-		"turnsVerified":       m.turnsVerified.Load(),
-		"turnsUnverified":     m.turnsUnverified.Load(),
-		"turnsDegraded":       m.turnsDegraded.Load(),
-		"transcriptsVerified": m.transcriptsVerified.Load(),
-		"scenario":            r.cfg.Scenario,
-		"workspacePool":       r.cfg.WorkspacePool,
-		"mockRequests":        r.mock.requests.Load(),
-		"mockFailures":        r.mock.failures.Load(),
-		"mockPeakActive":      r.mock.peak.Load(),
-		"startGoroutines":     m.startGoroutines,
-		"endGoroutines":       m.endGoroutines,
-		"startHeapBytes":      m.startHeapBytes,
-		"endHeapBytes":        m.endHeapBytes,
-		"artifacts":           r.outputDir,
+		"pass":                  ok,
+		"seed":                  r.cfg.Seed,
+		"duration":              r.cfg.Duration.String(),
+		"clientsStarted":        m.clientsStarted.Load(),
+		"peakClients":           m.peakClients.Load(),
+		"reconnects":            m.reconnects.Load(),
+		"adoptions":             m.adoptions.Load(),
+		"prompts":               m.prompts.Load(),
+		"completed":             m.completed.Load(),
+		"aborted":               m.aborted.Load(),
+		"providerErrors":        m.providerErrors.Load(),
+		"protocolErrors":        m.protocolErrors.Load(),
+		"transportErrors":       m.transportErrors.Load(),
+		"hostErrors":            m.hostErrors.Load(),
+		"duplicates":            m.duplicates.Load(),
+		"verifications":         m.verifications.Load(),
+		"verificationSkips":     m.verificationSkips.Load(),
+		"missingEvents":         m.missingEvents.Load(),
+		"queueOverflows":        m.queueOverflows.Load(),
+		"replayTruncated":       m.replayTruncated.Load(),
+		"toolVerifications":     m.toolVerifications.Load(),
+		"degradedResults":       m.degradedResults.Load(),
+		"subAgentProgress":      m.subAgentProgress.Load(),
+		"subAgentDone":          m.subAgentDone.Load(),
+		"taskSessionsVerified":  m.taskSessionsVerified.Load(),
+		"taskFollowUpsVerified": m.taskFollowUpsVerified.Load(),
+		"taskOutputList":        m.taskOutputList.Load(),
+		"taskOutputSingle":      m.taskOutputSingle.Load(),
+		"taskOutputBatch":       m.taskOutputBatch.Load(),
+		"taskOutputWaitAll":     m.taskOutputWaitAll.Load(),
+		"turnsVerified":         m.turnsVerified.Load(),
+		"turnsUnverified":       m.turnsUnverified.Load(),
+		"turnsDegraded":         m.turnsDegraded.Load(),
+		"turnsCompacted":        m.turnsCompacted.Load(),
+		"transcriptsVerified":   m.transcriptsVerified.Load(),
+		"scenario":              r.cfg.Scenario,
+		"workspacePool":         r.cfg.WorkspacePool,
+		"mockRequests":          r.mock.requests.Load(),
+		"mockFailures":          r.mock.failures.Load(),
+		"mockPeakActive":        r.mock.peak.Load(),
+		"taskChildRequests":     r.mock.taskChildRequests.Load(),
+		"taskChildCompleted":    r.mock.taskChildCompleted.Load(),
+		"taskChildReadChecks":   r.mock.taskChildReadChecks.Load(),
+		"taskChildFailures":     r.mock.taskChildFailures.Load(),
+		"taskFollowUps":         r.mock.taskFollowUps.Load(),
+		"taskChildren":          r.mock.taskChildKeySnapshot(false),
+		"taskFailedChildren":    r.mock.taskChildKeySnapshot(true),
+		"startGoroutines":       m.startGoroutines,
+		"endGoroutines":         m.endGoroutines,
+		"startHeapBytes":        m.startHeapBytes,
+		"endHeapBytes":          m.endHeapBytes,
+		"artifacts":             r.outputDir,
 	}
 }
 

@@ -216,6 +216,30 @@ func TestBackgroundJobFailureDelivered(t *testing.T) {
 	}
 }
 
+func TestCancelledJobNotDeliveredToNextRun(t *testing.T) {
+	jobs := NewSubAgentJobs()
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	job := jobs.Start("task", "cancelled", "old run", ctx, func(ctx context.Context, _ string) (string, string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", "", ctx.Err()
+	})
+	<-started
+	cancel()
+	if jobs.pending() {
+		t.Fatal("a cancelled job keeps the next run alive")
+	}
+	<-job.done
+	if msgs := jobs.FollowUpMessages(context.Background(), nil); len(msgs) != 0 {
+		t.Fatalf("cancelled job leaked into next run: %+v", msgs)
+	}
+	status, _, _, _, err := job.Snapshot()
+	if status != JobFailed || err == nil {
+		t.Fatalf("cancelled job history = %s, %v", status, err)
+	}
+}
+
 // TestBackgroundRejectedWithoutRegistry verifies a run without a job registry
 // refuses async calls with an explanatory error instead of silently blocking.
 func TestBackgroundRejectedWithoutRegistry(t *testing.T) {

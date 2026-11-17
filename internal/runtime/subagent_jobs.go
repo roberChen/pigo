@@ -42,6 +42,7 @@ type subAgentJob struct {
 	agent       string
 	description string
 	prompt      string
+	runCtx      context.Context
 	startedAt   time.Time
 
 	mu        sync.Mutex
@@ -82,6 +83,7 @@ func (r *SubAgentJobs) Start(agent, description, prompt string, ctx context.Cont
 		agent:       agent,
 		description: strings.TrimSpace(description),
 		prompt:      prompt,
+		runCtx:      ctx,
 		startedAt:   time.Now(),
 		status:      JobRunning,
 		activity:    "Starting",
@@ -268,6 +270,15 @@ func (r *SubAgentJobs) deliverCompleted() []agentcore.AgentMessage {
 			continue
 		}
 		job.mu.Lock()
+		if job.runCtx != nil && job.runCtx.Err() != nil {
+			// A cancelled run's history stays queryable through task_output, but its
+			// report belongs to that run and must not leak into the next one.
+			if job.status != JobRunning {
+				job.delivered = true
+			}
+			job.mu.Unlock()
+			continue
+		}
 		if job.delivered || job.status == JobRunning {
 			job.mu.Unlock()
 			continue
@@ -312,7 +323,7 @@ func (r *SubAgentJobs) pending() bool {
 	defer r.mu.Unlock()
 	for _, job := range r.jobs {
 		job.mu.Lock()
-		running := job.status == JobRunning
+		running := job.status == JobRunning && (job.runCtx == nil || job.runCtx.Err() == nil)
 		job.mu.Unlock()
 		if running {
 			return true

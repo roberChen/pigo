@@ -8,7 +8,9 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +23,9 @@ import (
 // host-side defect, so it is recorded and answered with HTTP 400. A valid request
 // is answered from the deterministic plan (plan.go) derived from the marker token
 // in the latest user prompt: some thinking, some text, and zero or more tool
-// calls, so a turn exercises whatever combination its token selects. A request
-// without a marker (a compaction summarization prompt) gets a plain summary reply.
+// calls, so a turn exercises whatever combination its token selects. The stage
+// comes from the latest marker-bearing user prompt, not a user-role reminder.
+// The summarizer's distinct system prompt gets a plain summary reply.
 type mockLLM struct {
 	server    *http.Server
 	listener  net.Listener
@@ -44,23 +47,80 @@ type mockLLM struct {
 	// It is bounded: a multi-hour run at a high error rate would otherwise grow
 	// this map without limit, and the harness measures heap growth. failedOrder
 	// holds the insertion order used to evict the oldest entry.
-	failedTokens map[string]bool
-	failedOrder  []string
-	requests     atomic.Int64
-	failures     atomic.Int64
-	invalid      atomic.Int64
-	active       atomic.Int64
-	peak         atomic.Int64
-	log          *eventLog
-	summary      atomic.Int64
+	failedTokens         map[string]bool
+	failedOrder          []string
+	requests             atomic.Int64
+	failures             atomic.Int64
+	invalid              atomic.Int64
+	active               atomic.Int64
+	peak                 atomic.Int64
+	log                  *eventLog
+	summary              atomic.Int64
+	taskChildRequests    atomic.Int64
+	taskChildCompleted   atomic.Int64
+	taskChildReadChecks  atomic.Int64
+	taskChildFailures    atomic.Int64
+	taskFollowUps        atomic.Int64
+	taskChildMu          sync.Mutex
+	taskChildByKey       map[string]int64
+	taskChildFailedByKey map[string]int64
 }
 
 // chatRequest is the subset of the OpenAI request the harness needs.
 type chatRequest struct {
-	Messages []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
+	Messages []wireMessage `json:"messages"`
+}
+
+var dynamicArgumentPatterns = []struct {
+	placeholder string
+	toolName    string
+	pattern     *regexp.Regexp
+}{
+	{placeholder: "{{LAST_BASH_ID}}", toolName: "bash", pattern: regexp.MustCompile(`bash_id: (bash_[0-9]+)`)},
+	{placeholder: "{{LAST_SCHEDULE_ID}}", toolName: "schedule_create", pattern: regexp.MustCompile(`scheduled (sched-[0-9]+)`)},
+}
+
+func recordDynamicID(ids map[string]string, toolName, result string) {
+	for _, dynamic := range dynamicArgumentPatterns {
+		if dynamic.toolName != toolName {
+			continue
+		}
+		matches := dynamic.pattern.FindAllStringSubmatch(result, -1)
+		if len(matches) > 0 {
+			ids[dynamic.placeholder] = matches[len(matches)-1][1]
+		}
+	}
+}
+
+func resolvePlannedArguments(arguments string, ids map[string]string) (string, error) {
+	for _, dynamic := range dynamicArgumentPatterns {
+		if !strings.Contains(arguments, dynamic.placeholder) {
+			continue
+		}
+		id := ids[dynamic.placeholder]
+		if id == "" {
+			return "", fmt.Errorf("no current-turn %s result provides %s", dynamic.toolName, dynamic.placeholder)
+		}
+		arguments = strings.ReplaceAll(arguments, dynamic.placeholder, id)
+	}
+	for {
+		start := strings.Index(arguments, "{{TASK_JOB:")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(arguments[start:], "}}")
+		if end < 0 {
+			return "", fmt.Errorf("unterminated task job placeholder")
+		}
+		end += start + 2
+		placeholder := arguments[start:end]
+		id := ids[placeholder]
+		if id == "" {
+			return "", fmt.Errorf("no current-turn task result provides %s", placeholder)
+		}
+		arguments = strings.ReplaceAll(arguments, placeholder, id)
+	}
+	return arguments, nil
 }
 
 // startMockLLM binds an ephemeral loopback port and starts serving immediately.
@@ -82,6 +142,10 @@ func startMockLLM(latency, jitter time.Duration, errorRate float64, opts validat
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", m.handleCompletion)
+	mux.HandleFunc("/fixture", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "WEBFETCH-MARKER\n")
+	})
 	m.server = &http.Server{Handler: mux}
 	go func() { _ = m.server.Serve(ln) }()
 	return m, nil
@@ -89,6 +153,11 @@ func startMockLLM(latency, jitter time.Duration, errorRate float64, opts validat
 
 // URL returns the OpenAI-compatible base URL.
 func (m *mockLLM) URL() string { return m.baseURL }
+
+// FixtureURL returns the local webfetch fixture endpoint.
+func (m *mockLLM) FixtureURL() string {
+	return strings.TrimSuffix(m.baseURL, "/v1") + "/fixture"
+}
 
 // Close stops the mock listener and active connections.
 func (m *mockLLM) Close(ctx context.Context) error {
@@ -141,10 +210,25 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prompt := latestUserText(req)
-	stage := assistantMessagesSinceLastUser(req)
-	if planToken := promptToken(prompt); planToken != "" {
-		m.log.write("llm_turn", map[string]any{"token": planToken, "stage": stage})
+	childRequest := isTaskChildRequest(req)
+	childToken, childStage := taskTokenAndStage(req)
+	if childRequest {
+		if childToken == "" {
+			m.reject(w, "task child request has no longstay task marker")
+			return
+		}
+		if err := validateTaskChildTools(body); err != nil {
+			m.reject(w, "invalid task child tools: "+err.Error())
+			return
+		}
+		m.taskChildRequests.Add(1)
+		m.log.write("llm_child_turn", map[string]any{"token": childToken, "stage": childStage})
+	}
+
+	token, stage := planTokenAndStage(req)
+	summaryRequest := isSummarizationRequest(req)
+	if token != "" && !summaryRequest && !childRequest {
+		m.log.write("llm_turn", map[string]any{"token": token, "stage": stage})
 	}
 
 	delay := m.latency
@@ -163,10 +247,16 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	m.rngMu.Lock()
 	failure := m.rng.Float64() < m.errorRate
+	if childRequest {
+		failure = strings.HasSuffix(childToken, "/error")
+		if failure {
+			m.taskChildFailures.Add(1)
+		}
+	}
 	if failure {
 		// Remember the token before answering: the client asks after the turn
 		// unwinds, which is always after this point.
-		if token := promptToken(prompt); token != "" && !m.failedTokens[token] {
+		if token != "" && !summaryRequest && !childRequest && !m.failedTokens[token] {
 			m.failedTokens[token] = true
 			m.failedOrder = append(m.failedOrder, token)
 			if len(m.failedOrder) > maxFailedTokens {
@@ -178,10 +268,49 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	m.rngMu.Unlock()
 	if failure {
 		m.failures.Add(1)
+		if childRequest {
+			m.recordTaskChildKey(childToken, true)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":{"message":"longstay injected upstream failure","type":"server_error"}}`)
 		return
+	}
+
+	plan := replyPlan{Stage: stage, Text: "SUMMARY-MARKER (longstay mock summary)"}
+	childFinal := childRequest && childStage > 0
+	autoFollowUp := !childRequest && token != "" && stage == planRounds(token) && taskAutoFollowUp(token)
+	switch {
+	case childRequest:
+		if childFinal {
+			if !strings.Contains(taskTurnToolText(req), notesMarker) {
+				m.reject(w, "task child final request lacks the real read marker")
+				return
+			}
+			m.taskChildReadChecks.Add(1)
+		}
+		plan = taskPlanFor(childToken, childStage)
+	case summaryRequest || token == "":
+		if summaryRequest {
+			m.summary.Add(1)
+		}
+	default:
+		if autoFollowUp {
+			if !autoTaskFollowUpSeen(req) {
+				m.reject(w, "automatic task follow-up finished without its child report")
+				return
+			}
+			m.taskFollowUps.Add(1)
+		}
+		plan = planFor(token, stage, m.opts.Tools)
+		resolved, err := m.resolveDynamicArguments(plan, body)
+		if err != nil {
+			m.invalid.Add(1)
+			m.log.write("mock_invalid_request", map[string]any{"error": err.Error(), "token": token, "stage": stage})
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		plan = resolved
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -192,21 +321,16 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	if planToken := promptToken(prompt); planToken == "" {
-		// A request without a marker is a summarization prompt. Acknowledging it
-		// keeps compaction working; its output must never look like a turn reply.
-		m.summary.Add(1)
-		m.streamReply(w, flusher, replyPlan{
-			Stage: stage,
-			Text:  "SUMMARY-MARKER (longstay mock summary)",
-		})
-		return
-	}
-
-	token := promptToken(prompt)
-	plan := planFor(token, stage, m.opts.Tools)
-	if !m.streamReply(w, flusher, plan) {
+	streamed := m.streamReply(w, flusher, plan)
+	if !streamed && token != "" && !summaryRequest && !childRequest {
 		m.log.write("llm_stream_aborted", map[string]any{"token": token, "stage": stage})
+	}
+	if !streamed && childRequest {
+		m.log.write("llm_child_stream_aborted", map[string]any{"token": childToken, "stage": childStage})
+	}
+	if streamed && childFinal {
+		m.taskChildCompleted.Add(1)
+		m.recordTaskChildKey(childToken, false)
 	}
 }
 
@@ -292,6 +416,72 @@ func (m *mockLLM) streamReply(w io.Writer, flusher http.Flusher, plan replyPlan)
 	return err == nil
 }
 
+// resolveDynamicArguments fills values only from tool results in the current
+// user turn. Older turns may contain ids that were already deleted or stopped.
+func (m *mockLLM) resolveDynamicArguments(plan replyPlan, body []byte) (replyPlan, error) {
+	needsIDs := false
+	for _, call := range plan.Calls {
+		if strings.Contains(call.Arguments, "{{") {
+			needsIDs = true
+			break
+		}
+	}
+	if !needsIDs {
+		return plan, nil
+	}
+	ids, err := currentTurnDynamicIDs(body)
+	if err != nil {
+		return plan, err
+	}
+	for i := range plan.Calls {
+		arguments, err := resolvePlannedArguments(plan.Calls[i].Arguments, ids)
+		if err != nil {
+			return plan, fmt.Errorf("%s stage %d: %w", plan.Text, plan.Stage, err)
+		}
+		plan.Calls[i].Arguments = arguments
+	}
+	return plan, nil
+}
+
+func currentTurnDynamicIDs(body []byte) (map[string]string, error) {
+	var req chatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("decode request for dynamic arguments: %w", err)
+	}
+	start := 0
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" && promptToken(contentText(req.Messages[i].Content)) != "" {
+			start = i + 1
+			break
+		}
+	}
+	ids := make(map[string]string)
+	calls := make(map[string]wireToolCall)
+	var results strings.Builder
+	for _, message := range req.Messages[start:] {
+		switch message.Role {
+		case "assistant":
+			for _, call := range message.ToolCalls {
+				calls[call.ID] = call
+			}
+		case "tool":
+			text := contentText(message.Content)
+			results.WriteString(text)
+			results.WriteByte('\n')
+			if call, ok := calls[message.ToolCallID]; ok {
+				recordDynamicID(ids, call.Function.Name, text)
+				if call.Function.Name == "task" {
+					recordTaskDynamicID(ids, call.Function.Arguments, text)
+				}
+			}
+		}
+	}
+	for _, dynamic := range dynamicArgumentPatterns {
+		recordDynamicID(ids, dynamic.toolName, results.String())
+	}
+	return ids, nil
+}
+
 // chunk builds a chat.completion.chunk carrying one delta.
 func chunk(delta map[string]any, finish string) map[string]any {
 	choice := map[string]any{"delta": delta}
@@ -347,49 +537,53 @@ func unevenChunks(s string, hash uint64) []string {
 // utf8Start reports whether b can start a UTF-8 sequence (not a continuation byte).
 func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
 
-// latestUserText returns the last user message, accepting both OpenAI string
-// content and a content-block array.
-func latestUserText(req chatRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role != "user" {
-			continue
-		}
-		var text string
-		if json.Unmarshal(req.Messages[i].Content, &text) == nil {
-			return text
-		}
-		var blocks []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(req.Messages[i].Content, &blocks) == nil {
-			for _, block := range blocks {
-				if block.Type == "text" {
-					return block.Text
-				}
-			}
-		}
-		return ""
-	}
-	return ""
-}
-
-// assistantMessagesSinceLastUser is the plan stage: how many assistant responses
-// this user turn has already produced. 0 is the first response to the prompt.
-func assistantMessagesSinceLastUser(req chatRequest) int {
+// planTokenAndStage finds the latest real prompt marker, skipping user-role
+// system reminders appended by the runtime. The stage counts every assistant
+// response after that prompt, including responses around those reminders.
+func planTokenAndStage(req chatRequest) (string, int) {
 	stage := 0
 	for i := len(req.Messages) - 1; i >= 0; i-- {
-		switch req.Messages[i].Role {
-		case "user":
-			return stage
+		message := req.Messages[i]
+		switch message.Role {
 		case "assistant":
 			stage++
-		case "system":
-			// A system-only prefix cannot precede a tool answer of this turn.
-			return stage
+		case "user":
+			if token := promptToken(contentText(message.Content)); token != "" {
+				return token, stage
+			}
 		}
 	}
-	return stage
+	return "", 0
+}
+
+func isSummarizationRequest(req chatRequest) bool {
+	for _, message := range req.Messages {
+		if message.Role == "system" {
+			return strings.Contains(contentText(message.Content), "context summarization assistant")
+		}
+	}
+	return false
+}
+
+func contentText(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		if block.Type == "text" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // writeSSE writes one data frame and reports whether the client is still there.

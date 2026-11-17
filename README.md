@@ -376,7 +376,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `bash_jobs` | 列出本会话的后台 bash 任务：`bash_id`、运行中/已退出、耗时、退出码、未读输出字节数与命令行；`running_only` 只看仍在运行的。用于找回已滑出上下文的 `bash_id` 后再 `bash_output` / `kill_bash` |
 | `todo` | 记录/更新结构化任务清单，每次提交整份列表（pending/in_progress/completed） |
 | `question` | 通过 toolcall 向用户提问并等待回答（可带若干候选选项，用户也可自由作答）。TUI 在输入框上方弹出提问（数字键选选项、直接输入后回车作答、Esc 取消本轮），REPL 在终端打印问题并读取一行；无交互输入的场景（`-p` 无头运行、子 Agent）会返回可执行的错误结果，提示模型按合理假设继续 |
-| `webfetch` | 抓取 URL 并转为精简 Markdown 正文，HTTP 自动升级 HTTPS |
+| `webfetch` | 抓取 URL 并转为精简 Markdown 正文；公网 HTTP 自动升级 HTTPS，`localhost` 与回环 IP 的开发服务器允许纯 HTTP |
 | `websearch` | 联网搜索并返回标题/URL/摘要，按凭证自动选后端（`TAVILY_API_KEY`→Tavily，`BRAVE_API_KEY`→Brave，否则回落无 key 的 DuckDuckGo），支持 `allowed_domains`/`blocked_domains` 过滤 |
 | `memory_search` | 检索持久化记忆（`memory.enabled = false` 或 `--no-tools` 时不注册） |
 | `pigo_config` | 回显当前运行的生效配置：实际读取的配置文件（config.toml、全局/项目 config.json、pigorc、skills/plugins/memory 目录）、model/provider/endpoint、thinking 与输出格式、启用的工具及准入边界、skills、MCP 服务器（配置项 vs 实际连接）、hooks、自定义 sub-agent、memory/checkpoint/compaction。可用 `{"section": "hooks"}` 只看一节；只读，`--no-tools` 时不注册 |
@@ -475,7 +475,7 @@ pigo attach --list
 
 `serve`/`attach` 目前都不取代 TUI：它们证明拆分可行，并给 Web UI 与 `-p --server` 留好了接口。
 
-一对多长稳可靠性验证使用 `go tool longstay`（不属于 `go test`）：真实 host 与命名管道/unix socket、mock LLM、客户端随时加入/退出/恢复、事件连续性校验和 JSONL 结果报告。用法见 [`e2e/longstay/README.md`](e2e/longstay/README.md)。
+一对多长稳可靠性验证使用 `go tool longstay`（不属于 `go test`）：真实 host 与 Windows 命名管道/Linux unix socket、mock LLM、客户端随时加入/退出/恢复、事件连续性校验和 JSONL 结果报告；可配置调用强度，覆盖真实 shell/后台任务、文件写入与编辑、图片、回环 webfetch、memory、todo、schedule 生命周期，以及 `task` 同步/异步子 Agent、批量结果回收、自动 follow-up、失败传播和独立 transcript。用法见 [`e2e/longstay/README.md`](e2e/longstay/README.md)。
 
 ### GitHub PR Review Webhook
 

@@ -78,11 +78,11 @@ entry 的 id 由 `newEntryID` 生成——4 个随机字节、8 个十六进制�
 
 ```go
 func NewID(now time.Time) string {
-	return fmt.Sprintf("%s-%06d", now.UTC().Format("20060102-150405"), now.UTC().Nanosecond()/1000%1_000_000)
+	return fmt.Sprintf("%s-%06d-%s", now.UTC().Format("20060102-150405"), now.UTC().Nanosecond()/1000%1_000_000, newEntryID())
 }
 ```
 
-形如 `20260710-142530-uniq`，字典序即时间序，尾缀区分同一秒内创建的多个会话。这个 id 正是第 1 章实验 1-1 里从 stream-json 首个事件捕获到的那个 `sessionId`。
+形如 `20260710-142530-000123-a1b2c3d4`，字典序即时间序。微秒字段排序，随机尾缀防止并发会话（尤其是不同父 Agent 同时创建的子 Agent）在同一微秒内共享文件名、交叉追加 transcript。这个 id 正是第 1 章实验 1-1 里从 stream-json 首个事件捕获到的那个 `sessionId`。
 
 顺着 ParentID 链往回走，就能从任意一个叶子重建出喂给它的那条线性对话——这是整棵树的核心操作 `PathToLeaf`：
 

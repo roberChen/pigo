@@ -329,7 +329,11 @@ func (s *Server) Shutdown(reason string) {
 		close(s.done)
 		s.runCancel()
 		if s.ln != nil {
-			_ = s.ln.Close()
+			// go-winio can deadlock when Close races an in-flight Accept: its
+			// listener routine may be waiting for the response channel while the
+			// accept loop is shutting down. Close it asynchronously so the accept
+			// loop and cleanup never wait on that third-party lock.
+			go func() { _ = s.ln.Close() }()
 		}
 		// Tell every client before closing, so an attached UI can print a reason
 		// instead of a bare EOF. A client that stopped reading cannot be allowed

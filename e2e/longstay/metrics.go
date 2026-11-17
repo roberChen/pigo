@@ -11,33 +11,42 @@ import (
 // metrics contains only lock-free counters. It is safe to read for periodic
 // summaries while client goroutines and the mock server are active.
 type metrics struct {
-	clientsStarted      atomic.Int64
-	reconnects          atomic.Int64
-	prompts             atomic.Int64
-	completed           atomic.Int64
-	aborted             atomic.Int64
-	providerErrors      atomic.Int64
-	protocolErrors      atomic.Int64
-	transportErrors     atomic.Int64
-	hostErrors          atomic.Int64
-	duplicates          atomic.Int64
-	missingEvents       atomic.Int64
-	queueOverflows      atomic.Int64
-	replayTruncated     atomic.Int64
-	adoptions           atomic.Int64
-	verifications       atomic.Int64
-	verificationSkips   atomic.Int64
-	toolVerifications   atomic.Int64
-	degradedResults     atomic.Int64
-	turnsVerified       atomic.Int64
-	turnsUnverified     atomic.Int64
-	turnsDegraded       atomic.Int64
-	transcriptsVerified atomic.Int64
-	peakClients         atomic.Int64
-	startGoroutines     int
-	endGoroutines       int
-	startHeapBytes      uint64
-	endHeapBytes        uint64
+	clientsStarted        atomic.Int64
+	reconnects            atomic.Int64
+	prompts               atomic.Int64
+	completed             atomic.Int64
+	aborted               atomic.Int64
+	providerErrors        atomic.Int64
+	protocolErrors        atomic.Int64
+	transportErrors       atomic.Int64
+	hostErrors            atomic.Int64
+	duplicates            atomic.Int64
+	missingEvents         atomic.Int64
+	queueOverflows        atomic.Int64
+	replayTruncated       atomic.Int64
+	adoptions             atomic.Int64
+	verifications         atomic.Int64
+	verificationSkips     atomic.Int64
+	toolVerifications     atomic.Int64
+	degradedResults       atomic.Int64
+	subAgentProgress      atomic.Int64
+	subAgentDone          atomic.Int64
+	taskSessionsVerified  atomic.Int64
+	taskFollowUpsVerified atomic.Int64
+	taskOutputList        atomic.Int64
+	taskOutputSingle      atomic.Int64
+	taskOutputBatch       atomic.Int64
+	taskOutputWaitAll     atomic.Int64
+	turnsVerified         atomic.Int64
+	turnsUnverified       atomic.Int64
+	turnsDegraded         atomic.Int64
+	turnsCompacted        atomic.Int64
+	transcriptsVerified   atomic.Int64
+	peakClients           atomic.Int64
+	startGoroutines       int
+	endGoroutines         int
+	startHeapBytes        uint64
+	endHeapBytes          uint64
 }
 
 // eventLog serializes state transitions as JSONL. It intentionally excludes

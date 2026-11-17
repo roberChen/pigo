@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,7 +50,8 @@ type WebFetchTool struct {
 
 // webFetchArgs is the decoded argument shape for WebFetchTool.
 type webFetchArgs struct {
-	// URL is the page to fetch. An http:// URL is upgraded to https://.
+	// URL is the page to fetch. An http:// URL is upgraded to https:// unless it
+	// targets a loopback development server.
 	URL string `json:"url"`
 	// Prompt is an optional instruction describing what the caller wants from the
 	// page; it is echoed into the result framing, not acted on by the tool.
@@ -72,7 +74,7 @@ func (t *WebFetchTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "url":    {"type": "string", "description": "The URL to fetch. http:// is upgraded to https://."},
+    "url":    {"type": "string", "description": "The URL to fetch. Public http:// is upgraded to https://; loopback development servers may use plain HTTP."},
     "prompt": {"type": "string", "description": "Optional: what to extract or look for on the page."}
   },
   "required": ["url"],
@@ -200,8 +202,10 @@ func (t *WebFetchTool) Execute(ctx context.Context, id string, args json.RawMess
 	}, nil
 }
 
-// normalizeFetchURL parses raw, upgrades an http scheme to https, and rejects
-// anything that is not an absolute http(s) URL with a host.
+// normalizeFetchURL parses raw, upgrades an http scheme to https except for a
+// loopback development server, and rejects anything that is not an absolute
+// http(s) URL with a host. Public HTTP is always upgraded; local development and
+// test fixtures may use plain HTTP.
 func normalizeFetchURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -209,7 +213,9 @@ func normalizeFetchURL(raw string) (string, error) {
 	}
 	switch u.Scheme {
 	case "http":
-		u.Scheme = "https" // upgrade
+		if !isLoopbackHost(u.Hostname()) {
+			u.Scheme = "https" // upgrade public HTTP, but keep local fixtures.
+		}
 	case "https":
 		// ok
 	case "":
@@ -221,6 +227,17 @@ func normalizeFetchURL(raw string) (string, error) {
 		return "", fmt.Errorf("url has no host: %q", raw)
 	}
 	return u.String(), nil
+}
+
+// isLoopbackHost reports whether host names a local development endpoint. It
+// deliberately accepts only the literal loopback forms, not arbitrary subdomains
+// that an attacker could point at a local service.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // looksLikeHTML sniffs whether body begins with an HTML marker, used when the
