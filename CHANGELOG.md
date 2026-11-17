@@ -12,6 +12,17 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **A pigorc can auto-configure a provider's model list from the provider's own
+  API.** A pigorc is real Bash, so `curl`/`jq` discovery is ordinary shell: fetch
+  `/v1/models`, then call `provider add <name> --model <id>` once per id
+  (`if`/`case`/`while`/arrays/command substitution all work). This needed no new
+  config format, only the two fixes below. The recipe — including a cache with a
+  fallback list so a launch does not always hit the network — is documented in the
+  `pigorc` skill and the README.
+- **`PIGO_PIGORC_TIMEOUT`** sets the pigorc evaluation deadline (default 15s), so a
+  script that talks to a slow catalogue endpoint is not cut off. A malformed value
+  warns and falls back to the default instead of blocking the launch; the timeout
+  message now names the variable.
 - **A standalone long-stay reliability harness** (`e2e/longstay`, registered as
   `go tool longstay`) drives a real
   host over the native transport with a mock OpenAI-compatible SSE server and

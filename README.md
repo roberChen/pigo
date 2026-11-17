@@ -628,6 +628,8 @@ option checkpoint.push-caps.memory 900
 # 2) provider：定义第三方 Provider（等价于 config.toml 的 [[providers]]）
 provider add mycorp --type openai --base-url "https://llm.mycorp.com/v1" \
   --env-var MYCORP_API_KEY --model mycorp-large
+#    重复 provider add 是"细化"而不是"替换"：只写 --model 的调用会保留上面的
+#    base_url/env_var，显式给出的 flag 仍然覆盖。因此可以在循环里逐个追加模型。
 
 # 3) agent：定义自定义 sub-agent（等价于 config.toml 的 [[agents]]）
 agent add researcher --description "只读调研" --tools read,grep --prompt-file ./researcher.md
@@ -648,7 +650,45 @@ export ANTHROPIC_API_KEY="$(pass show anthropic)"
 export PIGO_MAX_SUBAGENTS=4
 ```
 
-脚本以 `set -eu` 执行：**任何一步失败都会中止加载**（已生效的 option 保留），并打印警告，但不会阻止 pigo 启动。没有 `bash`、超时（15s）、未知 option 键都只产生警告。
+脚本以 `set -eu` 执行：**任何一步失败都会中止加载**（已生效的 option 保留），并打印警告，但不会阻止 pigo 启动。没有 `bash`、超时（默认 15s，可用 `PIGO_PIGORC_TIMEOUT` 调整）、未知 option 键都只产生警告。
+
+因为它是真正的 Bash，`if`/`case`/`while`/`for`、数组、算术、函数、`source`、管道以及**任意外部命令**（`curl`、`jq`、`pass`、`op`、`gh`、一段 Python）加命令替换都能直接用——这正是下面"自动获取模型列表"不需要任何专用配置格式的原因。
+
+### 从 Provider API 自动获取模型列表
+
+OpenAI 兼容的 `/v1/models`（以及任何能用 `jq` 解析的接口）都可以在 pigorc 里直接抓取并注册：
+
+```bash
+provider add mycorp --type openai --base-url "$MYCORP_BASE_URL" --env-var MYCORP_API_KEY
+
+# curl 取目录，jq 提取 id，再逐个注册
+ids=$(curl -fsS -H "Authorization: Bearer $MYCORP_API_KEY" \
+        "$MYCORP_BASE_URL/models" | jq -r '.data[].id')
+for m in $ids; do
+  case "$m" in
+    *-vl) model add "$m" --provider mycorp --supports-images ;;  # 多模态 id
+    *)    provider add mycorp --model "$m" ;;                    # 普通 id
+  esac
+done
+
+option provider mycorp
+option model mycorp/<第一个 id>        # 省略则用该 Provider 的第一个模型
+```
+
+要点：
+
+- `provider add` 对同名 Provider 是**细化合并**，所以循环里只写 `--model` 的调用不会抹掉前面声明的 `--base-url`/`--env-var`；第一个注册的 id 就是该 Provider 的默认模型。
+- 网络请求可能超过默认 15s 预算：在 pigorc 里 `export PIGO_PIGORC_TIMEOUT=45s`（任意 Go duration）。
+- `curl -f` 配合 `set -e` 会让抓取失败**中止加载并报出原因**，而不是悄悄注册 0 个模型；若可以接受降级，加 `|| true`。
+- 想避免每次启动都发网络请求，可以缓存并回退到静态列表：
+
+```bash
+cache="$PIGO_HOME/mycorp-models.txt"
+if [ ! -s "$cache" ] || [ $(( $(date +%s) - $(date -r "$cache" +%s) )) -gt 86400 ]; then
+  curl -fsS "https://llm.mycorp.com/v1/models" | jq -r '.data[].id' > "$cache" || rm -f "$cache"
+fi
+[ -s "$cache" ] && while read -r m; do [ -n "$m" ] && provider add mycorp --model "$m"; done < "$cache"
+```
 
 ### 逐个配置项的 pigorc 写法
 
@@ -707,6 +747,7 @@ UserPromptSubmit() { echo '{"additionalContext":"branch: '"$(git branch --show-c
 | `PIGO_SKILLS_DIR` | 技能目录（默认 `~/.agents/skills`） |
 | `PIGO_MAX_SUBAGENTS` | 子 Agent 并发上限 |
 | `PIGO_STREAM_IDLE_TIMEOUT` | 流式空闲超时 |
+| `PIGO_PIGORC_TIMEOUT` | pigorc 求值总超时（默认 15s）；脚本里要访问网络时调大，如 `45s` |
 | `PIGO_DEBUG` | 打开诊断输出（默认静默）。TUI 下诊断信息渲染进对话区而不是写 stderr，避免破坏全屏画面 |
 | `PIGO_EVENT_LOG` | 事件日志路径 |
 | `XDG_CONFIG_HOME` | 改变 `config.toml` 的查找根 |

@@ -82,15 +82,59 @@ export PIGO_MAX_SUBAGENTS=4
 ```
 
 The script runs with `set -eu`: a failing statement aborts the load (options
-applied so far are kept) and prints a warning. A missing bash, a 15s timeout, an
-unknown option key or a malformed value only warns — configuration never blocks
-the launch.
+applied so far are kept) and prints a warning. A missing bash, a timeout (15s by
+default, override with `PIGO_PIGORC_TIMEOUT`), an unknown option key or a
+malformed value only warns — configuration never blocks the launch.
+
+Anything Bash can do runs here: `if`/`case`/`while`/`for`, arrays, arithmetic,
+functions, `source`, pipes and any external command (`curl`, `jq`, `pass`, `op`,
+`gh`, a Python one-liner) with command substitution. That is what makes the
+provider-discovery recipe below possible without a bespoke config format.
 
 ## Recipes
 
 **Switch the default model.** `option model "zai/glm-4.6"` (or a bare provider name
 like `zai` to use that provider's default). `option thinking-level high` for
 reasoning effort.
+
+**Auto-configure a provider's model list from its own API.** A pigorc is real
+Bash, so a discovery script is just shell: fetch the catalogue, parse it, and call
+`provider add ... --model` once per id. This works with any OpenAI-compatible
+`/v1/models` endpoint (and any other API you can parse with `jq`):
+
+```bash
+provider add mycorp --type openai --base-url "$MYCORP_BASE_URL" --env-var MYCORP_API_KEY
+ids=$(curl -fsS -H "Authorization: Bearer $MYCORP_API_KEY" \
+        "$MYCORP_BASE_URL/models" | jq -r '.data[].id')
+for m in $ids; do
+  case "$m" in
+    *-vl) model add "$m" --provider mycorp --supports-images ;;  # a vision id
+    *)    provider add mycorp --model "$m" ;;                    # a plain id
+  esac
+done
+option provider mycorp
+option model mycorp/<first-id>      # or omit to use the provider's first model
+```
+
+Because `provider add` **refines** an existing definition rather than replacing
+it, the per-id calls keep the `--base-url`/`--env-var` declared above; an explicit
+flag still overrides, so a project `.pigorc` can retarget a global definition. The
+first registered id is the provider's default.
+
+Network work needs more than the 15s evaluation budget on a slow API: export
+`PIGO_PIGORC_TIMEOUT=45s` (any Go duration). Keep the loop tolerant — `curl -f`
+plus `set -e` means a failed fetch aborts the load with a warning naming the
+error, rather than silently registering zero models; add `|| true` if a degraded
+catalogue is acceptable. To avoid a network round-trip on every launch, cache the
+result and fall back to a static list:
+
+```bash
+cache="$PIGO_HOME/mycorp-models.txt"
+if [ ! -s "$cache" ] || [ $(( $(date +%s) - $(date -r "$cache" +%s) )) -gt 86400 ]; then
+  curl -fsS "https://llm.mycorp.com/v1/models" | jq -r '.data[].id' > "$cache" || rm -f "$cache"
+fi
+[ -s "$cache" ] && while read -r m; do [ -n "$m" ] && provider add mycorp --model "$m"; done < "$cache"
+```
 
 **Point at a self-hosted or third-party gateway.** Either
 `provider add <name> --type openai|anthropic --base-url URL [--env-var VAR]
