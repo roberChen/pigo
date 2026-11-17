@@ -58,6 +58,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,8 +70,25 @@ import (
 )
 
 // pigorcTimeout bounds the whole evaluation so a script waiting on input cannot
-// hang startup. It is a var so tests can shorten it.
+// hang startup. It is a var so tests can shorten it. `PIGO_PIGORC_TIMEOUT`
+// overrides it, which is what makes network work feasible: a script that fetches a
+// provider's model catalogue with curl needs more than a local-only script does.
 var pigorcTimeout = 15 * time.Second
+
+// resolvePigorcTimeout returns the deadline for this evaluation and a warning when
+// PIGO_PIGORC_TIMEOUT could not be honoured. A malformed value is a diagnostic,
+// not a failed launch: configuration never blocks pigo.
+func resolvePigorcTimeout() (time.Duration, string) {
+	raw := strings.TrimSpace(os.Getenv("PIGO_PIGORC_TIMEOUT"))
+	if raw == "" {
+		return pigorcTimeout, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return pigorcTimeout, fmt.Sprintf("pigorc: PIGO_PIGORC_TIMEOUT=%q is not a positive duration such as 45s or 2m; using %s", raw, pigorcTimeout)
+	}
+	return d, ""
+}
 
 // pigorcFileName is the project-local script; the global one lives in
 // $PIGO_HOME/pigorc.
@@ -207,7 +225,8 @@ func EvaluatePigorc(cwd string, paths []string, version string) (*Pigorc, error)
 	}
 
 	script := buildPigorcScript(preludePath, paths)
-	ctx, cancel := context.WithTimeout(context.Background(), pigorcTimeout)
+	timeout, timeoutWarn := resolvePigorcTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bash, "--noprofile", "--norc", "-c", script)
 	if cwd != "" {
@@ -228,12 +247,17 @@ func EvaluatePigorc(cwd string, paths []string, version string) (*Pigorc, error)
 	cmd.WaitDelay = time.Second
 
 	p := &Pigorc{Sources: paths}
+	// A bad PIGO_PIGORC_TIMEOUT is reported alongside the script's own diagnostics
+	// and the default is used, so a typo cannot stop pigo from starting.
+	if timeoutWarn != "" {
+		p.Warnings = append(p.Warnings, timeoutWarn)
+	}
 	err = cmd.Run()
 	if out.Len() > 0 {
 		p.Output = strings.TrimRight(out.String(), "\n")
 	}
 	if ctx.Err() != nil {
-		p.Warnings = append(p.Warnings, fmt.Sprintf("pigorc: evaluation timed out after %s", pigorcTimeout))
+		p.Warnings = append(p.Warnings, fmt.Sprintf("pigorc: evaluation timed out after %s (raise PIGO_PIGORC_TIMEOUT for scripts that call the network)", timeout))
 		return p, nil
 	}
 	if err != nil {
@@ -397,11 +421,13 @@ func (p *Pigorc) parseProviderRecord(fields []string) {
 			p.warnf("provider add: the provider name must not be empty")
 			return
 		}
-		// A repeated definition replaces the earlier one but keeps any models it
-		// already accumulated, so `provider add x ...` can be refined per flag.
+		// A repeated definition refines the earlier one: a field the call did not
+		// set keeps its old value, and an explicit one overrides it. This is what
+		// makes a discovery loop work — `provider add x --model m` runs once per
+		// id and must not erase the endpoint the same script defined a moment
+		// earlier with `provider add x --base-url ...`.
 		if old := p.providerIndex(def.Name); old >= 0 {
-			def.Models = p.Providers[old].Models
-			p.Providers[old] = def
+			p.Providers[old] = mergeProviderConfig(p.Providers[old], def)
 			return
 		}
 		p.Providers = append(p.Providers, def)
@@ -527,6 +553,45 @@ func mergeModelConfig(old, next ModelConfig) ModelConfig {
 	}
 	if merged.SupportsImages == nil {
 		merged.SupportsImages = old.SupportsImages
+	}
+	return merged
+}
+
+// mergeProviderConfig layers next over old: a field next left empty keeps old's
+// value, so `provider add x --model m` (the per-id call a discovery loop makes)
+// refines the endpoint instead of erasing it. An explicitly set field wins, which
+// lets a project script retarget or re-key a provider the global one declared.
+//
+// Models accumulate and dedup in call order: the first id stays first because the
+// provider's first model is its default.
+func mergeProviderConfig(old, next ProviderConfig) ProviderConfig {
+	merged := next
+	if merged.Name == "" {
+		merged.Name = old.Name
+	}
+	if merged.Protocol == "" {
+		merged.Protocol = old.Protocol
+	}
+	if merged.BaseURL == "" {
+		merged.BaseURL = old.BaseURL
+	}
+	if merged.EnvVar == "" {
+		merged.EnvVar = old.EnvVar
+	}
+	if merged.APIKey == "" {
+		merged.APIKey = old.APIKey
+	}
+	if merged.Credential == "" {
+		merged.Credential = old.Credential
+	}
+	if merged.Auth == "" {
+		merged.Auth = old.Auth
+	}
+	merged.Models = old.Models
+	for _, id := range next.Models {
+		if !slices.Contains(merged.Models, id) {
+			merged.Models = append(merged.Models, id)
+		}
 	}
 	return merged
 }

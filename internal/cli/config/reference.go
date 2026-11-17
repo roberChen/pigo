@@ -122,6 +122,7 @@ var envVarDocs = []fieldDoc{
 	{"PIGO_SKILLS_DIR", "path", "Skills directory (default ~/.agents/skills)."},
 	{"PIGO_MAX_SUBAGENTS", "int", "Concurrency cap for task sub-agents (default 4)."},
 	{"PIGO_STREAM_IDLE_TIMEOUT", "duration", "Provider stream idle timeout."},
+	{"PIGO_PIGORC_TIMEOUT", "duration", "Deadline for evaluating the pigorc scripts (default 15s). Raise it for a script that fetches a model catalogue over the network."},
 	{"PIGO_DEBUG", "bool", "Debug output."},
 	{"PIGO_EVENT_LOG", "path", "Event log file for diagnostics."},
 	{"XDG_CONFIG_HOME", "path", "Root for config.toml (default ~/.config)."},
