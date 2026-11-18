@@ -22,6 +22,7 @@ import (
 
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/agenttool"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/config"
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/mcp"
@@ -215,6 +216,7 @@ func (r *ConfigReport) renderFiles() string {
 		skillsLabel += " (--no-skills)"
 	}
 	lines = append(lines, kvPath(skillsLabel, SkillsDir()))
+	lines = append(lines, kvPath("built-in skills", builtinskills.Scheme+builtinskills.VirtualRoot+"/ (read-only)"))
 	pluginsLabel := "plugins"
 	if r.NoTools {
 		pluginsLabel += " (--no-tools)"
@@ -264,8 +266,12 @@ func (r *ConfigReport) renderTools() string {
 	return strings.Join(lines, "\n")
 }
 
-// renderSkills renders the discovered skills and whether the model may invoke them
-// on its own or only through the /name command.
+// renderSkills renders the discovered skills, where each one comes from, and
+// whether the model may invoke it on its own or only through the /name command.
+//
+// Built-in skills are listed separately from the skills directory because they are
+// not installed there: they live in the binary at a read-only `pigo://` address.
+// Saying so is the point — a user looking for the file on disk would not find it.
 func (r *ConfigReport) renderSkills() string {
 	if r.NoSkills {
 		return "skills  disabled (--no-skills)"
@@ -273,13 +279,30 @@ func (r *ConfigReport) renderSkills() string {
 	if len(r.Skills) == 0 {
 		return "skills (0)  from " + SkillsDir()
 	}
-	lines := []string{fmt.Sprintf("skills (%d)  from %s", len(r.Skills), SkillsDir())}
+	var builtinCount int
+	for _, s := range r.Skills {
+		if builtinskills.IsVirtual(s.Path) {
+			builtinCount++
+		}
+	}
+	summary := fmt.Sprintf("skills (%d)", len(r.Skills))
+	if builtinCount > 0 {
+		summary += fmt.Sprintf("  %d built-in (pigo://, read-only), %d from %s",
+			builtinCount, len(r.Skills)-builtinCount, SkillsDir())
+	} else {
+		summary += "  from " + SkillsDir()
+	}
+	lines := []string{summary}
 	for _, s := range r.Skills {
 		mark := "model"
 		if s.Frontmatter.DisableModelInvocation {
 			mark = "slash-only"
 		}
-		lines = append(lines, fmt.Sprintf("  %-14s [%s] %s", s.Frontmatter.Name, mark, clip(s.Frontmatter.Description, reportDescriptionLimit)))
+		source := "disk"
+		if builtinskills.IsVirtual(s.Path) {
+			source = "built-in"
+		}
+		lines = append(lines, fmt.Sprintf("  %-14s [%s] [%s] %s", s.Frontmatter.Name, mark, source, clip(s.Frontmatter.Description, reportDescriptionLimit)))
 	}
 	return strings.Join(lines, "\n")
 }

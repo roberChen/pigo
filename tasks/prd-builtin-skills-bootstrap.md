@@ -1,5 +1,12 @@
 # PRD: 内置 Skills 首次运行自动安装
 
+> **已被取代。** 本 PRD 描述的"首次运行把内置 skills 复制到 `~/.agents/skills`"已被放弃：
+> 那个目录 pigo 并不拥有，复制后也无法区分 pigo 自己的副本和用户手写的同名技能。
+> 现在内置技能**不再落盘**，而是通过只读虚拟路径 `pigo://skills/<name>/SKILL.md` 直接从
+> 二进制读取；`read` 解析该地址，`write`/`edit` 明确拒绝，磁盘上的同名技能遮蔽内置版本。
+> 实现见 `internal/builtinskills/vfs.go`、`internal/runtime/skills.go`
+> （`LoadBuiltinSkills` / `MergeSkills`）。下文保留为历史设计记录。
+
 ## Introduction
 
 pigo 目前的 skills 全部依赖用户手动安装（`pigo install npm:...` 或把目录放进 `~/.agents/skills`）。新用户开箱后没有任何可用的工作流技能，需要自己去 goal.rpcx.io 逐条安装，门槛高。

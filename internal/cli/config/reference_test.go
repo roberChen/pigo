@@ -7,12 +7,14 @@ package config
 // cmd/pigo, where the flag set lives.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/mcp"
 )
@@ -209,50 +211,60 @@ func TestReferenceRendersContent(t *testing.T) {
 	}
 }
 
-// TestWriteReferenceAndOwnership verifies the file is written atomically and that
-// ownership is decided by the marker in SKILL.md (a user's own skill of the same
-// name is untouched).
-func TestWriteReferenceAndOwnership(t *testing.T) {
-	dir := t.TempDir()
-	skillDir := filepath.Join(dir, "pigorc")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if SkillOwnsReference(skillDir) {
-		t.Fatal("a directory without SKILL.md must not count as pigo's skill")
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my own pigorc notes\n"), 0o600); err != nil {
-		t.Fatalf("write SKILL.md: %v", err)
-	}
-	if SkillOwnsReference(skillDir) {
-		t.Fatal("a user-written skill must not count as pigo's skill")
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(ReferenceMarker+"\n# pigorc\n"), 0o600); err != nil {
-		t.Fatalf("write SKILL.md: %v", err)
-	}
-	if !SkillOwnsReference(skillDir) {
-		t.Fatal("the marker should make the directory pigo-owned")
+// TestPublishReferenceIntoVirtualTree verifies the generated reference is
+// published into the built-in pigorc skill's read-only virtual tree instead of
+// being written into a skills directory, and that a re-publish replaces the
+// previous document rather than appending to it.
+func TestPublishReferenceIntoVirtualTree(t *testing.T) {
+	// Nothing is written to disk any more: point PIGO_HOME at a temp dir and
+	// assert it stays empty apart from whatever the test itself creates.
+	home := t.TempDir()
+	t.Setenv("PIGO_HOME", home)
+
+	if err := PublishReference(ReferenceOptions{Version: "test"}); err != nil {
+		t.Fatalf("PublishReference: %v", err)
 	}
 
-	path := SkillsReferencePath(dir)
-	if err := WriteReference(path, ReferenceOptions{Version: "test"}); err != nil {
-		t.Fatalf("WriteReference: %v", err)
+	loc := ReferenceVirtualPath()
+	if loc != "pigo://skills/pigorc/reference.md" {
+		t.Fatalf("reference address = %q, want pigo://skills/pigorc/reference.md", loc)
 	}
-	data, err := os.ReadFile(path)
+	data, err := builtinskills.ReadVirtual(loc)
 	if err != nil {
-		t.Fatalf("read reference: %v", err)
+		t.Fatalf("read %s: %v", loc, err)
 	}
-	if !strings.Contains(string(data), ReferenceMarker) {
-		t.Error("written reference lacks the marker")
+	doc := string(data)
+	if !strings.Contains(doc, ReferenceMarker) {
+		t.Error("published reference lacks the marker")
 	}
-	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
-		t.Fatalf("overwrite: %v", err)
+	if !strings.Contains(doc, "pigo test") {
+		t.Error("published reference lacks the build version")
 	}
-	if err := WriteReference(path, ReferenceOptions{Version: "test"}); err != nil {
-		t.Fatalf("rewrite: %v", err)
+
+	// Republishing replaces the document (it is not append-only).
+	if err := PublishReference(ReferenceOptions{Version: "test"}); err != nil {
+		t.Fatalf("republish: %v", err)
 	}
-	if !SkillOwnsReference(skillDir) {
-		t.Error("rewriting must keep the skill owned")
+	again, err := builtinskills.ReadVirtual(loc)
+	if err != nil {
+		t.Fatalf("re-read %s: %v", loc, err)
+	}
+	if string(again) != doc {
+		t.Error("republishing from the same inputs should produce an identical document")
+	}
+}
+
+// TestVirtualTreeRejectsWrites verifies the built-in tree is read-only: pigo
+// generates the reference into it, but nothing may modify or delete a built-in
+// file at runtime.
+func TestVirtualTreeRejectsWrites(t *testing.T) {
+	if err := builtinskills.WriteVirtual("pigo://skills/pigorc/SKILL.md", []byte("hacked")); !errors.Is(err, builtinskills.ErrReadOnly) {
+		t.Fatalf("write = %v, want ErrReadOnly", err)
+	}
+	if got, err := builtinskills.ReadVirtual("pigo://skills/pigorc/SKILL.md"); err != nil {
+		t.Fatalf("read: %v", err)
+	} else if string(got) == "hacked" {
+		t.Error("a rejected write must not have changed the file")
 	}
 }
 

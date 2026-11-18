@@ -12,6 +12,26 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **Built-in skills are read from the binary instead of installed on disk.** The
+  skills pigo ships (`prd`, `to-issues`, `review-it`, `ship-it`, `refactor`,
+  `pigorc`, the architecture/insight diagram set and the rest) are embedded and
+  served from a read-only virtual path, `pigo://skills/<name>/SKILL.md`, so a
+  fresh install no longer copies a tree into `~/.agents/skills` — a directory
+  pigo does not own — and no longer rewrites files there on every launch. The
+  `read` tool resolves `pigo://` addresses (sub-files, line numbers and paging
+  behave exactly as for disk files) and every skill's `<available_skills>`
+  location points at one; `write` and `edit` refuse them with
+  `built-in skills are read-only`, and traversal cannot escape the virtual root.
+  A skill of the same name under the skills directory shadows the built-in one,
+  which is now how a built-in is customised. `pigo_config` / `/status` report
+  built-in skills separately from disk skills with a count of each.
+
+### Removed
+- **The first-run skill bootstrap and its manifest.** Nothing is copied into the
+  skills directory, so an existing installation can delete the copies pigo
+  previously left at `~/.agents/skills/pigorc/` (and any other built-in whose
+  `SKILL.md` carries pigo's generated marker); the built-ins keep working from
+  the binary, and a stale copy would shadow the current one.
 - **A pigorc can auto-configure a provider's model list from the provider's own
   API.** A pigorc is real Bash, so `curl`/`jq` discovery is ordinary shell: fetch
   `/v1/models`, then call `provider add <name> --model <id>` once per id

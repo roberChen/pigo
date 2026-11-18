@@ -13,10 +13,15 @@ pigo is configured by a **Bash script** (`pigorc`) plus an optional static
 `$(command)` secret lookups all work.
 
 **The authoritative, machine-generated reference lives next to this file as
-`reference.md`.** It is rewritten from the running binary on every launch, so it
-always lists exactly the options, provider/agent fields, hook events, environment
-variables and CLI flags this build supports. Read it before answering detailed
-questions; use this file for the workflow and the recipes.
+`pigo://skills/pigorc/reference.md`.** It is regenerated from the running binary on
+every launch, so it always lists exactly the options, provider/agent fields, hook
+events, environment variables and CLI flags this build supports. Read it before
+answering detailed questions; use this file for the workflow and the recipes.
+
+This skill is built into the binary at `pigo://skills/pigorc/` and is read-only:
+`read` works, `write`/`edit` are refused. To customise it, put your own
+`pigorc/SKILL.md` under the skills directory — a disk skill shadows the built-in
+one of the same name.
 
 ## Where configuration lives
 
@@ -201,8 +206,8 @@ run. Keep secrets out of config files: export the provider key or use
 
 ## Verifying and troubleshooting
 
-- `pigo --help` lists the flags; `reference.md` (this directory) lists everything,
-  regenerated from the binary.
+- `pigo --help` lists the flags; `pigo://skills/pigorc/reference.md` lists
+  everything, regenerated from the binary.
 - Startup warnings name the offending key: `pigorc: unknown option "x"` /
   `option x: "v" is not a boolean` — fix and rerun.
 - To trace the script: `bash -x ~/.pigo/pigorc 2>&1 | head`.

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"gopkg.in/yaml.v3"
 )
 
@@ -246,6 +247,70 @@ func LoadSkillsDir(dir string) ([]*Skill, error) {
 	return skills, errors.Join(errs...)
 }
 
+// LoadBuiltinSkills parses the skills compiled into the binary. Their Path is a
+// `pigo://skills/<name>/SKILL.md` address rather than a disk path, so the
+// system prompt advertises a location the read tool resolves out of the embedded
+// tree; nothing is installed on disk.
+//
+// A malformed built-in is skipped and reported, matching LoadSkillsDir: shipping
+// one bad skill must not hide the rest.
+func LoadBuiltinSkills() ([]*Skill, error) {
+	var skills []*Skill
+	var errs []error
+	for _, name := range builtinskills.BuiltinSkillNames() {
+		loc := builtinskills.VirtualPath(name, "SKILL.md")
+		content, err := builtinskills.ReadVirtual(loc)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		skill, parseErr := ParseSkill(loc, content)
+		if parseErr != nil {
+			errs = append(errs, parseErr)
+			continue
+		}
+		skills = append(skills, skill)
+	}
+	sort.Slice(skills, func(i, j int) bool {
+		return skills[i].Frontmatter.Name < skills[j].Frontmatter.Name
+	})
+	return skills, errors.Join(errs...)
+}
+
+// MergeSkills combines built-in and on-disk skills, letting a disk skill shadow a
+// built-in one of the same name. That is how a user overrides a shipped skill:
+// drop a directory with the same name into the skills dir and its SKILL.md — and
+// only its SKILL.md — is what /skill and the model see. The result is sorted by
+// name so the prompt listing is stable.
+func MergeSkills(builtin, disk []*Skill) []*Skill {
+	byName := make(map[string]*Skill, len(builtin)+len(disk))
+	order := make([]string, 0, len(builtin)+len(disk))
+	add := func(s *Skill) {
+		if s == nil {
+			return
+		}
+		name := s.Frontmatter.Name
+		if _, seen := byName[name]; !seen {
+			order = append(order, name)
+		}
+		byName[name] = s
+	}
+	for _, s := range builtin {
+		add(s)
+	}
+	for _, s := range disk {
+		add(s) // disk wins: it is added later
+	}
+	merged := make([]*Skill, 0, len(order))
+	for _, name := range order {
+		merged = append(merged, byName[name])
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Frontmatter.Name < merged[j].Frontmatter.Name
+	})
+	return merged
+}
+
 // SubAgentSpec turns a skill into a sub-agent spec: the skill body becomes the
 // child's system prompt, the description is surfaced to the model, and the tool
 // set is the provided tools filtered by AllowedTools (when set). newRunConfig
@@ -345,6 +410,12 @@ func FormatSkillsForPrompt(skills []*Skill) string {
 // it with the read tool regardless of the working directory. It falls back to
 // the original path if resolution fails.
 func skillLocation(path string) string {
+	// A built-in skill's location is a pigo:// address the read tool resolves out
+	// of the binary. It must survive verbatim: filepath.Abs would mangle it into
+	// "<cwd>/pigo:/skills/...", a path that exists nowhere.
+	if builtinskills.IsVirtual(path) {
+		return path
+	}
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs
 	}

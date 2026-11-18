@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 )
 
 // WriteTool writes text files under Root, creating parent directories as needed.
@@ -85,6 +86,11 @@ func (t *WriteTool) Execute(ctx context.Context, id string, args json.RawMessage
 	}
 	if a.Path == "" {
 		return errorResult("write: path is required"), nil
+	}
+	// Built-in skills live in the binary and are strictly read-only: a write or
+	// edit must fail as a rule, not fall through to a confusing path error.
+	if builtinskills.IsVirtual(a.Path) {
+		return errorResult("write: " + a.Path + ": " + builtinskills.ErrReadOnly.Error()), nil
 	}
 	full, err := t.resolvePath(a.Path)
 	if err != nil {

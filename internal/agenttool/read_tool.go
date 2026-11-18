@@ -6,6 +6,7 @@ package agenttool
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/imageload"
 )
 
@@ -80,7 +82,8 @@ func (t *ReadTool) Name() string { return "read" }
 // Description implements AgentTool.
 func (t *ReadTool) Description() string {
 	return "Read a text file's contents by path, with optional line offset/limit. " +
-		"Output is line-numbered; very large files are truncated. An image file " +
+		"Output is line-numbered; very large files are truncated. A `pigo://` path " +
+		"reads a read-only built-in skill file. An image file " +
 		"(PNG, JPEG, GIF or WebP under 8 MiB) is returned as an image block the model " +
 		"can see, not as text; other image formats are rejected with a conversion hint."
 }
@@ -90,7 +93,7 @@ func (t *ReadTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "path":   {"type": "string", "description": "File path to read, relative to the workspace root."},
+    "path":   {"type": "string", "description": "File path to read, relative to the workspace root, or a pigo:// address for a built-in skill file."},
     "offset": {"type": "integer", "description": "1-based line number to start from.", "minimum": 0},
     "limit":  {"type": "integer", "description": "Maximum number of lines to return.", "minimum": 0}
   },
@@ -124,6 +127,12 @@ func (t *ReadTool) Execute(ctx context.Context, id string, args json.RawMessage,
 	}
 	if a.Path == "" {
 		return errorResult("read: path is required"), nil
+	}
+	// A `pigo://` address names a built-in skill file compiled into the binary,
+	// not a path on disk, so it bypasses the workspace boundary entirely. The
+	// tree is read-only and the address cannot escape it (see builtinskills).
+	if builtinskills.IsVirtual(a.Path) {
+		return readVirtualFile(a.Path, a.Offset, a.Limit), nil
 	}
 	full, err := t.resolvePath(a.Path)
 	if err != nil {
@@ -179,6 +188,21 @@ func (t *ReadTool) Execute(ctx context.Context, id string, args json.RawMessage,
 		text += fmt.Sprintf("\n... (output truncated at %d lines; use offset to read more)", readToolMaxLines)
 	}
 	return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(text)}}, nil
+}
+
+// readVirtualFile returns the contents of a `pigo://` address. It mirrors the
+// disk path's shape — numbered lines, the same truncation notice — so a model
+// reading a built-in skill cannot tell the two apart apart from the address.
+func readVirtualFile(p string, offset, limit int) agentcore.AgentToolResult {
+	data, err := builtinskills.ReadVirtual(p)
+	if err != nil {
+		return errorResult(fmt.Sprintf("read: %v", err))
+	}
+	text, truncated := readNumbered(bytes.NewReader(data), offset, limit)
+	if truncated {
+		text += fmt.Sprintf("\n... (output truncated at %d lines; use offset to read more)", readToolMaxLines)
+	}
+	return agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent(text)}}
 }
 
 // readNumbered reads lines from r starting at 1-based offset, returning at most

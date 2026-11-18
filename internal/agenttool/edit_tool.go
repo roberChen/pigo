@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 )
 
 // EditTool performs exact string replacements in files under Root.
@@ -85,6 +86,11 @@ func (t *EditTool) Execute(ctx context.Context, id string, args json.RawMessage,
 	}
 	if a.Path == "" {
 		return errorResult("edit: path is required"), nil
+	}
+	// Built-in skills live in the binary and are strictly read-only: a write or
+	// edit must fail as a rule, not fall through to a confusing path error.
+	if builtinskills.IsVirtual(a.Path) {
+		return errorResult("edit: " + a.Path + ": " + builtinskills.ErrReadOnly.Error()), nil
 	}
 	if a.OldString == a.NewString {
 		return errorResult("edit: old_string and new_string are identical; nothing to change"), nil

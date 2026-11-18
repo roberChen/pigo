@@ -57,7 +57,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - **系统提示词分层组装**：base 指令 + 环境块 + `AGENTS.md`（general→specific）+ `--append-system-prompt`。
 - **项目信任**：副作用工具（bash/write/edit）在未信任目录需确认，`--approve` 一次性授权。
 - **工具级准入**：`--allowed-tools` / `--disallowed-tools` 划定工具边界（黑名单优先、子 Agent 继承、`--approve` 不可绕过）。
-- **技能与插件**：`~/.agents/skills` 的技能（`/skill` 选择、可多选注入下一轮）、`~/.pigo/plugins` 下的外部插件。
+- **技能与插件**：`~/.agents/skills` 的技能（`/skill` 选择、可多选注入下一轮）、编译进二进制的**内置技能**（`pigo://` 只读虚拟路径，不落盘）、`~/.pigo/plugins` 下的外部插件。
 - **提示词模板**：`~/.pigo/prompts`、项目 `.pigo/prompts`（受信任时）、config `prompts`、`--prompt-template` 下的可复用 `/name` 模板，支持 `$1`/`$@`/`${1:-default}`/`${@:N}` 等参数语法。
 - **上下文自动压缩**：接近上下文窗口上限时自动摘要，亦可 `/compact` 手动触发。
 - **包管理**：`pigo install npm:<pkg>` 安装 pi 生态的 extension / skill / prompt / theme。
@@ -779,14 +779,14 @@ PostToolUse() {
 
 ### 内置 pigorc skill（自动更新的配置参考）
 
-pigo 内置一个 `pigorc` 技能（首次启动自动装到 `~/.agents/skills/pigorc/`，也可用 `/skill pigorc` 调用或让模型自行查阅）：
+pigo 内置一个 `pigorc` 技能（不落盘，位于只读虚拟路径 `pigo://skills/pigorc/`，可用 `/skill pigorc` 调用或让模型自行查阅）：
 
 - `SKILL.md`：手写的配置指南与常用配方（模型/第三方 provider/自定义 agent/hook/记忆/信任/排错）；
-- `reference.md`：**机器生成的完整参考**，每次启动由当前二进制重写（原子写入），内容直接来自代码注册表——`option` 全量键表、`[[providers]]`/`agent` 字段、9 个 hook 事件、环境变量、以及本二进制注册的**全部 CLI flag**。
+- `reference.md`：**机器生成的完整参考**，每次启动由当前二进制重新渲染并发布到虚拟路径，内容直接来自代码注册表——`option` 全量键表、`[[providers]]`/`agent` 字段、9 个 hook 事件、环境变量、以及本二进制注册的**全部 CLI flag**。
 
 因此只要新增了可配置项（新的 config.toml 字段、provider/agent 字段、hook 事件、`PIGO_*` 变量或 flag），参考文档下一个版本自动包含它；同时有覆盖测试强制要求：`config.toml` 的每个字段、`ProviderConfig`/`AgentConfig` 的每个字段、`hooks.AllEvents` 的每个事件、代码中读取的每个 `PIGO_*` 变量、以及每个 CLI flag 都必须在 `reference.md` 中出现，否则测试失败。
 
-> 生成只作用于 pigo 自己的技能目录（`SKILL.md` 带标记）；你自己写的同名 `pigorc` 技能不会被覆盖。
+> 内置技能是只读的：`read` 能读，`write`/`edit` 会明确报错拒绝。要定制同名技能，把你自己的一份 `pigorc/SKILL.md` 放进 `~/.agents/skills`，它会**遮蔽**内置版本（磁盘优先）。
 
 ### 安全须知
 
@@ -1009,9 +1009,22 @@ Review the PR at $1. Focus on:
 - TUI 的 `/skill` 弹层可多选：勾选后进入参数表单（按正文占位符生成字段并预填默认值），确认后显示为输入框上方的 `⚡ skills: name(args)` 芯片，并在**下一条**消息中一起注入（一次性）。`/skill clear` 清空芯片。
 - `--no-skills` 禁用技能发现（`/skill` 无技能可选、模型也不会自动调用）；格式错误的技能会被非致命地跳过。
 
+### 内置技能与 `pigo://`
+
+pigo 把一批技能（`prd`、`review-it`、`ship-it`、`refactor`、`pigorc` 等）**编译进二进制**，不再在首次启动时拷贝到 `~/.agents/skills`。它们通过只读虚拟路径访问：
+
+```
+pigo://skills/<name>/SKILL.md
+```
+
+- `read` 直接解析 `pigo://` 地址（含 `assets/`、`scripts/`、`examples/` 等子文件），带行号与分页，与读磁盘文件一致；系统提示的 `<available_skills>` 里内置技能的 location 就是该地址。
+- **严格只读**：`write`/`edit` 对 `pigo://` 地址会明确报错 `built-in skills are read-only`，目录遍历也无法越出虚拟根。
+- **同名遮蔽**：在 `~/.agents/skills` 放一份同名技能（如 `pigorc/SKILL.md`）即覆盖内置版本，磁盘优先——这是定制的正确方式。
+- 因此 `~/.agents/skills` 只存放你自己的技能；`/status` 会把内置（`[built-in]`）与磁盘（`[disk]`）分别标出并给出计数。
+
 ### 模型自动调用（渐进式披露）
 
-除了手动的 `/skill` 调用，技能还可被模型**自动调用**。pigo 采用渐进式披露：仅将每个技能的 `name`、`description` 和文件路径（location）注入系统提示的 `<available_skills>` 块，模型在任务匹配某技能的描述时，用 `read` 工具按需加载 `SKILL.md` 正文，而非把所有技能正文常驻上下文。
+除了手动的 `/skill` 调用，技能还可被模型**自动调用**。pigo 采用渐进式披露：仅将每个技能的 `name`、`description` 和文件路径（location）注入系统提示的 `<available_skills>` 块，模型在任务匹配某技能的描述时，用 `read` 工具按需加载 `SKILL.md` 正文，而非把所有技能正文常驻上下文。内置技能的 location 是 `pigo://skills/<name>/SKILL.md`，其余是磁盘绝对路径。
 
 - **仅当 `read` 工具可用时**自动调用才生效（`--no-tools` 或屏蔽 `read` 时不注入 `<available_skills>`），因为模型需要 `read` 才能加载技能正文。
 - 在 frontmatter 中设置 `disable-model-invocation: true` 可将某技能排除出 `<available_skills>`（模型不会自动调用它），但仍可显式调用：REPL 用 `/skill <name>`，TUI 从 `/skill` 弹层选中它并填参数。

@@ -310,3 +310,75 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// TestConfigReportSkillsOrigin verifies the skills section distinguishes built-in
+// skills (read-only, in the binary at a pigo:// address) from skills on disk. A
+// user looking for the built-in's file would otherwise not find it, and the count
+// is what tells them how much of the list they can edit.
+func TestConfigReportSkillsOrigin(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("PIGO_SKILLS_DIR", dir)
+
+	report := &ConfigReport{
+		Cwd: t.TempDir(),
+		Skills: []*runtime.Skill{
+			{
+				Frontmatter: runtime.SkillFrontmatter{Name: "built-in-demo", Description: "ships in the binary"},
+				Path:        "pigo://skills/built-in-demo/SKILL.md",
+			},
+			{
+				Frontmatter: runtime.SkillFrontmatter{Name: "disk-demo", Description: "authored by the user"},
+				Path:        filepath.Join(dir, "disk-demo", "SKILL.md"),
+			},
+		},
+	}
+	out := report.Render("skills")
+
+	if !strings.Contains(out, "skills (2)") {
+		t.Errorf("missing the total count:\n%s", out)
+	}
+	if !strings.Contains(out, "1 built-in") {
+		t.Errorf("missing the built-in count:\n%s", out)
+	}
+	if !strings.Contains(out, "1 from "+dir) {
+		t.Errorf("missing the disk source:\n%s", out)
+	}
+	if !strings.Contains(out, "[built-in]") {
+		t.Errorf("the built-in skill should be labelled:\n%s", out)
+	}
+	if !strings.Contains(out, "[disk]") {
+		t.Errorf("the disk skill should be labelled:\n%s", out)
+	}
+	// The built-in must not be presented as living in the skills directory.
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "built-in-demo") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("built-in-demo missing from the listing:\n%s", out)
+	}
+	if strings.Contains(line, dir) {
+		t.Errorf("a built-in skill must not be shown as living in the skills dir: %q", line)
+	}
+}
+
+// TestConfigReportSkillsOnlyDisk verifies the summary falls back to the plain
+// "from <dir>" form when every skill is on disk, so the common case is unchanged.
+func TestConfigReportSkillsOnlyDisk(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PIGO_SKILLS_DIR", dir)
+	report := &ConfigReport{
+		Cwd:    t.TempDir(),
+		Skills: []*runtime.Skill{{Frontmatter: runtime.SkillFrontmatter{Name: "mine", Description: "on disk"}, Path: filepath.Join(dir, "mine.md")}},
+	}
+	out := report.Render("skills")
+	if !strings.Contains(out, "skills (1)  from "+dir) {
+		t.Errorf("summary should name only the disk dir:\n%s", out)
+	}
+	if strings.Contains(out, "built-in") {
+		t.Errorf("no built-in skills means no built-in mention:\n%s", out)
+	}
+}

@@ -15,7 +15,6 @@ import (
 
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/agenttool"
-	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/config"
 	"github.com/roberChen/pigo/internal/diag"
 	"github.com/roberChen/pigo/internal/hooks"
@@ -627,37 +626,46 @@ func SkillsDir() string {
 	return filepath.Join(home, ".agents", "skills")
 }
 
-// LoadSkills discovers skills from SkillsDir() once, for both prompt injection
-// and /skill. Under --no-skills it is a no-op. Built-in skills
-// are bootstrapped into the skills dir first, then the directory is loaded.
+// LoadSkills discovers skills once, for both prompt injection and /skill. Under
+// --no-skills it is a no-op.
+//
+// Built-in skills come from the binary's embedded tree and are never installed:
+// their location is a read-only `pigo://skills/<name>/SKILL.md` address. Skills
+// found in SkillsDir() are layered on top, so a user skill of the same name
+// shadows the built-in one (and may be edited normally).
 func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 	if noSkills {
 		return nil, nil
 	}
-	// Bootstrap logs only in debug mode: a first launch installs skills silently.
-	builtinskills.Bootstrap(ConfigDir(), SkillsDir(), diag.Writer())
-	dir := SkillsDir()
-	if dir == "" {
-		return nil, nil
+	// Publish the pigorc skill's generated configuration reference before any
+	// skill is parsed, so it is readable at pigo://skills/pigorc/reference.md. It
+	// is rendered from this binary's own config registries (options, provider and
+	// agent definitions, hook events, environment variables, CLI flags), so the
+	// shipped skill always describes the running build.
+	refreshConfigReference()
+
+	builtin, err := runtime.LoadBuiltinSkills()
+	if err != nil {
+		diag.Diagf("built-in skills: %v", err)
 	}
-	// Refresh the built-in pigorc skill's generated configuration reference. It is
-	// rendered from this binary's own config registries (options, provider/agent
-	// definitions, hook events, environment variables, CLI flags), so the installed
-	// skill always describes the running build. Only pigo's own skill directory is
-	// touched: a user's hand-written skill of the same name is left alone.
-	refreshConfigReference(dir)
-	return runtime.LoadSkillsDir(dir)
+	dir := SkillsDir()
+	var disk []*runtime.Skill
+	if dir != "" {
+		var diskErr error
+		disk, diskErr = runtime.LoadSkillsDir(dir)
+		if diskErr != nil {
+			// A malformed user skill is reported but does not hide the others.
+			diag.Diagf("skills: %v", diskErr)
+		}
+	}
+	return runtime.MergeSkills(builtin, disk), nil
 }
 
-// refreshConfigReference rewrites <skills>/pigorc/reference.md when that directory
-// is pigo's own built-in skill. Failures are reported and never block startup.
-func refreshConfigReference(skillsDir string) {
-	skillDir := filepath.Join(skillsDir, "pigorc")
-	if !config.SkillOwnsReference(skillDir) {
-		return
-	}
-	path := config.SkillsReferencePath(skillsDir)
-	if err := config.WriteReference(path, config.ReferenceOptions{
+// refreshConfigReference regenerates the built-in pigorc skill's configuration
+// reference and publishes it into the virtual tree. Failures are reported and
+// never block startup: the skill stays readable without the reference.
+func refreshConfigReference() {
+	if err := config.PublishReference(config.ReferenceOptions{
 		Version: config.CurrentVersion(),
 		Flags:   config.CurrentFlagDocs(),
 	}); err != nil {

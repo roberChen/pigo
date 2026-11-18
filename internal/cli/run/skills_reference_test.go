@@ -1,8 +1,9 @@
 package run
 
 // Tests for the generated config reference that ships with the built-in pigorc
-// skill: loading skills must (re-)write it from the running binary, and a
-// user-owned skill of the same name must never be touched.
+// skill. The reference is published into the skill's read-only `pigo://` tree on
+// every load (nothing is written to the skills directory), and a user skill of the
+// same name shadows the built-in one without receiving generated content.
 
 import (
 	"os"
@@ -10,16 +11,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/config"
 )
 
-// TestLoadSkillsRefreshesConfigReference verifies the built-in pigorc skill is
-// installed and its reference is rendered from the current binary's registries on
-// every load.
-func TestLoadSkillsRefreshesConfigReference(t *testing.T) {
-	home := t.TempDir()
+// TestLoadSkillsPublishesConfigReference verifies the built-in pigorc skill is
+// discovered from the binary and its reference is rendered from the current
+// binary's registries into the virtual tree on every load.
+func TestLoadSkillsPublishesConfigReference(t *testing.T) {
+	t.Setenv("PIGO_HOME", t.TempDir())
 	skillsDir := t.TempDir()
-	t.Setenv("PIGO_HOME", home)
 	t.Setenv("PIGO_SKILLS_DIR", skillsDir)
 	config.SetFlagDocs([]config.FlagDoc{{Name: "model", Shorthand: "m", Default: "x", Usage: "model id"}})
 	config.SetBuildVersion("test-build")
@@ -36,16 +37,20 @@ func TestLoadSkillsRefreshesConfigReference(t *testing.T) {
 	for _, s := range skills {
 		if s.Frontmatter.Name == "pigorc" {
 			found = true
+			if !builtinskills.IsVirtual(s.Path) {
+				t.Errorf("built-in pigorc location = %q, want a pigo:// address", s.Path)
+			}
 		}
 	}
 	if !found {
-		t.Fatalf("the built-in pigorc skill was not installed: %d skills loaded", len(skills))
+		t.Fatalf("the built-in pigorc skill was not discovered: %d skills loaded", len(skills))
 	}
 
-	path := config.SkillsReferencePath(skillsDir)
-	data, err := os.ReadFile(path)
+	// The reference is readable through the virtual tree...
+	loc := config.ReferenceVirtualPath()
+	data, err := builtinskills.ReadVirtual(loc)
 	if err != nil {
-		t.Fatalf("reference not written: %v", err)
+		t.Fatalf("reference not published to %s: %v", loc, err)
 	}
 	doc := string(data)
 	for _, want := range []string{
@@ -60,15 +65,16 @@ func TestLoadSkillsRefreshesConfigReference(t *testing.T) {
 		}
 	}
 
-	// A second load regenerates (the file is not append-only) and stays identical
-	// with the same inputs.
-	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
-		t.Fatalf("overwrite: %v", err)
+	// ...and nothing was installed into the skills directory.
+	if _, err := os.Stat(filepath.Join(skillsDir, "pigorc")); !os.IsNotExist(err) {
+		t.Errorf("the built-in skill must not be installed into the skills dir (err=%v)", err)
 	}
+
+	// A second load regenerates identically from the same inputs.
 	if _, err := LoadSkills(false); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	again, err := os.ReadFile(path)
+	again, err := builtinskills.ReadVirtual(loc)
 	if err != nil {
 		t.Fatalf("read after reload: %v", err)
 	}
@@ -77,21 +83,41 @@ func TestLoadSkillsRefreshesConfigReference(t *testing.T) {
 	}
 }
 
-// TestRefreshConfigReferenceLeavesUserSkillAlone verifies a hand-written skill
-// named pigorc (installed before the built-in one, or edited by the user) is never
-// overwritten with generated content.
-func TestRefreshConfigReferenceLeavesUserSkillAlone(t *testing.T) {
-	dir := t.TempDir()
-	skillDir := filepath.Join(dir, "pigorc")
+// TestUserSkillShadowsBuiltin verifies a hand-written skill of the same name on
+// disk wins over the built-in one, so a user can override a shipped skill — and
+// that overriding is how they customise it, since the built-in copy is read-only.
+func TestUserSkillShadowsBuiltin(t *testing.T) {
+	skillsDir := t.TempDir()
+	t.Setenv("PIGO_HOME", t.TempDir())
+	t.Setenv("PIGO_SKILLS_DIR", skillsDir)
+
+	skillDir := filepath.Join(skillsDir, "pigorc")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# my own pigorc notes\n"), 0o600); err != nil {
+	own := "---\nname: pigorc\ndescription: my own pigorc notes\n---\n\n# mine\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(own), 0o600); err != nil {
 		t.Fatalf("write SKILL.md: %v", err)
 	}
 
-	refreshConfigReference(dir)
-	if _, err := os.Stat(filepath.Join(skillDir, config.ReferenceFileName)); !os.IsNotExist(err) {
-		t.Fatalf("a user-owned skill must not receive a generated reference (err=%v)", err)
+	skills, err := LoadSkills(false)
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	var matches int
+	for _, s := range skills {
+		if s.Frontmatter.Name != "pigorc" {
+			continue
+		}
+		matches++
+		if builtinskills.IsVirtual(s.Path) {
+			t.Errorf("the user's pigorc must shadow the built-in, got %q", s.Path)
+		}
+		if !strings.Contains(s.Body, "# mine") {
+			t.Errorf("the user's body should win, got %q", s.Body)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("pigorc appears %d times, want exactly 1 (the user's)", matches)
 	}
 }
