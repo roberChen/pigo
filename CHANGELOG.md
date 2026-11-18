@@ -36,6 +36,18 @@ interactive REPL/TUI.
   declined review is reported to the model as declined rather than as an
   unusable environment. The single-question `question` / `answer` shape is still
   accepted, so older prompts keep working.
+- **An interactive session ends by showing the command that reopens it.** The TUI
+  and the line REPL print `to resume this session: pigo --resume <id>` as the
+  last line on the way out, so leaving the conversation is not the same as losing
+  it — every turn is already on disk, and the way back is one paste away instead
+  of a trip through `/resume` or `--list-sessions`. The line follows whichever
+  session the operator ended on (`/resume`, `/fork`, `/clone` and `/new` all
+  switch it), repeats how pigo was invoked (`./pigo`, an absolute path) so it
+  works without pigo being on PATH, and quotes an id that an imported session
+  brought along instead of splicing it into the shell. It stays silent when there
+  is nothing to reopen: a launch that never ran a turn writes no session file, a
+  sub-agent session cannot be resumed directly, and machine modes (`-p`,
+  `stream-json`) keep stdout clean.
 
 ### Removed
 - **The first-run skill bootstrap and its manifest.** Nothing is copied into the

@@ -440,6 +440,8 @@ pigo --continue                   # 续跑最近一次会话
 # 交互式：/new 就地开一个新空会话（当前会话已保存到磁盘，可随时 /resume 回来）
 ```
 
+交互式会话（TUI 与 `--no-tui` 的 REPL）退出时会在终端最后打印一行 `to resume this session: pigo --resume <id>`，复制即可回到刚才的对话——这是「本次运行结束」而不是「上下文丢失」：每一轮都已经落盘。它只在真的写过至少一轮时出现（启动后什么都没问就退出不会留下会话文件，也就不会给出一个注定失败的命令），并且跟随 `/resume`、`/fork`、`/clone`、`/new` 切换后的当前会话；命令里的可执行文件名沿用你启动 pigo 的方式（`./pigo`、绝对路径都原样给出，`go run` 的临时构建则回退成 `pigo`）。`-p` 与 `stream-json` 等机器模式不打印，stdout 保持干净。
+
 ### Host 守护进程（`pigo serve` / `pigo attach`）
 
 pigo 可以把「执行」与「界面」拆成两个进程：一个常驻的 **host** 持有 provider、工具、会话与磁盘持久化，任意多个 **client** 通过本地传输连上去驱动它——POSIX 上是 `$PIGO_HOME/server.sock` 这个 unix domain socket，Windows 上是 `\\.\pipe\pigo-<hash>` 命名管道。这是 TUI / Web UI / 脚本共用同一条链路的入口，接口定义在 `internal/hostapi`，设计见 `docs/architecture.md` 第六节。

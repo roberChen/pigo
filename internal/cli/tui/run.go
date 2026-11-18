@@ -5,10 +5,12 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/diag"
 )
 
@@ -50,6 +52,24 @@ func Run(opts Options) error {
 		return err
 	}
 	p := tea.NewProgram(NewModel(opts).withSession(s, history).withDiag(collector))
-	_, err = p.Run()
+	final, err := p.Run()
+	// The alt screen is gone by now, so the terminal is back in cooked mode and
+	// the last line can go to the scrollback instead of a frame: one command that
+	// reopens the conversation the operator just left. The returned model is the
+	// last one rendered, so /resume and /new are reflected in which session is
+	// named.
+	if m, ok := final.(Model); ok {
+		m.printResumeHint(os.Stdout)
+	}
 	return err
+}
+
+// printResumeHint offers the way back to the session the panel ended on, once the
+// alt screen has been restored. It prints nothing when the session never wrote a
+// turn (see cli.PrintResumeHint), so a launch-then-quit stays silent.
+func (m Model) printResumeHint(w io.Writer) {
+	if m.session == nil {
+		return
+	}
+	cli.PrintResumeHint(w, m.session.store, m.session.header)
 }

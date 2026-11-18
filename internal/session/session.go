@@ -401,6 +401,18 @@ func (s *Store) Dir() string { return s.dir }
 // path returns the on-disk path for a session id.
 func (s *Store) path(id string) string { return filepath.Join(s.dir, FileName(id)) }
 
+// Exists reports whether a session file for id is on disk. A session that ran no
+// turn has no file at all (message persistence is what creates one), so callers
+// offering a way back to a session — the exit hint both front-ends print — check
+// this first instead of advertising a command that would only fail.
+func (s *Store) Exists(id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	fi, err := os.Stat(s.path(id))
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // Save writes header and messages to a fresh session file, overwriting any
 // existing file for the same id. The header's Version is forced to
 // SchemaVersion; CreatedAt/UpdatedAt are left as the caller set them. Save is

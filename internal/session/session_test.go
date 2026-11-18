@@ -162,6 +162,30 @@ func TestSaveOverwrites(t *testing.T) {
 	}
 }
 
+// TestExistsFollowsSave verifies Exists reports only sessions that actually made
+// it to disk: a fresh id has no file until Save writes one, and a nil store (a run
+// wired without persistence) reports false instead of panicking.
+func TestExistsFollowsSave(t *testing.T) {
+	s := newStore(t)
+	id := NewID(time.Now().UTC())
+	if s.Exists(id) {
+		t.Fatalf("Exists(%s) = true before any Save", id)
+	}
+	if err := s.Save(SessionHeader{ID: id}, sampleMessages()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if !s.Exists(id) {
+		t.Errorf("Exists(%s) = false after Save", id)
+	}
+	var nilStore *Store
+	if nilStore.Exists(id) {
+		t.Error("nil store reports a session exists")
+	}
+	if s.Exists("") {
+		t.Error("empty id reports a session exists")
+	}
+}
+
 // TestListSortedByUpdatedDesc verifies List returns sessions most-recent-first.
 func TestListSortedByUpdatedDesc(t *testing.T) {
 	s := newStore(t)

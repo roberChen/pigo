@@ -244,6 +244,11 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 	deps.tee = newTeeWriter(out)
 	out = deps.tee
 
+	// Tell the operator how to get back to this conversation. Registered first so
+	// it runs last: the session is the one the loop ended on (/resume, /fork and
+	// /new all swap it), and nothing the shutdown path prints may come after it.
+	defer func() { cli.PrintResumeHint(out, deps.store, deps.header) }()
+
 	// Stop a still-running remote-control server when the REPL exits (FR-16), so
 	// quitting pigo tears down the LAN listener rather than leaking it. The
 	// closure reads deps.remote at exit time, so it covers a session started mid

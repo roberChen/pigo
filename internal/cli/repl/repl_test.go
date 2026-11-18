@@ -654,3 +654,63 @@ func TestREPLCopyDegradesToPrint(t *testing.T) {
 		t.Errorf("/copy should print the reply when degrading, out=%q", s)
 	}
 }
+
+// TestREPLPrintsResumeHintOnExit verifies the last line of a session is the
+// command that reopens it, and that it names the session the loop ended on.
+func TestREPLPrintsResumeHintOnExit(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, store := newTestDeps(t, p)
+	var out bytes.Buffer
+	if err := runREPL(strings.NewReader("hello\n/exit\n"), &out, deps); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if !store.Exists(deps.header.ID) {
+		t.Fatalf("session %s was not persisted, so the hint must not be printed", deps.header.ID)
+	}
+	want := cli.ResumeCommand(deps.header.ID)
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Errorf("output is missing the resume hint %q:\n%s", want, got)
+	}
+}
+
+// TestREPLNoResumeHintWithoutATurn verifies quitting before the first turn stays
+// silent: nothing was written, so there is no session to go back to.
+func TestREPLNoResumeHintWithoutATurn(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, _ := newTestDeps(t, p)
+	var out bytes.Buffer
+	if err := runREPL(strings.NewReader("/exit\n"), &out, deps); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if strings.Contains(out.String(), "--resume") {
+		t.Errorf("a session with no turn must not advertise a resume command:\n%s", out.String())
+	}
+}
+
+// TestREPLResumeHintFollowsSessionSwitch verifies the hint describes the session
+// the operator ended on, not the one pigo launched with: /new mints a new id and
+// the line printed at exit must name it.
+func TestREPLResumeHintFollowsSessionSwitch(t *testing.T) {
+	p := &replProvider{reply: "hi"}
+	deps, _ := newTestDeps(t, p)
+	launched := deps.header.ID
+	var out bytes.Buffer
+	if err := runREPL(strings.NewReader("hello\n/new\nagain\n/exit\n"), &out, deps); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	got := out.String()
+	// /new is the only place the new id is printed, and the hint is the only
+	// place a resume command is.
+	const newTag = "new session "
+	i := strings.LastIndex(got, newTag)
+	if i < 0 {
+		t.Fatalf("/new printed no session id:\n%s", got)
+	}
+	newID := strings.Fields(got[i+len(newTag):])[0]
+	if newID == launched {
+		t.Fatalf("/new did not mint a new session id")
+	}
+	if !strings.Contains(got, cli.ResumeCommand(newID)) {
+		t.Errorf("output is missing the hint for the current session %q:\n%s", newID, got)
+	}
+}
