@@ -1,0 +1,255 @@
+# 每天北京时间 09:30 的长时间长稳测试（soak）。
+#
+# 顺序固定：先构建、vet、跑全量测试，全部通过才开始长稳——长稳要占用两小时以上的
+# runner 时间，不该为一次编译错误白跑。其中任何一步失败（含长稳本身失败）都会自动
+# 开一条 issue；当天重复失败只在原 issue 下追加评论。
+#
+# 时区：Actions 的 cron 只认 UTC，北京时间 09:30 = UTC 01:30。定时任务可能被推迟
+# （高峰期几分钟到几十分钟不等），所以日期一律按北京时间计算，见
+# .github/scripts/soak-failure-issue.sh。
+name: soak
+
+on:
+  schedule:
+    # 北京时间每天 09:30。
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "长稳时长（Go duration，必须 ≥ 2h 且不超过 5h）"
+        required: true
+        default: "2h"
+      race:
+        description: "用 -race 构建 pigo 再跑（更慢，但能把数据竞争变成失败）"
+        type: boolean
+        default: true
+      seed:
+        description: "确定性种子，留空则按时间生成"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # 上报 issue 需要写权限，GITHUB_TOKEN 默认没有。
+  issues: write
+
+# 定时与手动触发的 soak 不要叠加：它们抢同一份 runner 配额，也让「哪一轮失败」
+# 变得含混。进行中的那一轮不取消，否则两小时白跑。
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: Soak (${{ inputs.duration || '2h' }})
+    runs-on: ubuntu-latest
+    # GitHub 托管 runner 的 job 上限是 6 小时（360 分钟）。5h 长稳 + 15 分钟
+    # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。
+    timeout-minutes: 340
+    env:
+      SOAK_DURATION: ${{ inputs.duration || '2h' }}
+      SOAK_SEED: ${{ inputs.seed || '' }}
+      # 定时触发时 inputs 整个为 null，此时默认开启 race 构建。
+      #
+      # 这里不能只写 `inputs.race == false && 'false' || 'true'`：GitHub 的表达式
+      # 在类型不同时按数字比较，null→0、false→0，于是 `null == false` 为 **true**，
+      # 定时任务反而会关掉 race。先用 event_name 把「有没有传参」区分出来。
+      SOAK_RACE: ${{ github.event_name == 'workflow_dispatch' && inputs.race == false && 'false' || 'true' }}
+      # 单个 job 跑不完更长的时长，越界时在第一步就明确报错，而不是被硬杀。
+      SOAK_MAX_DURATION: 5h
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      # 下限写死在脚本里而不是依赖 input 的默认值：手动触发时把 duration 改成 30s
+      # 也应该被拦下来，否则「每天的长稳」会悄悄退化成一次冒烟。
+      - name: Check duration
+        id: duration
+        run: |
+          seconds=$(bash .github/scripts/soak-duration.sh "$SOAK_DURATION" 2h "$SOAK_MAX_DURATION")
+          echo "seconds=$seconds" >>"$GITHUB_OUTPUT"
+          echo "请求时长 $SOAK_DURATION（${seconds}s），允许范围 2h..$SOAK_MAX_DURATION"
+
+      # ---- 冒烟阶段：构建 + 测试，全绿才值得占用两小时 ----
+
+      - name: Build
+        id: build
+        run: go build ./...
+
+      - name: Vet
+        id: vet
+        run: go vet ./...
+
+      - name: Test
+        id: test
+        run: go test -race ./...
+
+      - name: Build pigo for the soak
+        id: binary
+        run: |
+          # -race 让数据竞争从「偶发线上问题」变成当场失败，值得用更多 CPU 换来。
+          # 它只支持本 job 所在的 linux/amd64，正好够用。
+          if [ "$SOAK_RACE" = "true" ]; then
+            go build -race -o pigo-soak ./cmd/pigo
+            echo "已构建 -race 版 pigo"
+          else
+            go build -o pigo-soak ./cmd/pigo
+            echo "已构建普通 pigo"
+          fi
+
+      - name: Build longstay
+        id: harness
+        run: |
+          # 先编译成独立二进制再运行，而不是 go tool longstay：go tool 是父进程，
+          # timeout 的 SIGINT 只会送到它，长稳进程收不到，最终被 SIGKILL，什么都写不出来。
+          go build -o longstay ./e2e/longstay
+
+      # ---- 长稳阶段 ----
+
+      - name: Run longstay
+        id: longstay
+        env:
+          SOAK_SECONDS: ${{ steps.duration.outputs.seconds }}
+        run: |
+          set -o pipefail
+          args=(-duration "$SOAK_DURATION" -pigo "$PWD/pigo-soak" -output e2e-results/soak)
+          if [ -n "$SOAK_SEED" ]; then
+            args+=(-seed "$SOAK_SEED")
+          fi
+          echo "./longstay ${args[*]}"
+
+          # 安全网：harness 自己按 -duration 停止，这里只在它卡死时兜底。--signal=INT
+          # 走 harness 的优雅关闭路径（停客户端 → 最终重连验证 → 关 host），仍能写出
+          # summary.json；只有 120s 后还不退才 SIGKILL。
+          # GORACE=halt_on_error=1：检测到竞争立即让 host 退出，长稳因此失败并留下
+          # server.log 里的完整竞争栈，而不是打完警告继续跑完两小时。
+          start=$(date +%s)
+          rc=0
+          GORACE=halt_on_error=1 \
+            timeout --signal=INT --kill-after=120s "$((SOAK_SECONDS + 900))s" \
+            ./longstay "${args[@]}" 2>&1 | tee longstay.log || rc=$?
+          elapsed=$(( $(date +%s) - start ))
+
+          # 提前退出的判定必须自己写。longstay 把 SIGINT 当作「正常停止」——它做完整
+          # 的优雅关闭后返回 0，因为那在交互使用下是对的。但在这里，被 timeout 打断
+          # 恰恰说明卡住了：跑完 summary 也可能写着 pass=true。所以按墙钟时长兜底，
+          # 允许 120s 的收尾与调度误差。
+          if [ "$elapsed" -lt $((SOAK_SECONDS - 120)) ]; then
+            echo "::error::longstay 只运行了 ${elapsed}s，少于请求的 ${SOAK_SECONDS}s（提前退出，或被 timeout 的 SIGINT 打断）"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::longstay 退出码 $rc"
+            exit "$rc"
+          fi
+          echo "长稳跑满 ${elapsed}s，未发现问题"
+
+      # ---- 结果整理与上报：无论成败都跑 ----
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## 长稳结果（$SOAK_DURATION）"
+            echo
+            bash .github/scripts/soak-summary.sh e2e-results/soak/summary.json
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # artifact 只收脱敏后的尾巴。home/ 含 server.token 与 session 提示词，公开
+      # 仓库的 artifact 谁都能下载（见 e2e/longstay/README.md 的安全提示）；两小时的
+      # events.jsonl 也可能上百 MB，不适合整体上传。
+      - name: Collect sanitized evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          cp -f e2e-results/soak/summary.json evidence/ 2>/dev/null || true
+          cp -f e2e-results/soak/config.json evidence/ 2>/dev/null || true
+          [ -f e2e-results/soak/server.log ] &&
+            tail -n 800 e2e-results/soak/server.log >evidence/server.log.tail || true
+          [ -f longstay.log ] && tail -n 500 longstay.log >evidence/longstay.log.tail || true
+          [ -f e2e-results/soak/events.jsonl ] &&
+            tail -n 200 e2e-results/soak/events.jsonl >evidence/events.jsonl.tail || true
+          du -sh e2e-results/soak 2>/dev/null || true
+          ls -la evidence
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-${{ github.run_number }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: evidence/
+
+      # 只要有任何一步没成功就开 issue。放在 always() 上而不是 failure()：被 timeout
+      # 包裹的 longstay 以 124/130 退出时同样要报，取消的运行则不算（那是人主动停的）。
+      - name: Open or update failure issue
+        id: report
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          # 失败步骤直接从各 step 的 outcome 拼出来，带上中文名便于阅读。
+          OUTCOME_DURATION: ${{ steps.duration.outcome }}
+          OUTCOME_BUILD: ${{ steps.build.outcome }}
+          OUTCOME_VET: ${{ steps.vet.outcome }}
+          OUTCOME_TEST: ${{ steps.test.outcome }}
+          OUTCOME_BINARY: ${{ steps.binary.outcome }}
+          OUTCOME_HARNESS: ${{ steps.harness.outcome }}
+          OUTCOME_LONGSTAY: ${{ steps.longstay.outcome }}
+        run: |
+          failed=""
+          for pair in \
+            "OUTCOME_DURATION:时长校验" \
+            "OUTCOME_BUILD:构建" \
+            "OUTCOME_VET:vet" \
+            "OUTCOME_TEST:测试" \
+            "OUTCOME_BINARY:构建 pigo" \
+            "OUTCOME_HARNESS:构建 longstay" \
+            "OUTCOME_LONGSTAY:长稳"; do
+            var=${pair%%:*}
+            name=${pair#*:}
+            outcome=${!var:-skipped}
+            if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
+              failed="${failed:+$failed, }$name($outcome)"
+            fi
+          done
+
+          repro="go tool longstay -duration $SOAK_DURATION"
+          if [ "$SOAK_RACE" = "true" ]; then
+            repro="go build -race -o pigo-soak ./cmd/pigo && go tool longstay -duration $SOAK_DURATION -pigo ./pigo-soak"
+          fi
+
+          log_arg=()
+          [ -f longstay.log ] && log_arg=(--log longstay.log)
+
+          bash .github/scripts/soak-report.sh \
+            --summary e2e-results/soak/summary.json \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --run-id "${{ github.run_id }}" \
+            --commit "${{ github.sha }}" \
+            --ref "${{ github.ref_name }}" \
+            --duration "$SOAK_DURATION" \
+            --failed "${failed:-未知步骤}" \
+            "${log_arg[@]}" \
+            --repro "$repro" >soak-report.md
+
+          bash .github/scripts/soak-failure-issue.sh soak-report.md
+
+      # 让失败在 run 页面上直接可点，而不是藏在日志末尾。
+      - name: Link the issue in the summary
+        if: failure()
+        run: |
+          issue="${{ steps.report.outputs.issue }}"
+          if [ -n "$issue" ]; then
+            echo "" >>"$GITHUB_STEP_SUMMARY"
+            echo "已上报：${{ github.server_url }}/${{ github.repository }}/issues/$issue" \
+              >>"$GITHUB_STEP_SUMMARY"
+          fi

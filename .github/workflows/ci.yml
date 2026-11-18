@@ -1,26 +1,63 @@
-# 在 push 到 master 及所有 PR 上运行构建、vet 与测试。
+# 在每次 push（所有分支）与所有 PR 上运行 gofmt 检查、构建、vet 与测试，
+# 并在 ubuntu / windows 上各跑一轮短时 longstay 冒烟，确认多客户端链路没坏。
+#
+# 这里的长稳只是「冒烟」：分钟级，覆盖工具往返与 task 子 Agent 矩阵。真正的长稳是
+# 每天定时跑的 .github/workflows/soak.yml（至少 2 小时）。
 name: ci
 
 on:
+  # 所有分支的每次 commit 都跑；不写 `push:` 裸形式是因为它连 tag 推送也会触发，
+  # 而打 tag 已经由 release.yml 负责。
   push:
-    branches:
-      - master
+    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
 
+# 同一分支连续推送时取消旧运行：commit 与 PR 会为同一个 head 各触发一次，
+# 重复的 CI 只是排队占资源。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
+  # 辅助脚本决定「长稳失败会不会真的开出一条 issue」，所以先用最便宜的 runner
+  # 把它们自测一遍，而不是等到凌晨的定时任务里才发现上报路径是坏的。
+  scripts:
+    name: Helper scripts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Self-test .github/scripts
+        run: bash .github/scripts/selftest.sh
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
+
+      # go.mod 里 go 1.27rc1 需要比众多发行版更新的工具链，stable 才有。
+      # gofmt 只检查受版本控制的文件，避免扫到 vendor 或本地临时产物。
+      - name: Format
+        run: |
+          # -z/-0：文件名可能含空格，也避免参数列表超过 shell 的长度上限。
+          git ls-files -z '*.go' | xargs -0 gofmt -l >unformatted.txt
+          if [ -s unformatted.txt ]; then
+            echo "::error::以下文件未经 gofmt 格式化，本地执行 gofmt -w 后重新提交："
+            cat unformatted.txt
+            xargs -a unformatted.txt gofmt -d
+            exit 1
+          fi
 
       - name: Build
         run: go build ./...
@@ -34,17 +71,17 @@ jobs:
   longstay:
     name: Longstay smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: stable
 
@@ -59,3 +96,17 @@ jobs:
       - name: Run automatic task follow-up
         shell: bash
         run: go tool longstay -duration 8s -seed 41 -initial-clients 1 -max-clients 2 -min-client-lifetime 3s -max-client-lifetime 5s -min-prompt-delay 50ms -max-prompt-delay 100ms -llm-latency 0s -llm-jitter 5ms -llm-error-rate 0 -tools task_auto -avg-tool-calls 1 -require-task-coverage -summary-interval 4s -output e2e-results/ci-task-auto
+
+      # 只上传脱敏文件：home/ 里有 server.token 和 session 提示词，公开仓库的
+      # artifact 谁都能下载，不能整体上传（见 e2e/longstay/README.md 的安全提示）。
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: longstay-smoke-${{ matrix.os }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            e2e-results/**/summary.json
+            e2e-results/**/config.json
+            e2e-results/**/server.log

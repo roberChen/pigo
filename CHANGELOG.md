@@ -12,6 +12,19 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **CI now gates every commit and PR, and runs a nightly two-hour soak.** The
+  `ci` workflow runs on every branch push and every pull request: helper-script
+  self-tests, a `gofmt` gate, build, vet, `go test -race`, then short `longstay`
+  smokes on both `ubuntu-latest` and `windows-latest`. A new `soak` workflow runs
+  daily at 09:30 Beijing time (UTC 01:30): it builds, vets and tests first, then
+  runs `longstay` for at least two hours against a `-race` pigo under
+  `GORACE=halt_on_error=1`, so a data race fails the run instead of scrolling
+  past as a warning. Any failing step opens an issue automatically and repeats
+  on the same day append to it rather than filing duplicates; the report carries
+  the failing steps, the `summary.json` metric table, the log tail, a local
+  reproduction command and a link to the run's artifact. Artifacts stay
+  sanitized (metrics, config, log tails) because longstay's `home/` directory
+  holds a server token and session prompts and this repository is public.
 - **Built-in skills are read from the binary instead of installed on disk.** The
   skills pigo ships (`prd`, `to-issues`, `review-it`, `ship-it`, `refactor`,
   `pigorc`, the architecture/insight diagram set and the rest) are embedded and

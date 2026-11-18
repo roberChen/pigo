@@ -76,7 +76,23 @@ go tool longstay -duration 24h -llm-error-rate 0.02 -seed 42
 go tool longstay -duration 2h -pigo ./pigo.exe
 ```
 
-也可以绕过 `go tool`，使用等价的 `go run ./e2e/longstay`。`go tool` 会列出 `longstay (github.com/roberChen/pigo/e2e/longstay)`；它仍然是一个普通命令，不会被 `go test ./...` 执行。CI 的 `longstay` job 会在 `ubuntu-latest` 与 `windows-latest` 上分别执行完整工具 smoke、强制 task 矩阵和自动 task follow-up。
+也可以绕过 `go tool`，使用等价的 `go run ./e2e/longstay`。`go tool` 会列出 `longstay (github.com/roberChen/pigo/e2e/longstay)`；它仍然是一个普通命令，不会被 `go test ./...` 执行。
+
+### CI 中的两个层次
+
+| 工作流 | 规模 | 覆盖 |
+|---|---|---|
+| `.github/workflows/ci.yml` 的 `longstay` job | 20s / 10s / 8s 三段冒烟，`ubuntu-latest` 与 `windows-latest` 各一轮 | 完整工具 smoke、强制 task 矩阵、自动 task follow-up |
+| `.github/workflows/soak.yml` | **每天北京时间 09:30**，至少 2 小时，默认 `-race` 版 pigo | 长时间多客户端抖动、重连、接管、压缩与 task 子 Agent 的完整生命周期 |
+
+soak 先跑构建、vet 与全量测试，全部通过才进入长稳；任何一步失败都会自动开一条 issue（当天重复失败改为追加评论）。因为 longstay 把 SIGINT 视为正常停止，工作流另外按墙钟时长兜底：跑不满请求时长即判失败，即使 `summary.json` 写着 `pass: true`。上传到 artifact 的只有脱敏文件（`summary.json`、`config.json` 与各日志尾部），`home/` 不会外传。
+
+本地复现 soak（`GORACE=halt_on_error=1` 会让 host 在检测到数据竞争时立即退出，而不是打完警告继续跑）：
+
+```bash
+go build -race -o pigo-soak ./cmd/pigo
+GORACE=halt_on_error=1 go tool longstay -duration 2h -pigo ./pigo-soak -output e2e-results/soak
+```
 
 默认会构建当前源码中的 `./cmd/pigo`，并将它放入本次产物目录。Ctrl-C / SIGTERM 会先停止客户端，执行最终重连验证，再优雅关闭 host；不会把正常停止计为故障。
 
@@ -134,3 +150,5 @@ go tool longstay -duration 2h -pigo ./pigo.exe
 进程退出码：`0` 通过，`1` 可靠性失败或启动失败，`2` 参数错误。`providerErrors`、`mockFailures`、`turnsDegraded` 和 `degradedResults` 是 `-llm-error-rate` 注入的预期上游错误，不直接导致失败；`queueOverflows` 会被记录为背压指标，客户端仍应以最终结果和恢复事件为准。
 
 `normal` 场景建议先用短跑确认工具计划生效（`toolVerifications` 与 `turnsVerified` 均大于 0），再检查 `turnsUnverified=0`；`stress` 场景 `mockRequests` 应约等于 `prompts`，因为每个 turn 只有一次 LLM 请求。
+
+CI 在 harness 的退出码之外另加一条判定：实际运行时长不足请求时长（差 120s 以上）即失败。harness 为交互使用设计，收到 SIGINT 会优雅关闭并返回 0，这在定时长稳里恰恰是「卡死后被安全网打断」的信号，不能当作通过。

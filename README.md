@@ -1,6 +1,7 @@
 # pigo
 
 [![CI](https://github.com/roberChen/pigo/actions/workflows/ci.yml/badge.svg)](https://github.com/roberChen/pigo/actions/workflows/ci.yml)
+[![Soak](https://github.com/roberChen/pigo/actions/workflows/soak.yml/badge.svg)](https://github.com/roberChen/pigo/actions/workflows/soak.yml)
 [![Release](https://github.com/roberChen/pigo/actions/workflows/release.yml/badge.svg)](https://github.com/roberChen/pigo/actions/workflows/release.yml)
 
 使用 Go 复刻的 [pi](https://pi.dev) AI Agent —— 一个面向命令行的编码智能体，同时支持**无头（headless）脚本模式**与**交互式 REPL**。
@@ -42,6 +43,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [包管理](#包管理)
 - [自更新](#自更新)
 - [发布release](#发布release)
+- [持续集成与长稳测试](#持续集成与长稳测试)
 - [目录与环境变量](#目录与环境变量)
 - [安全说明](#安全说明)
 
@@ -1266,6 +1268,58 @@ git push origin v0.2.0
 
 | 变量 / 路径 | 用途 |
 |-------------|------|
+## 持续集成与长稳测试
+
+仓库有两个 GitHub Actions 工作流，各自负责不同的时间尺度：
+
+| 工作流 | 触发 | 内容 | 耗时 |
+|---|---|---|---|
+| `.github/workflows/ci.yml` | 每次 commit（所有分支）、所有 PR | 辅助脚本自测 → `gofmt` 检查 → `go build` → `go vet` → `go test -race` → ubuntu/windows 各一轮长稳冒烟 | 约 5 分钟 |
+| `.github/workflows/soak.yml` | 每天北京时间 09:30（UTC 01:30），也可手动触发 | 构建、vet、全量测试全部通过后，再用 `-race` 版 pigo 跑 **至少 2 小时** 的长稳 | 2 小时以上 |
+
+CI 的长稳只是冒烟：分钟级、固定种子、覆盖工具往返与 task 子 Agent 矩阵，用来在每次提交上确认多客户端链路没被改坏。真正的可靠性证据来自每天的 soak——它跑的是真实 `pigo serve` 守护进程、真实 unix socket / 命名管道和真实多客户端抖动，详见 [e2e/longstay/README.md](e2e/longstay/README.md)。
+
+### soak 的执行顺序
+
+1. **时长前置校验**：`-duration` 必须 ≥ 2h 且 ≤ 5h（单个 job 跑不完更长的），越界直接失败并上报，避免「每天的长稳」被改成一次冒烟。
+2. **冒烟**：`go build ./...`、`go vet ./...`、`go test -race ./...`。这一层不过就不进长稳，不为一次编译错误白占两小时 runner。
+3. **构建受测二进制**：默认 `go build -race -o pigo-soak ./cmd/pigo`，让数据竞争从「偶发线上问题」变成当场失败；长稳进程另设 `GORACE=halt_on_error=1`，一旦检测到竞争立即退出并留下完整竞争栈。
+4. **跑长稳**：`./longstay -duration … -pigo ./pigo-soak`。外层 `timeout --signal=INT` 只是安全网：harness 自己按 `-duration` 停止并做优雅关闭；只有卡死时才在 120s 后强杀。
+5. **提前退出判定**：longstay 把 SIGINT 视为正常停止（交互使用时这是对的），因此工作流按**墙钟时长**兜底——跑不满请求时长就判失败，即使 `summary.json` 写着 `pass: true`。
+
+手动触发时可选时长（2h～5h）、是否启用 `-race`、以及固定种子。定时触发默认启用 `-race`。
+
+### 失败自动开 issue
+
+任何一步失败（含长稳本身失败）都会自动新建 issue；同一天（按北京时间）重复失败只在原 issue 下追加评论，避免刷屏。issue 正文包含：
+
+- 失败步骤（构建 / vet / 测试 / 长稳，带 outcome）
+- `summary.json` 的指标表（`protocolErrors`、`transportErrors`、`hostErrors`、`missingEvents` 等）
+- 长稳日志尾部 120 行
+- 本地复现命令（含 `-race` 构建步骤）
+- 指向本次 run 的 artifact（保留 14 天）
+
+上报逻辑在 `.github/scripts/soak-failure-issue.sh`，渲染在 `soak-report.sh`，两者都有 `.github/scripts/selftest.sh` 覆盖，并由 CI 的 `Helper scripts` job 在每次提交上跑一遍——上报路径本身也是在 CI 里被测试的。
+
+> artifact 只收脱敏文件（`summary.json`、`config.json`、各日志的尾部）。`home/` 目录含 `server.token` 与 session 提示词，公开仓库的 artifact 谁都能下载，因此不上传，见 [e2e/longstay/README.md](e2e/longstay/README.md) 的安全提示。
+
+本地等价命令：
+
+```bash
+# 辅助脚本自测
+bash .github/scripts/selftest.sh
+
+# 与 CI 冒烟等价（分钟级）
+go tool longstay -duration 20s -seed 42 -initial-clients 2 -max-clients 4 \
+  -avg-tool-calls 6 -calls-per-stage 2 -output e2e-results/ci-smoke
+
+# 与 soak 等价（本地验证 2 小时版本）
+go build -race -o pigo-soak ./cmd/pigo
+GORACE=halt_on_error=1 go tool longstay -duration 2h -pigo ./pigo-soak -output e2e-results/soak
+```
+
+---
+
 | `PIGO_HOME` | 覆盖 `~/.pigo` 基础目录（影响 plugins、commands、prompts） |
 | `PIGO_SKILLS_DIR` | 覆盖技能目录（默认 `~/.agents/skills`） |
 | `~/.pigo/sessions` | 会话存储（JSONL） |
