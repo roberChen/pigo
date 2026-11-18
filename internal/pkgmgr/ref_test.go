@@ -78,16 +78,16 @@ func TestParseUnsupportedPrefix(t *testing.T) {
 // TestParseInvalidName verifies illegal npm names are rejected.
 func TestParseInvalidName(t *testing.T) {
 	cases := []string{
-		"npm:has space",       // whitespace
-		"npm:UPPER",           // uppercase
-		"npm:bad;rm -rf",      // shell metacharacters
-		"npm:.hidden",         // leading dot
-		"npm:_underscore",     // leading underscore
-		"npm:@scope",          // scope without name
-		"npm:@/name",          // empty scope
-		"npm:@scope/",         // empty name
-		"npm:a/b/c",           // too many slashes (unscoped with slash)
-		"npm:",                // empty name after prefix
+		"npm:has space",   // whitespace
+		"npm:UPPER",       // uppercase
+		"npm:bad;rm -rf",  // shell metacharacters
+		"npm:.hidden",     // leading dot
+		"npm:_underscore", // leading underscore
+		"npm:@scope",      // scope without name
+		"npm:@/name",      // empty scope
+		"npm:@scope/",     // empty name
+		"npm:a/b/c",       // too many slashes (unscoped with slash)
+		"npm:",            // empty name after prefix
 	}
 	for _, ref := range cases {
 		if _, err := ParsePackageRef(ref); err == nil {

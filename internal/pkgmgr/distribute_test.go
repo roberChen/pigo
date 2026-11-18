@@ -17,7 +17,7 @@ func TestDistributeExtensionStringBin(t *testing.T) {
 	t.Setenv("PIGO_HOME", home)
 
 	pkg := writePkg(t, `{"name":"pi-demo","version":"1.0.0","bin":"./cli.js"}`, map[string]string{
-		"cli.js":  "#!/usr/bin/env node\nconsole.log('hi')\n",
+		"cli.js":   "#!/usr/bin/env node\nconsole.log('hi')\n",
 		"lib/x.js": "module.exports=1\n",
 	})
 

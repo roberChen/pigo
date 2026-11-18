@@ -14,7 +14,7 @@ func TestDistributeSkill(t *testing.T) {
 	t.Setenv("PIGO_SKILLS_DIR", skills)
 
 	pkg := writePkg(t, `{"name":"pi-writing","version":"1.0.0","pi":{"type":"skill"}}`, map[string]string{
-		"SKILL.md":          "---\nname: writing\ndescription: help writing\n---\nbody",
+		"SKILL.md":           "---\nname: writing\ndescription: help writing\n---\nbody",
 		"references/tips.md": "tips",
 	})
 

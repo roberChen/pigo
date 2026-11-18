@@ -108,12 +108,12 @@ func runStart(opts ServeOptions, out, errOut io.Writer) int {
 	}
 
 	srv, err := hostserver.NewServer(hostserver.Config{
-		Dir:     dir,
-		Factory: opts.Factory,
+		Dir:               dir,
+		Factory:           opts.Factory,
 		Trust:             mgr,
 		PermissionTimeout: opts.PermissionTimeout,
 		Daemon:            false,
-		Build:   opts.Build,
+		Build:             opts.Build,
 	})
 	if err != nil {
 		fmt.Fprintf(errOut, "pigo serve: %v\n", err)

@@ -28,8 +28,8 @@ import (
 // packageJSON is the subset of an npm package.json pigo reads for classification
 // and versioning. Unknown fields are ignored.
 type packageJSON struct {
-	Name    string          `json:"name"`
-	Version string          `json:"version"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
 	// Bin is npm's executable declaration: either a string path or a
 	// {name: path} object. Its presence signals an extension.
 	Bin json.RawMessage `json:"bin,omitempty"`

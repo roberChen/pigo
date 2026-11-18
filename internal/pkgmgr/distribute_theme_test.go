@@ -13,7 +13,7 @@ func TestDistributeTheme(t *testing.T) {
 	t.Setenv("PIGO_HOME", home)
 
 	pkg := writePkg(t, `{"name":"pi-dark","version":"1.0.0","pi":{"type":"theme"}}`, map[string]string{
-		"theme.json":     `{"bg":"#000"}`,
+		"theme.json":      `{"bg":"#000"}`,
 		"assets/logo.txt": "logo",
 	})
 

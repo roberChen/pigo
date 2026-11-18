@@ -192,4 +192,3 @@ func printCheckpointSection(out io.Writer, color bool, memoryRoot, sessionID str
 		ui.Colorize(color, ui.Dim, "path:"),
 		runtime.CheckpointPath(sessionID, memoryRoot))
 }
-

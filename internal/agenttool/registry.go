@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 )

@@ -269,4 +269,3 @@ func TestResolveShell(t *testing.T) {
 		})
 	}
 }
-
