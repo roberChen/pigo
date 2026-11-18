@@ -115,7 +115,7 @@ var catalog = map[string]toolSpec{
 	"question": {
 		Name: "question",
 		Arguments: func(string) string {
-			return `{"question":"LONGSTAY-QUESTION","options":["yes","no"]}`
+			return `{"questions":[{"question":"LONGSTAY-QUESTION","options":["yes","no"]}]}`
 		},
 		ExpectAny:  []string{"no one can answer here"},
 		AllowError: true,

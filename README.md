@@ -375,7 +375,7 @@ pigo -P anthropic -m claude-3-5-sonnet-20241022 -p "..."
 | `kill_bash` | 终止后台 bash 任务（连同其子进程） |
 | `bash_jobs` | 列出本会话的后台 bash 任务：`bash_id`、运行中/已退出、耗时、退出码、未读输出字节数与命令行；`running_only` 只看仍在运行的。用于找回已滑出上下文的 `bash_id` 后再 `bash_output` / `kill_bash` |
 | `todo` | 记录/更新结构化任务清单，每次提交整份列表（pending/in_progress/completed） |
-| `question` | 通过 toolcall 向用户提问并等待回答（可带若干候选选项，用户也可自由作答）。TUI 在输入框上方弹出提问（数字键选选项、直接输入后回车作答、Esc 取消本轮），REPL 在终端打印问题并读取一行；无交互输入的场景（`-p` 无头运行、子 Agent）会返回可执行的错误结果，提示模型按合理假设继续 |
+| `question` | 通过 toolcall 向用户提问并等待回答。一次调用可带多个问题（`questions` 数组），每个问题可给若干候选选项、可用 `multi_select` 允许多选，用户也可自由作答。TUI 在输入框上方弹出面板：数字键选选项、空格勾选多选、↑/↓ 移动、Enter 逐题推进，问题再长也可 PgUp/PgDn 滚动；全部答完后先显示汇总（`e` 或题号回改），再按 Enter 才提交（Esc 取消本轮）。REPL 在终端逐题打印，问题全文不截断、选项超过 10 个用 `n`/`p` 分页，最后同样汇总确认（`n` 拒答）。无交互输入的场景（`-p` 无头运行、子 Agent）会返回可执行的错误结果，提示模型按合理假设继续 |
 | `webfetch` | 抓取 URL 并转为精简 Markdown 正文；公网 HTTP 自动升级 HTTPS，`localhost` 与回环 IP 的开发服务器允许纯 HTTP |
 | `websearch` | 联网搜索并返回标题/URL/摘要，按凭证自动选后端（`TAVILY_API_KEY`→Tavily，`BRAVE_API_KEY`→Brave，否则回落无 key 的 DuckDuckGo），支持 `allowed_domains`/`blocked_domains` 过滤 |
 | `memory_search` | 检索持久化记忆（`memory.enabled = false` 或 `--no-tools` 时不注册） |

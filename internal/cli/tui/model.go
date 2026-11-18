@@ -477,12 +477,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case questionAskedMsg:
 		// The question tool is blocked on the run goroutine until the operator
-		// answers: show the prompt, make the composer the answer field, and keep
+		// answers: show the batch, make the composer the free-text field, and keep
 		// draining the run so the spinner and cancel path stay live.
-		m.ask = &askPrompt{question: msg.question, options: msg.options, reply: msg.reply}
-		// Mirror the question to a paired browser so a remote observer sees why the
-		// run paused (the answer is still typed on the terminal).
-		m.remoteEcho("\n? " + msg.question + "\n")
+		m.ask = newAskPrompt(msg.questions, msg.reply)
+		// Mirror the questions to a paired browser so a remote observer sees why the
+		// run paused (the answers are still given on the terminal).
+		m.remoteEcho(remoteAskEcho(msg.questions))
 		m.input.Clear()
 		m.menu.close()
 		m.spinner.pin("Waiting for your answer")
@@ -1005,28 +1005,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// A pending question from the question tool owns the keyboard: a digit picks
-	// the suggested answer at that position, Enter submits what was typed, and
-	// Esc / Ctrl+C cancels the run (the tool then reports the abort to the model).
-	// Everything else edits the answer buffer.
+	// A pending question batch from the question tool owns the keyboard. In the
+	// answering stage a digit picks the option at that position, Space toggles the
+	// highlighted one, Enter/Tab commit this answer and move on (the last one moves
+	// to the review screen), PgUp/PgDn scroll a long question, and Esc / Ctrl+C
+	// cancels the run. Everything else edits the composer, which is the free-text
+	// "other" answer. The review stage only navigates and submits.
 	if m.ask != nil {
-		switch msg.String() {
-		case "esc", "ctrl+c":
-			return m.cancelAsk()
-		case "enter":
-			// Require an actual answer: an accidental empty Enter must not look like
-			// "the user said nothing" (Esc is the way to abandon the question).
-			if strings.TrimSpace(m.input.Value()) == "" {
-				return m, nil
-			}
-			return m.submitAnswer(m.input.Value())
-		}
-		if answer, ok := m.ask.matchOption(msg.String()); ok {
-			return m.submitAnswer(answer)
-		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		return m.handleAskKey(msg)
 	}
 
 	// While idle with the autocomplete popup open, the arrow / Tab / Esc keys
@@ -1898,9 +1884,9 @@ func (m Model) renderContent() string {
 			b.WriteByte('\n')
 		}
 	}
-	// The question tool's prompt sits directly above the composer, which is the
-	// answer field while it is up (its rows are reserved by relayout).
-	if ask := m.ask.view(m.theme, width); ask != "" {
+	// The question tool's panel sits directly above the composer, which is the
+	// free-text field while it is up (its rows are reserved by relayout).
+	if ask := m.ask.view(m.theme, width, height); ask != "" {
 		b.WriteString(ask)
 		b.WriteByte('\n')
 	}
@@ -2034,7 +2020,7 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.ask.rows(m.theme, m.width)
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.ask.rows(m.theme, m.width, m.height)
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the

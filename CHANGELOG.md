@@ -25,6 +25,17 @@ interactive REPL/TUI.
   A skill of the same name under the skills directory shadows the built-in one,
   which is now how a built-in is customised. `pigo_config` / `/status` report
   built-in skills separately from disk skills with a count of each.
+- **The `question` tool asks a whole batch and shows a review before submitting.**
+  One call now takes `questions: [{question, options, multi_select}]` and gets one
+  structured `{selected, text}` answer per question back, instead of a single
+  question whose numeric reply was echoed to the model as the literal string "2".
+  Related decisions therefore cost one round trip, `multi_select` allows several
+  options at once, and both front-ends echo the collected answers back before
+  anything is sent: the TUI as a review panel (`e` or a digit re-edits, Enter
+  submits, Esc cancels), the line REPL as a numbered recap (`n` declines). A
+  declined review is reported to the model as declined rather than as an
+  unusable environment. The single-question `question` / `answer` shape is still
+  accepted, so older prompts keep working.
 
 ### Removed
 - **The first-run skill bootstrap and its manifest.** Nothing is copied into the
@@ -74,6 +85,14 @@ interactive REPL/TUI.
   `degradedResults` and `transcriptsVerified`.
 
 ### Fixed
+- **A long question or a long option list is no longer clipped or answered
+  blind.** The TUI submitted question 1's answer for *every* question in a batch,
+  and both front-ends had dropped the ability to reach text past the visible
+  rows: question prose is now word-wrapped and scrollable (PgUp/PgDn in the TUI),
+  option lists window around the highlight (and page with `n`/`p` in the REPL,
+  which also gained `1-3` ranges and `a` for all), and the panel reserves its
+  real height so the composer is never pushed off-screen. The review row keeps
+  the answer visible instead of letting a long question clip it.
 - **Host sessions now preserve isolation during reconnects, permission grants and
   shutdown**: `always` approves only the session that answered, not every session
   in the same directory. A client can now resume an ownerless running turn as a

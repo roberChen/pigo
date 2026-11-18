@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/roberChen/pigo/internal/agentcore"
 )
 
 // This file covers the model-level key routing for the full-screen modal
@@ -312,7 +314,7 @@ func TestFullscreenIgnoredWhileRunningOrAsking(t *testing.T) {
 
 	m = next.(Model)
 	m.running = false
-	m.ask = &askPrompt{question: "q?"}
+	m.ask = newAskPrompt([]agentcore.AskQuestion{{Question: "q?"}}, make(chan agentcore.AskResponse, 1))
 	next, _ = m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
 	if next.(Model).input.Fullscreen() {
 		t.Fatal("ctrl+e entered full screen while the question tool owns the composer")

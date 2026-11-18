@@ -378,3 +378,50 @@ func TestToolCardTaskExpandStaysBounded(t *testing.T) {
 		t.Errorf("expanded task card should keep the head of the report\n%s", out)
 	}
 }
+
+// TestToolCardQuestionSummary verifies the question tool's header line shows the
+// question for a single-question call, a count for a batch, and the multi-select
+// marker, instead of dumping the raw arguments.
+func TestToolCardQuestionSummary(t *testing.T) {
+	card := func(input map[string]any) toolCard {
+		return toolCard{name: "question", input: input, state: cardRunning}
+	}
+	cases := []struct {
+		name  string
+		input map[string]any
+		want  string
+	}{
+		{
+			name: "single",
+			input: map[string]any{"questions": []any{
+				map[string]any{"question": "Deploy now?"},
+			}},
+			want: "question(Deploy now?)",
+		},
+		{
+			name: "multi select",
+			input: map[string]any{"questions": []any{
+				map[string]any{"question": "Which features?", "multi_select": true},
+			}},
+			want: "question(Which features? (multi-select))",
+		},
+		{
+			name: "batch",
+			input: map[string]any{"questions": []any{
+				map[string]any{"question": "one"},
+				map[string]any{"question": "two"},
+			}},
+			want: "question(2 questions)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := card(tc.input).headerText(); got != tc.want {
+				t.Errorf("headerText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := card(map[string]any{}).headerText(); got != "question" {
+		t.Errorf("headerText() without questions = %q, want the bare name", got)
+	}
+}

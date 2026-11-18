@@ -79,17 +79,17 @@ type cardLine struct {
 // the column budget of one collapsed argument value — expanding drops it, so the
 // whole value (multi-line included) is shown.
 const (
-	cardPreviewLines   = 6   // generic / MCP / file / fetch output
-	cardBashLines      = 8   // command output (head + tail)
-	cardTaskLines      = 10  // sub-agent report
-	cardInputLines     = 3   // argument lines before "+N more"
-	cardExpandedLines  = 400 // hard ceiling once expanded
+	cardPreviewLines  = 6   // generic / MCP / file / fetch output
+	cardBashLines     = 8   // command output (head + tail)
+	cardTaskLines     = 10  // sub-agent report
+	cardInputLines    = 3   // argument lines before "+N more"
+	cardExpandedLines = 400 // hard ceiling once expanded
 	// cardTaskExpanded caps an expanded sub-agent report far below the generic
 	// ceiling: the report is the child's whole transcript, and the full text lives
 	// in the child's session file, so dumping it into the parent transcript buries
 	// the parent's own turns. Expanding is for re-reading the gist, not the child's
 	// entire run.
-	cardTaskExpanded = 40
+	cardTaskExpanded   = 40
 	collapsedDiffLines = 12
 	cardRawArgsLimit   = 400
 	cardArgValueLimit  = 120
@@ -376,7 +376,7 @@ func (c toolCard) summaryArg() string {
 	case "task", "task_output":
 		return clipLine(firstLine(argText(c.input, "description", "prompt", "job_id")), 80)
 	case "question":
-		return clipLine(argText(c.input, "question"), 80)
+		return questionCardSummary(c.input)
 	case "mcp":
 		return ""
 	case "memory_search":
@@ -573,7 +573,7 @@ func (c toolCard) headerOnlyArgs() map[string]bool {
 	case "task", "task_output":
 		return map[string]bool{"description": true, "prompt": true, "job_id": true}
 	case "question":
-		return map[string]bool{"question": true}
+		return map[string]bool{"questions": true}
 	}
 	return nil
 }
@@ -829,6 +829,25 @@ func argText(input map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// questionCardSummary renders the question tool's call as its header line: the
+// question itself for a single-question call, a count for a batch, and a marker for
+// a multi-select question (whose result carries several picks).
+func questionCardSummary(input map[string]any) string {
+	items, _ := input["questions"].([]any)
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) > 1 {
+		return fmt.Sprintf("%d questions", len(items))
+	}
+	q, _ := items[0].(map[string]any)
+	line := clipLine(firstLine(argText(q, "question")), 70)
+	if multi, _ := q["multi_select"].(bool); multi && line != "" {
+		line += " (multi-select)"
+	}
+	return line
 }
 
 // firstLine returns the first line of s, so a multi-line command or prompt becomes

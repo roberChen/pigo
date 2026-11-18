@@ -104,9 +104,11 @@ const taskGuide = "When work splits into independent subtasks, delegate them wit
 // clear that the answer arrives as a tool result, so the run continues.
 const questionGuide = "When you genuinely need a decision only the user can make " +
 	"(an ambiguous requirement, a destructive or irreversible choice, information you cannot " +
-	"find), ask them with the question tool and continue once the answer arrives. Offer a few " +
-	"concise options when the answer is a choice. Do not ask about permissions (the tool layer " +
-	"handles trust) or things you can settle yourself; state an assumption instead."
+	"find), ask them with the question tool and continue once the answer arrives. Ask several " +
+	"related things in one call rather than one call per question, offer a few concise options " +
+	"when the answer is a choice, and set multi_select when several options can apply at once. " +
+	"Do not ask about permissions (the tool layer handles trust) or things you can settle " +
+	"yourself; state an assumption instead."
 
 // BuildSystemPrompt assembles the full system prompt from cfg: base instruction,
 // environment block, then AGENTS.md files ordered general-to-specific from Root

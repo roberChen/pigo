@@ -21,16 +21,16 @@ import (
 // turn. The tool result the model receives must carry the answer.
 func TestLoopQuestionToolAsksAndContinues(t *testing.T) {
 	var asked agentcore.AskRequest
-	ctx := agentcore.WithAskUser(context.Background(), func(_ context.Context, req agentcore.AskRequest) (string, error) {
+	ctx := agentcore.WithAskUser(context.Background(), func(_ context.Context, req agentcore.AskRequest) (agentcore.AskResponse, error) {
 		asked = req
-		return "postgres", nil
+		return agentcore.AskResponse{Answers: []agentcore.AskAnswer{{Selected: []string{"postgres"}}}}, nil
 	})
 
 	p := &fauxProvider{
 		name:   "faux",
 		models: []provider.Model{{Provider: "faux", ID: "faux"}},
 		turns: []fauxTurn{
-			toolCallTurn("call-1", "question", `{"question":"Which database?","options":["postgres","sqlite"]}`),
+			toolCallTurn("call-1", "question", `{"questions":[{"question":"Which database?","options":["postgres","sqlite"]}]}`),
 			textTurn("using postgres"),
 		},
 	}
@@ -41,7 +41,7 @@ func TestLoopQuestionToolAsksAndContinues(t *testing.T) {
 
 	kinds, msgs := collectStream(t, agentLoop(ctx, agentCtx, cfg))
 
-	if asked.Question != "Which database?" || len(asked.Options) != 2 {
+	if len(asked.Questions) != 1 || asked.Questions[0].Question != "Which database?" || len(asked.Questions[0].Options) != 2 {
 		t.Errorf("asker received %#v, want the question and its options", asked)
 	}
 	if got := countKind(kinds, agentcore.EventToolExecutionStart); got != 1 {
@@ -88,7 +88,7 @@ func TestLoopQuestionToolWithoutAsker(t *testing.T) {
 		name:   "faux",
 		models: []provider.Model{{Provider: "faux", ID: "faux"}},
 		turns: []fauxTurn{
-			toolCallTurn("call-1", "question", `{"question":"Which database?"}`),
+			toolCallTurn("call-1", "question", `{"questions":[{"question":"Which database?"}]}`),
 			textTurn("assuming sqlite"),
 		},
 	}
@@ -132,12 +132,12 @@ func TestQuestionToolSequentialInBatch(t *testing.T) {
 		t.Fatalf("register echo: %v", err)
 	}
 	calls := []agentcore.AgentToolCall{
-		{ID: "c1", Name: "question", Arguments: json.RawMessage(`{"question":"Proceed?"}`)},
+		{ID: "c1", Name: "question", Arguments: json.RawMessage(`{"questions":[{"question":"Proceed?"}]}`)},
 		{ID: "c2", Name: "echo", Arguments: json.RawMessage(`{}`)},
 	}
 	cfg := agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: reg}}
-	ctx := agentcore.WithAskUser(context.Background(), func(context.Context, agentcore.AskRequest) (string, error) {
-		return "yes", nil
+	ctx := agentcore.WithAskUser(context.Background(), func(context.Context, agentcore.AskRequest) (agentcore.AskResponse, error) {
+		return agentcore.AskResponse{Answers: []agentcore.AskAnswer{{Selected: []string{"yes"}}}}, nil
 	})
 	results, _ := agenttool.ExecuteToolCalls(ctx, cfg, calls, nil)
 	if len(results) != 2 {
