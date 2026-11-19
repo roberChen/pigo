@@ -1061,13 +1061,26 @@ func (c *conn) handlePrompt(env envelope) {
 	st.mu.Unlock()
 	st.releaseObservers(droppedObservers, "new turn started")
 
-	defer func() {
+	// finishTurn marks the session idle. It must run before the prompt result is
+	// sent: a client that reacts to a returned prompt (the next turn, a compact,
+	// a close) is entitled to find the session idle, and sending the reply first
+	// left a window in which the host answered "a turn is already running for
+	// this session" to a client that had just been told the turn was over.
+	finished := false
+	finishTurn := func() {
+		if finished {
+			return
+		}
+		finished = true
 		st.mu.Lock()
 		st.running = false
 		st.cancel = nil
 		st.mu.Unlock()
 		st.perms.abortAll()
 		cancel()
+	}
+	defer func() {
+		finishTurn()
 		// The client may have vanished while this turn ran. The turn itself is
 		// allowed to finish (the host owns it), but the now-idle orphan is closed
 		// unless a reconnecting client adopted it in the meantime.
@@ -1097,6 +1110,7 @@ func (c *conn) handlePrompt(env envelope) {
 	st.mu.Unlock()
 	if perr != nil {
 		c.srv.discardClosedPrompt(st, agent)
+		finishTurn()
 		c.replyError(env.ID, codeInternal, "persist session: "+perr.Error())
 		return
 	}
@@ -1120,6 +1134,8 @@ func (c *conn) handlePrompt(env envelope) {
 		// is no message to carry the abort, but it is still an abort, not success.
 		res.StopReason = agentcore.StopReasonAborted
 	}
+	// Idle before replying: see finishTurn.
+	finishTurn()
 	switch {
 	case runErr == nil:
 		c.reply(env.ID, res)

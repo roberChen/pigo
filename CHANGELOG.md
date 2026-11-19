@@ -39,6 +39,12 @@ interactive REPL/TUI.
   PR's read-only token would have turned the reporting step red.
 
 ### Fixed
+- **A finished prompt leaves the session idle.** The host cleared the
+  "running" flag in a deferred cleanup *after* it sent the prompt result, so a
+  client that reacted to the result — the next turn, a `/compact`, a close — could
+  be answered `a turn is already running for this session` about a turn it had
+  just been told was over. The flag now drops before the reply, on both the
+  success and the persist-failure paths.
 - **An interrupted turn no longer poisons the session.** A turn aborted before it
   streamed anything is kept in the session on purpose — the transcript stays
   truthful — but replaying it sent `content: ""`, which strict providers reject
