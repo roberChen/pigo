@@ -73,25 +73,28 @@ go tool longstay -duration 10m -tools task_auto -avg-tool-calls 1 -require-task-
 go tool longstay -duration 24h -llm-error-rate 0.02 -seed 42
 
 # 使用已经构建好的 pigo，而不是自动构建 ./cmd/pigo
-go tool longstay -duration 2h -pigo ./pigo.exe
+go tool longstay -duration 30m -pigo ./pigo.exe
 ```
 
 也可以绕过 `go tool`，使用等价的 `go run ./e2e/longstay`。`go tool` 会列出 `longstay (github.com/roberChen/pigo/e2e/longstay)`；它仍然是一个普通命令，不会被 `go test ./...` 执行。
 
-### CI 中的两个层次
+### CI 中的三个层次
 
 | 工作流 | 规模 | 覆盖 |
 |---|---|---|
-| `.github/workflows/ci.yml` 的 `longstay` job | 20s / 10s / 8s 三段冒烟，`ubuntu-latest` 与 `windows-latest` 各一轮 | 完整工具 smoke、强制 task 矩阵、自动 task follow-up |
-| `.github/workflows/soak.yml` | **每天北京时间 09:30**，至少 2 小时，默认 `-race` 版 pigo | 长时间多客户端抖动、重连、接管、压缩与 task 子 Agent 的完整生命周期 |
+| `.github/workflows/ci.yml` 的 `soak` job | **每次 commit 与 PR**，10 分钟，默认 `-race` 版 pigo | 多客户端抖动、重连、接管、压缩与 task 子 Agent 的完整生命周期 |
+| `.github/workflows/ci.yml` 的 `longstay` job | 20s / 10s / 8s 三段冒烟，`ubuntu-latest` 与 `windows-latest` 各一轮 | 完整工具 smoke、强制 task 矩阵、自动 task follow-up；Windows 命名管道只有这里跑得到 |
+| `.github/workflows/soak.yml` | **每天北京时间 09:30**，默认 10 分钟（手动可到 5h），默认 `-race` 版 pigo | 代码没变也能暴露偶发问题；定义在 `soak.yml`，CI 通过 `workflow_call` 复用它，不复制步骤 |
 
-soak 先跑构建、vet 与全量测试，全部通过才进入长稳；任何一步失败都会自动开一条 issue（当天重复失败改为追加评论）。因为 longstay 把 SIGINT 视为正常停止，工作流另外按墙钟时长兜底：跑不满请求时长即判失败，即使 `summary.json` 写着 `pass: true`。上传到 artifact 的只有脱敏文件（`summary.json`、`config.json` 与各日志尾部），`home/` 不会外传。
+20 秒的冒烟只能证明链路没断，问题常常要跑上几分钟才现形，所以每次提交都要真跑一轮十分钟的；凌晨那一轮留着抓「今天什么都没改却挂了」的偶发问题。
 
-本地复现 soak（`GORACE=halt_on_error=1` 会让 host 在检测到数据竞争时立即退出，而不是打完警告继续跑）：
+长稳先跑构建、vet 与全量测试，全部通过才进入长稳。定时与手动触发的 run 任何一步失败都会自动开一条 issue（当天重复失败改为追加评论）；CI 调用不报 issue，失败已经挂在对应的 commit／PR 上。因为 longstay 把 SIGINT 视为正常停止，工作流另外按墙钟时长兜底：跑不满请求时长即判失败，即使 `summary.json` 写着 `pass: true`。上传到 artifact 的只有脱敏文件（`summary.json`、`config.json` 与各日志尾部），`home/` 不会外传。
+
+本地复现 CI 的十分钟长稳（`GORACE=halt_on_error=1` 会让 host 在检测到数据竞争时立即退出，而不是打完警告继续跑）：
 
 ```bash
 go build -race -o pigo-soak ./cmd/pigo
-GORACE=halt_on_error=1 go tool longstay -duration 2h -pigo ./pigo-soak -output e2e-results/soak
+GORACE=halt_on_error=1 go tool longstay -duration 10m -pigo ./pigo-soak -output e2e-results/soak
 ```
 
 默认会构建当前源码中的 `./cmd/pigo`，并将它放入本次产物目录。Ctrl-C / SIGTERM 会先停止客户端，执行最终重连验证，再优雅关闭 host；不会把正常停止计为故障。
@@ -100,7 +103,7 @@ GORACE=halt_on_error=1 go tool longstay -duration 2h -pigo ./pigo-soak -output e
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `-duration` | `1h` | 持续时间，支持 `30s`、`2h`、`24h` |
+| `-duration` | `1h` | 持续时间，支持 `30s`、`10m`、`2h`、`24h` |
 | `-seed` | 当前时间 | 确定性场景种子，便于复现 |
 | `-initial-clients` | `4` | 启动时客户端数 |
 | `-max-clients` | `16` | 客户端槽位上限，运行中持续加入新客户端直到达到上限 |

@@ -1,8 +1,10 @@
-# 在每次 push（所有分支）与所有 PR 上运行 gofmt 检查、构建、vet 与测试，
-# 并在 ubuntu / windows 上各跑一轮短时 longstay 冒烟，确认多客户端链路没坏。
+# 在每次 push（所有分支）与所有 PR 上跑完整检查：gofmt、构建、vet、全量测试，
+# 再跑一轮 10 分钟长稳，外加 ubuntu / windows 上的短时 longstay 冒烟（覆盖工具
+# 往返与 task 子 Agent 矩阵，Windows 的命名管道只有那里跑得到）。
 #
-# 这里的长稳只是「冒烟」：分钟级，覆盖工具往返与 task 子 Agent 矩阵。真正的长稳是
-# 每天定时跑的 .github/workflows/soak.yml（至少 2 小时）。
+# 十分钟长稳复用 .github/workflows/soak.yml：并发、重连、压缩这类问题往往要跑上
+# 几分钟才现形，只靠分钟级冒烟会漏；等凌晨的定时任务发现时，引入问题的提交已经
+# 混进 master 了。步骤只写一份，两处触发不会漂移。
 name: ci
 
 on:
@@ -67,6 +69,21 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  # 十分钟长稳。放在 test 之后：单测都不过就不必再占十分钟 runner。
+  soak:
+    name: Soak (10m)
+    needs: [test]
+    uses: ./.github/workflows/soak.yml
+    with:
+      duration: 10m
+      # race 不传：可复用工作流里它的默认值就是 "true"，CI 要的正是它。
+      # 十分钟的长稳挂住时 40 分钟足够收尾，不必占着 runner 到 340 分钟。
+      timeout_minutes: 40
+    # 被调用的工作流会继承这里声明的权限；issue 上报在 CI 调用时被跳过，
+    # 因此只需要读。
+    permissions:
+      contents: read
 
   longstay:
     name: Longstay smoke (${{ matrix.os }})

@@ -2,18 +2,18 @@
 # 校验长稳时长不低于下限，把 Go duration 换算成秒。
 #
 # 用法: soak-duration.sh <duration> [min] [max]
-#   duration  Go duration 语法，允许 h / m / s 及其组合（2h30m、150m、7200s、2.5h）
-#   min       下限，默认 2h
+#   duration  Go duration 语法，允许 h / m / s 及其组合（10m、2h30m、600s、1.5h）
+#   min       下限，默认 10m
 #   max       上限，默认空（不限制）
 #
 # 通过时打印请求的秒数并退出 0，越界或无法解析时打印原因并以 1 退出。
-# 冒烟的意义在于"跑得够久"，所以下限放在脚本里而不是靠 workflow 的默认值——手动
-# 触发时改小 -duration 一样会被拦下来。上限用来挡住 GitHub 跑不完的时长：单个 job
-# 最长 6 小时，请求 24h 只会被硬杀，连 summary 都写不出来。
+# 下限放在脚本里而不是靠 workflow 的默认值：手动触发时把 -duration 改成 10s 一样
+# 会被拦下来，否则十有八九只是跑了一次冒烟，却被当成长稳通过。上限用来挡住 GitHub
+# 跑不完的时长：单个 job 最长 6 小时，请求 24h 只会被硬杀，连 summary 都写不出来。
 set -euo pipefail
 
 dur="${1:-}"
-min="${2:-2h}"
+min="${2:-10m}"
 max="${3:-}"
 
 # to_seconds 把 Go 风格的时长换算成整数秒。
@@ -49,11 +49,11 @@ to_seconds() {
 }
 
 want=$(to_seconds "$min") || {
-	echo "无法解析下限 $min（只支持 h/m/s，例如 2h）" >&2
+	echo "无法解析下限 $min（只支持 h/m/s，例如 10m）" >&2
 	exit 1
 }
 got=$(to_seconds "$dur") || {
-	echo "无法解析时长 '$dur'（只支持 h/m/s，例如 2h30m、150m、7200s）" >&2
+	echo "无法解析时长 '$dur'（只支持 h/m/s，例如 10m、2h30m、7200s）" >&2
 	exit 1
 }
 
@@ -64,7 +64,7 @@ fi
 
 if [ -n "$max" ]; then
 	limit=$(to_seconds "$max") || {
-		echo "无法解析上限 $max（只支持 h/m/s，例如 5h30m）" >&2
+		echo "无法解析上限 $max（只支持 h/m/s，例如 5h）" >&2
 		exit 1
 	}
 	if [ "$got" -gt "$limit" ]; then

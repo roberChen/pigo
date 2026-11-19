@@ -1,12 +1,16 @@
-# 每天北京时间 09:30 的长时间长稳测试（soak）。
+# 长稳测试（soak）：在真实 pigo serve 守护进程、真实 unix socket / 命名管道和真实
+# 多客户端抖动下跑够 N 分钟。
 #
-# 顺序固定：先构建、vet、跑全量测试，全部通过才开始长稳——长稳要占用两小时以上的
-# runner 时间，不该为一次编译错误白跑。其中任何一步失败（含长稳本身失败）都会自动
-# 开一条 issue；当天重复失败只在原 issue 下追加评论。
+# 三个触发口，跑的是同一份实现（workflow_call 让 ci.yml 不必复制步骤，否则两处一定
+# 会漂移）：
+#   push / PR   ci.yml 调用，10 分钟，和测试并行，回归在同一次提交上就报出来
+#   定时        每天北京时间 09:30，10 分钟，代码没变的日子也能发现偶发问题
+#   手动        可选 10m..5h，用来压长尾问题
 #
-# 时区：Actions 的 cron 只认 UTC，北京时间 09:30 = UTC 01:30。定时任务可能被推迟
-# （高峰期几分钟到几十分钟不等），所以日期一律按北京时间计算，见
-# .github/scripts/soak-failure-issue.sh。
+# 顺序固定：先构建、vet、跑全量测试，全部通过才开始长稳——长稳要占用十分钟以上的
+# runner 时间，不该为一次编译错误白跑。定时与手动触发时，任何一步失败（含长稳本身
+# 失败）都会自动开一条 issue；当天重复失败只在原 issue 下追加评论。CI 调用时不报
+# issue：失败已经挂在对应的 commit / PR 上，再开一条只是把同一个信号说两遍。
 name: soak
 
 on:
@@ -16,45 +20,75 @@ on:
   workflow_dispatch:
     inputs:
       duration:
-        description: "长稳时长（Go duration，必须 ≥ 2h 且不超过 5h）"
+        description: "长稳时长（Go duration，必须 ≥ 10m 且不超过 5h）"
         required: true
-        default: "2h"
+        default: "10m"
       race:
         description: "用 -race 构建 pigo 再跑（更慢，但能把数据竞争变成失败）"
-        type: boolean
-        default: true
+        type: choice
+        options: ["true", "false"]
+        default: "true"
       seed:
         description: "确定性种子，留空则按时间生成"
         required: false
         default: ""
+  # ci.yml 在每次 commit 与 PR 上调用，跑 10 分钟版本。
+  workflow_call:
+    inputs:
+      duration:
+        description: "长稳时长（Go duration，必须 ≥ 10m 且不超过 5h）"
+        required: false
+        type: string
+        default: "10m"
+      race:
+        description: "用 -race 构建 pigo 再跑（\"true\" / \"false\"）"
+        required: false
+        type: string
+        default: "true"
+      timeout_minutes:
+        description: "job 级超时（分钟）；CI 里只需几十，手动压长尾时才要 340"
+        required: false
+        type: number
+        default: 340
+      seed:
+        description: "确定性种子，留空则按时间生成"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
-  # 上报 issue 需要写权限，GITHUB_TOKEN 默认没有。
+  # 上报 issue 需要写权限，GITHUB_TOKEN 默认没有。CI 调用时这一步会被跳过（见
+  # 下面的 if），而且 fork PR 的 token 本来就是只读的，所以那里不会因此变红。
   issues: write
 
-# 定时与手动触发的 soak 不要叠加：它们抢同一份 runner 配额，也让「哪一轮失败」
-# 变得含混。进行中的那一轮不取消，否则两小时白跑。
-concurrency:
-  group: soak
-  cancel-in-progress: false
+# 同一分支上的长稳不要叠加：连续推送会排出一条十分钟的队列，反馈越来越滞后。PR
+# 上直接取消旧的（新提交已经取代它）；master 与定时触发不取消，免得把一轮跑了大半
+# 的长稳白扔——新的那轮会等它结束。见 jobs.soak.concurrency。
+#
+# 放在 job 级：GitHub 只承诺「调用方 job 上的 jobs.<id>.concurrency」有效，被调用时
+# workflow 级的并发块行为没有明确约定，而两处同名很容易互相取消（文档明确警告：
+# 调用方与被调用方用同一个 group 且 cancel-in-progress 为真，会取消正在跑的那个）。
 
 jobs:
   soak:
-    name: Soak (${{ inputs.duration || '2h' }})
+    name: Soak (${{ inputs.duration || '10m' }})
     runs-on: ubuntu-latest
+    concurrency:
+      group: soak-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # GitHub 托管 runner 的 job 上限是 6 小时（360 分钟）。5h 长稳 + 15 分钟
-    # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。
-    timeout-minutes: 340
+    # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。CI 里只跑 10 分钟，
+    # 调用方传 40，挂住时就不必占着 runner 到平台的硬上限。
+    timeout-minutes: ${{ inputs.timeout_minutes || 340 }}
     env:
-      SOAK_DURATION: ${{ inputs.duration || '2h' }}
+      SOAK_DURATION: ${{ inputs.duration || '10m' }}
       SOAK_SEED: ${{ inputs.seed || '' }}
-      # 定时触发时 inputs 整个为 null，此时默认开启 race 构建。
-      #
-      # 这里不能只写 `inputs.race == false && 'false' || 'true'`：GitHub 的表达式
-      # 在类型不同时按数字比较，null→0、false→0，于是 `null == false` 为 **true**，
-      # 定时任务反而会关掉 race。先用 event_name 把「有没有传参」区分出来。
-      SOAK_RACE: ${{ github.event_name == 'workflow_dispatch' && inputs.race == false && 'false' || 'true' }}
+      # race 输入是字符串而不是 boolean，正是为了避开下面这个坑：GitHub 的表达式
+      # 在类型不同时按数字比较，null→0、false→0，于是 `inputs.race == false` 在
+      # 「inputs 整个为 null」（定时触发）时也为 **true**，定时任务反而会关掉 race。
+      # 字符串没有这个歧义：null || 'true' 就是 'true'，显式传 "false" 才是 false。
+      SOAK_RACE: ${{ inputs.race || 'true' }}
       # 单个 job 跑不完更长的时长，越界时在第一步就明确报错，而不是被硬杀。
       SOAK_MAX_DURATION: 5h
     steps:
@@ -67,15 +101,15 @@ jobs:
           go-version: stable
 
       # 下限写死在脚本里而不是依赖 input 的默认值：手动触发时把 duration 改成 30s
-      # 也应该被拦下来，否则「每天的长稳」会悄悄退化成一次冒烟。
+      # 也应该被拦下来，否则「十分钟的长稳」会悄悄退化成一次冒烟。
       - name: Check duration
         id: duration
         run: |
-          seconds=$(bash .github/scripts/soak-duration.sh "$SOAK_DURATION" 2h "$SOAK_MAX_DURATION")
+          seconds=$(bash .github/scripts/soak-duration.sh "$SOAK_DURATION" 10m "$SOAK_MAX_DURATION")
           echo "seconds=$seconds" >>"$GITHUB_OUTPUT"
-          echo "请求时长 $SOAK_DURATION（${seconds}s），允许范围 2h..$SOAK_MAX_DURATION"
+          echo "请求时长 $SOAK_DURATION（${seconds}s），允许范围 10m..$SOAK_MAX_DURATION"
 
-      # ---- 冒烟阶段：构建 + 测试，全绿才值得占用两小时 ----
+      # ---- 冒烟阶段：构建 + 测试，全绿才值得占用十分钟 ----
 
       - name: Build
         id: build
@@ -161,8 +195,8 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       # artifact 只收脱敏后的尾巴。home/ 含 server.token 与 session 提示词，公开
-      # 仓库的 artifact 谁都能下载（见 e2e/longstay/README.md 的安全提示）；两小时的
-      # events.jsonl 也可能上百 MB，不适合整体上传。
+      # 仓库的 artifact 谁都能下载（见 e2e/longstay/README.md 的安全提示）；事件的
+      # events.jsonl 也可能很大，不适合整体上传。
       - name: Collect sanitized evidence
         if: always()
         run: |
@@ -186,11 +220,18 @@ jobs:
           retention-days: 14
           path: evidence/
 
-      # 只要有任何一步没成功就开 issue。放在 always() 上而不是 failure()：被 timeout
-      # 包裹的 longstay 以 124/130 退出时同样要报，取消的运行则不算（那是人主动停的）。
+      # 只要有任何一步没成功就开 issue。用 failure()：被 timeout 包裹的 longstay 以
+      # 124/130 退出同样算失败，而 cancelled（人主动停掉）不该开 issue。
       - name: Open or update failure issue
         id: report
-        if: failure()
+        # 只有定时与手动触发才报 issue：CI 里失败已经挂在 commit / PR 上，再开一条
+        # 只是把同一个信号说两遍；fork PR 的 token 还是只读的，写 issue 会变红。
+        #
+        # 用白名单而不是「不等于 workflow_call」：GitHub 文档说被调用工作流的 github
+        # 上下文关联的是调用方，于是那里的 event_name 是 push / pull_request 而不是
+        # workflow_call。无论语义如何，push 和 pull_request 都不等于 schedule 或
+        # workflow_dispatch，白名单在两种情况下都正确。
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -245,7 +286,7 @@ jobs:
 
       # 让失败在 run 页面上直接可点，而不是藏在日志末尾。
       - name: Link the issue in the summary
-        if: failure()
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           issue="${{ steps.report.outputs.issue }}"
           if [ -n "$issue" ]; then

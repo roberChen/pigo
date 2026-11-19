@@ -11,6 +11,33 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
+### Changed
+- **Every commit and PR now runs a real ten-minute soak, not just a smoke.**
+  The twenty-second `longstay` smokes prove the multi-client path is wired up,
+  but the failures that hurt — reconnects racing a takeover, a compaction pass
+  that drops an event, a data race that only fires after thousands of prompts —
+  need a few minutes of churn to show up at all. Waiting for the nightly run to
+  find them means the commit that introduced the bug has long since landed on
+  `master`. `ci.yml` now has a `soak` job that runs the full ten-minute,
+  `-race`, `GORACE=halt_on_error=1` soak on every branch push and every pull
+  request, in parallel with the other checks and after `go test` so a red unit
+  test does not burn the runner for ten minutes. The implementation is not
+  duplicated: `soak.yml` gained a `workflow_call` trigger and `ci.yml` invokes
+  it, so the every-commit soak and the nightly soak are the same steps and
+  cannot drift apart. The nightly run stays, at ten minutes instead of two
+  hours, to catch the "nothing changed and it still failed" class of flake.
+  The duration floor moved with the default: `soak-duration.sh` now rejects
+  anything under `10m` (was `2h`), so a manual run cannot silently degrade into
+  a smoke either. A `workflow_call` caller also passes its own job timeout, so
+  a hung ten-minute soak is capped at forty minutes instead of holding the
+  runner to the platform's six-hour limit. The `race` input became a string
+  (`"true"`/`"false"`) because GitHub compares mismatched types numerically:
+  `inputs.race == false` is also true when `inputs` is null, which would have
+  silently disabled `-race` on the scheduled run. Issue filing is now restricted
+  to scheduled and manual runs — a CI failure already shows up on the commit or
+  pull request, a duplicate issue only says the same thing twice, and a fork
+  PR's read-only token would have turned the reporting step red.
+
 ### Fixed
 - **Tool output can no longer corrupt the TUI frame.** A tool that returns
   text from a full-screen program — a `pigo` run captured through a pty, a

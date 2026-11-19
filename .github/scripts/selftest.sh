@@ -41,27 +41,31 @@ expect_rc() {
 }
 
 echo "== soak-duration.sh =="
-expect_rc 0 "2h 满足 2h 下限" -- "$here/soak-duration.sh" 2h
-expect_rc 0 "3h 满足下限" -- "$here/soak-duration.sh" 3h
-expect_rc 0 "150m 满足下限" -- "$here/soak-duration.sh" 150m
-expect_rc 0 "7200s 恰好等于下限" -- "$here/soak-duration.sh" 7200s
-expect_rc 0 "2h30m 满足下限" -- "$here/soak-duration.sh" 2h30m
-expect_rc 1 "1h59m 低于下限" -- "$here/soak-duration.sh" 1h59m
+expect_rc 0 "10m 恰好等于 10m 下限" -- "$here/soak-duration.sh" 10m
+expect_rc 0 "600s 等于下限" -- "$here/soak-duration.sh" 600s
+expect_rc 0 "15m 满足下限" -- "$here/soak-duration.sh" 15m
+expect_rc 0 "2h 满足下限" -- "$here/soak-duration.sh" 2h
+expect_rc 1 "9m59s 低于下限" -- "$here/soak-duration.sh" 9m59s
 expect_rc 1 "30s 低于下限" -- "$here/soak-duration.sh" 30s
 expect_rc 1 "空值被拒" -- "$here/soak-duration.sh" ""
-expect_rc 1 "裸数字被拒（避免把 7200 当纳秒静默放过）" -- "$here/soak-duration.sh" 7200
-expect_rc 1 "ms 单位被拒" -- "$here/soak-duration.sh" 7200000ms
-expect_rc 1 "垃圾输入被拒" -- "$here/soak-duration.sh" two-hours
-expect_rc 0 "5h 在 2h..6h 内" -- "$here/soak-duration.sh" 5h 2h 6h
-expect_rc 1 "超过上限被拒（24h 跑不完）" -- "$here/soak-duration.sh" 24h 2h 6h
-expect_rc 1 "下限仍然优先于上限" -- "$here/soak-duration.sh" 30m 2h 6h
-expect_rc 0 "不给上限时不限制" -- "$here/soak-duration.sh" 9h 2h
+expect_rc 1 "裸数字被拒（避免把 600 当纳秒静默放过）" -- "$here/soak-duration.sh" 600
+expect_rc 1 "ms 单位被拒" -- "$here/soak-duration.sh" 600000ms
+expect_rc 1 "垃圾输入被拒" -- "$here/soak-duration.sh" ten-minutes
+expect_rc 0 "5h 在 10m..6h 内" -- "$here/soak-duration.sh" 5h 10m 6h
+expect_rc 1 "超过上限被拒（24h 跑不完）" -- "$here/soak-duration.sh" 24h 10m 6h
+expect_rc 1 "下限仍然优先于上限" -- "$here/soak-duration.sh" 5m 10m 6h
+expect_rc 0 "不给上限时不限制" -- "$here/soak-duration.sh" 9h 10m
 
 # 换算结果本身要正确，否则"低于下限"的判断毫无意义。
 if [ "$("$here/soak-duration.sh" 2h30m | tail -n1)" = "9000" ]; then
 	ok "2h30m = 9000s"
 else
 	no "2h30m = 9000s" "got $("$here/soak-duration.sh" 2h30m | tail -n1)"
+fi
+if [ "$("$here/soak-duration.sh" 600s | tail -n1)" = "600" ]; then
+	ok "600s = 600"
+else
+	no "600s = 600" "got $("$here/soak-duration.sh" 600s | tail -n1)"
 fi
 if [ "$("$here/soak-duration.sh" 2.5h | tail -n1)" = "9000" ]; then
 	ok "2.5h = 9000s"
