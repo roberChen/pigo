@@ -80,10 +80,16 @@ jobs:
       # race 不传：可复用工作流里它的默认值就是 "true"，CI 要的正是它。
       # 十分钟的长稳挂住时 40 分钟足够收尾，不必占着 runner 到 340 分钟。
       timeout_minutes: 40
-    # 被调用的工作流会继承这里声明的权限；issue 上报在 CI 调用时被跳过，
-    # 因此只需要读。
+    # issues: write 不是这里需要的，是可复用工作流声明的。GitHub 在启动时校验
+    # 「调用方授予的权限覆盖被调用工作流声明的权限」，少一项就是 startup_failure
+    # （整个 run 起不来，不是某个步骤 403），所以必须原样列上。实际上 CI 这条路径
+    # 不会用写权限：上报 issue 的步骤只在定时与手动触发时执行。
+    #
+    # 会不会给 PR 代码发写权限？fork PR 的 token 由 GitHub 强制降为只读，改不了；
+    # 只有同仓库分支（即已有写权限的协作者）才会真正拿到，风险面没有扩大。
     permissions:
       contents: read
+      issues: write
 
   longstay:
     name: Longstay smoke (${{ matrix.os }})

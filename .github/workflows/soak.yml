@@ -58,8 +58,12 @@ on:
 
 permissions:
   contents: read
-  # 上报 issue 需要写权限，GITHUB_TOKEN 默认没有。CI 调用时这一步会被跳过（见
-  # 下面的 if），而且 fork PR 的 token 本来就是只读的，所以那里不会因此变红。
+  # 上报 issue 需要写权限，GITHUB_TOKEN 默认没有。
+  #
+  # 这行有个不明显的副作用：GitHub 在启动时校验「调用方 job 授予的权限必须覆盖被
+  # 调用工作流声明的权限」，声明的权限（无论写在 workflow 级还是 job 级）少一个都
+  # 会让调用方的 run 直接 startup_failure——不是运行到那一步才 403，而是整个工作流
+  # 根本起不来。所以 ci.yml 的 soak job 必须一起授予它，见那边的注释。
   issues: write
 
 # 同一分支上的长稳不要叠加：连续推送会排出一条十分钟的队列，反馈越来越滞后。PR
@@ -81,6 +85,7 @@ jobs:
     # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。CI 里只跑 10 分钟，
     # 调用方传 40，挂住时就不必占着 runner 到平台的硬上限。
     timeout-minutes: ${{ inputs.timeout_minutes || 340 }}
+
     env:
       SOAK_DURATION: ${{ inputs.duration || '10m' }}
       SOAK_SEED: ${{ inputs.seed || '' }}
@@ -208,6 +213,9 @@ jobs:
           [ -f longstay.log ] && tail -n 500 longstay.log >evidence/longstay.log.tail || true
           [ -f e2e-results/soak/events.jsonl ] &&
             tail -n 200 e2e-results/soak/events.jsonl >evidence/events.jsonl.tail || true
+          # 协议违例整轮保留：events.jsonl 太密，尾部 200 行只够十几秒，而失败时
+          # 第一手线索就在这里（harness 已把它单独写成有界文件）。
+          cp -f e2e-results/soak/protocol-errors.log evidence/ 2>/dev/null || true
           du -sh e2e-results/soak 2>/dev/null || true
           ls -la evidence
 
@@ -279,6 +287,7 @@ jobs:
             --ref "${{ github.ref_name }}" \
             --duration "$SOAK_DURATION" \
             --failed "${failed:-未知步骤}" \
+            --protocol evidence/protocol-errors.log \
             "${log_arg[@]}" \
             --repro "$repro" >soak-report.md
 

@@ -10,6 +10,7 @@
 #   --duration   请求的长稳时长（如 2h）
 #   --failed     失败的步骤名，逗号分隔
 #   --log        逐字附加到报告末尾的日志片段文件（会截断）
+#   --protocol   protocol-errors.log；有内容时列出违例种类与前几条原文
 #   --repro      复现命令
 #
 # 只做渲染，不调用网络：这样正文可以在本地用 summary.json 直接检查，也让
@@ -26,6 +27,7 @@ ref=""
 duration=""
 failed=""
 log_file=""
+protocol_file=""
 repro=""
 
 while [ $# -gt 0 ]; do
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
 	--duration) duration=${2:-}; shift 2 ;;
 	--failed) failed=${2:-}; shift 2 ;;
 	--log) log_file=${2:-}; shift 2 ;;
+	--protocol) protocol_file=${2:-}; shift 2 ;;
 	--repro) repro=${2:-}; shift 2 ;;
 	*) echo "soak-report: 未知参数 $1" >&2; exit 2 ;;
 	esac
@@ -69,6 +72,27 @@ echo "### 本轮指标"
 echo
 "$here/soak-summary.sh" "$summary"
 echo
+
+# 协议违例先给结论（种类计数）再给样本：看 issue 的人第一眼要的是"哪一类坏了"，
+# 而不是从几百行 JSON 里自己数。
+if [ -n "$protocol_file" ] && [ -s "$protocol_file" ]; then
+	echo "### 协议违例"
+	echo
+	echo "共 \`$(grep -c . "$protocol_file")\` 条（完整列表在 artifact 的 \`protocol-errors.log\`）："
+	echo
+	echo '```'
+	sed -n 's/.*"kind":"\([^"]*\)".*/\1/p' "$protocol_file" | sort | uniq -c | sort -rn
+	echo '```'
+	echo
+	echo "<details><summary>前 10 条原文</summary>"
+	echo
+	echo '```'
+	head -n 10 "$protocol_file"
+	echo '```'
+	echo
+	echo "</details>"
+	echo
+fi
 
 if [ -n "$log_file" ] && [ -s "$log_file" ]; then
 	echo "<details><summary>日志尾部（最后 ${LOG_LINES} 行）</summary>"
