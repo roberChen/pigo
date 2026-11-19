@@ -25,7 +25,8 @@
 //     the assistant message, where the error result already quotes it);
 //   - arguments that are not a JSON object become {} (replayToolArguments);
 //   - a tool result with no call to pair with is dropped;
-//   - a call with no result gets a synthesized error result.
+//   - a call with no result gets a synthesized error result;
+//   - a message that would reach the wire as an empty string is dropped.
 //
 // The last two are unreachable from pigo's own loop, which answers every call it
 // dispatches (see agenttool.ExecuteToolCalls) and persists a turn only after it
@@ -97,6 +98,11 @@ func repairToolCallHistory(msgs agentcore.MessageList) agentcore.MessageList {
 	}
 
 	for _, m := range msgs {
+		// An empty turn is not a tool result and carries no calls, so it can be
+		// dropped here without touching the pairing bookkeeping below.
+		if carriesNothing(m) {
+			continue
+		}
 		switch msg := m.(type) {
 		case agentcore.AssistantMessage:
 			flush()
@@ -126,6 +132,39 @@ func repairToolCallHistory(msgs agentcore.MessageList) agentcore.MessageList {
 	}
 	flush()
 	return out
+}
+
+// carriesNothing reports whether a message would reach the wire as an empty
+// string, which every strict provider rejects for the whole request.
+//
+// An assistant turn that was aborted (or failed) before it streamed anything
+// keeps its record in the session — that is deliberate, the transcript stays
+// truthful — but there is nothing in it for the model, and replaying it as
+// content:"" turns one interrupted turn into a conversation that can never be
+// resumed: the same message goes back out on every later request, so every
+// later request 400s. A long enough soak hits it every time (an eight-minute
+// run at 2 cores, #: "message 1102: content is an empty string").
+//
+// Only text-only messages qualify. A thinking, tool-call or image block is never
+// dropped: Anthropic replays signed thinking verbatim, and dropping a call would
+// orphan its result.
+func carriesNothing(m agentcore.Message) bool {
+	var content agentcore.ContentList
+	switch msg := m.(type) {
+	case agentcore.AssistantMessage:
+		content = msg.Content
+	case agentcore.UserMessage:
+		content = msg.Content
+	default:
+		return false
+	}
+	for _, block := range content {
+		text, ok := block.(agentcore.TextContent)
+		if !ok || strings.TrimSpace(text.Text) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // assistant repairs one assistant message's tool calls, returning the message and

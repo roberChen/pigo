@@ -228,6 +228,13 @@ func encodeOpenAIMessage(m agentcore.Message) []map[string]any {
 			} else {
 				entry["content"] = text
 			}
+		} else if text == "" {
+			// Neither text nor calls: an aborted turn that streamed nothing, or
+			// one that only thought (this wire has no thinking channel). The
+			// entry carries nothing the model can use, and content:"" makes the
+			// provider reject the whole request — including every later request,
+			// since history is replayed. Drop it instead of sending it.
+			return nil
 		} else {
 			entry["content"] = text
 		}

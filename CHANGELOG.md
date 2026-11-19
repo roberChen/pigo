@@ -39,6 +39,30 @@ interactive REPL/TUI.
   PR's read-only token would have turned the reporting step red.
 
 ### Fixed
+- **An interrupted turn no longer poisons the session.** A turn aborted before it
+  streamed anything is kept in the session on purpose — the transcript stays
+  truthful — but replaying it sent `content: ""`, which strict providers reject
+  for the entire request. Because history is replayed on every turn, one
+  interruption turned every later request into a 400, permanently, and surviving
+  a resume too. The replay-repair seam now drops messages that carry nothing
+  (text-only, no calls), and the Chat Completions encoder drops an assistant
+  entry with neither text nor tool calls — what a thinking-only turn looks like
+  on a wire that has no thinking channel. The Anthropic and Responses encoders
+  already refused to emit an empty body. Found by the new ten-minute CI soak,
+  which reaches it in about 7.5 minutes on two cores
+  (`message 1102: content is an empty string`).
+- **A stream cancelled mid-flight now ends with a terminal error event instead
+  of closing silently.** When the caller's context was cancelled at the same
+  moment an event was in flight, the transport's `emit` tried to forward that
+  event on the cancelled watch context, the send was refused, and the pump
+  returned without the terminal `StreamErrorEvent` the provider contract
+  promises — the consumer saw the channel close and had to infer a failure from
+  `ErrStreamIncomplete`. The two selects (cancellation, incoming line) are both
+  ready in that instant, so which one ran was a coin flip: the cancellation
+  test for the Responses driver failed roughly one run in four. The dropped
+  send now reports through `fail`, so a cancellation that races an event still
+  ends the stream with `stopReason=error` and `stream aborted`, whether the
+  cancellation wins the select or the in-flight event does.
 - **Tool output can no longer corrupt the TUI frame.** A tool that returns
   text from a full-screen program — a `pigo` run captured through a pty, a
   progress bar, a colored log — hands the transcript carriage returns, tabs and

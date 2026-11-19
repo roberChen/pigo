@@ -455,3 +455,60 @@ func toolResultFor(callID, text string) agentcore.ToolResultMessage {
 		Content:    agentcore.ContentList{agentcore.NewTextContent(text)},
 	}
 }
+
+// TestEmptyTurnsAreNotReplayed covers the turn an abort can leave behind: the
+// session keeps an assistant message with no content (the client disconnected
+// before anything streamed), and replaying it as content:"" makes every later
+// request fail with a 400 — permanently, since the same message goes back out
+// every time. The soak found it as "message 1102: content is an empty string"
+// after eight minutes on two cores.
+func TestEmptyTurnsAreNotReplayed(t *testing.T) {
+	emptyAssistant := agentcore.AssistantMessage{
+		RoleField:  agentcore.RoleAssistant,
+		StopReason: agentcore.StopReasonAborted,
+	}
+	emptyText := agentcore.AssistantMessage{
+		RoleField: agentcore.RoleAssistant,
+		Content:   agentcore.ContentList{agentcore.NewTextContent("")},
+	}
+	thinkingOnly := agentcore.AssistantMessage{
+		RoleField: agentcore.RoleAssistant,
+		Content: agentcore.ContentList{
+			agentcore.ThinkingContent{Type: "thinking", Thinking: "pondering"},
+		},
+	}
+	msgs := agentcore.MessageList{
+		userText("start"),
+		emptyAssistant,
+		emptyText,
+		agentcore.UserMessage{RoleField: agentcore.RoleUser},
+		thinkingOnly,
+		assistantText("done"),
+	}
+
+	repaired := repairToolCallHistory(msgs)
+	if len(repaired) != 3 {
+		t.Fatalf("repaired length = %d, want 3 (empty turns dropped)", len(repaired))
+	}
+	kept, ok := repaired[1].(agentcore.AssistantMessage)
+	if !ok || len(kept.Content) != 1 {
+		t.Fatalf("thinking-only message was not preserved: %+v", repaired[1])
+	}
+	if thinking, ok := kept.Content[0].(agentcore.ThinkingContent); !ok || thinking.Thinking != "pondering" {
+		t.Errorf("thinking block = %+v, want it preserved verbatim", kept.Content[0])
+	}
+
+	// The dropped messages must not reach any wire as an empty content string:
+	// that is the exact shape the provider rejects.
+	for _, wire := range wireCases {
+		t.Run(wire.name, func(t *testing.T) {
+			body, err := wire.encode(msgs)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			if strings.Contains(string(body), `"content":""`) {
+				t.Errorf("wire still carries an empty content string:\n%s", body)
+			}
+		})
+	}
+}

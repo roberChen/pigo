@@ -195,15 +195,7 @@ func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.R
 	defer idleTimer.Stop()
 	defer stallTimer.Stop()
 
-	emit := func(events []StreamEvent) bool {
-		for _, ev := range events {
-			if err := stream.Emit(watchCtx, ev); err != nil {
-				return false
-			}
-		}
-		return true
-	}
-
+	// fail must be declared before emit: emit reports a dropped event through it.
 	fail := func(msg string, err error) {
 		stream.Emit(context.Background(), StreamErrorEvent{
 			Message: agentcore.AssistantMessage{
@@ -213,6 +205,22 @@ func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.R
 			},
 			Err: err,
 		})
+	}
+
+	// emit forwards decoded events. Emitting on watchCtx means a cancelled caller
+	// drops the event — which is itself the "runtime failure" FR-13 requires to
+	// ride the stream as a terminal error event. Returning false without one left
+	// the stream closed with no error at all: a cancellation that raced an
+	// in-flight event (the ctx.Done and lines cases are both ready) ended the
+	// stream silently, and readers had to infer failure from ErrStreamIncomplete.
+	emit := func(events []StreamEvent) bool {
+		for _, ev := range events {
+			if err := stream.Emit(watchCtx, ev); err != nil {
+				fail("stream aborted", err)
+				return false
+			}
+		}
+		return true
 	}
 
 	flush := func() bool {
