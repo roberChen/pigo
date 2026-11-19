@@ -11,7 +11,22 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
-### Added
+### Fixed
+- **Tool output can no longer corrupt the TUI frame.** A tool that returns
+  text from a full-screen program — a `pigo` run captured through a pty, a
+  progress bar, a colored log — hands the transcript carriage returns, tabs and
+  terminal control sequences. Those were drawn verbatim into the frame, so an
+  `ESC [ 2 A` or `ESC [ K` moved the real cursor out of the cell the layout had
+  reserved: the border of the surrounding tool card broke open and stray box
+  characters appeared in columns that belong to other blocks. Width math cannot
+  catch this, since an escape sequence occupies zero cells and the line therefore
+  measures as fitting. Text now passes through `sanitizeTerminal` before it is
+  wrapped: SGR colors survive (they only set the pen), carriage returns collapse
+  to the visual result so a progress bar shows its final state, tabs expand on
+  eight-column stops, and every sequence that can steer the cursor — CSI, OSC,
+  DCS, bare C0 controls, DEL — is dropped. The guard sits in `WrapToWidth`, the
+  one place card bodies and prose blocks reach before styling, so it also covers
+  model text that echoes an escape-laden file.
 - **CI now gates every commit and PR, and runs a nightly two-hour soak.** The
   `ci` workflow runs on every branch push and every pull request: helper-script
   self-tests, a `gofmt` gate, build, vet, `go test -race`, then short `longstay`

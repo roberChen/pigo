@@ -128,10 +128,19 @@ const ellipsis = "…"
 // a rune that would overflow the current line starts a new line instead. Any
 // existing newlines in s are preserved as hard breaks. A non-positive width is
 // treated as "no wrapping" and s is returned unchanged.
+//
+// s passes through sanitizeTerminal first: wrapping measures the cells a line
+// occupies, which is only meaningful for text that cannot move the cursor
+// itself. Tool output routinely carries carriage returns and cursor sequences,
+// and measuring them as ordinary runes puts the closing border of the enclosing
+// card in the wrong column. This is the single place every card body and prose
+// block reaches before styling, so the sanitizing lives here rather than at each
+// call site.
 func WrapToWidth(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
+	s = sanitizeTerminal(s)
 
 	var out strings.Builder
 	lines := strings.Split(s, "\n")
