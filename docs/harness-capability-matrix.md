@@ -200,3 +200,5 @@ trust 与 harness 其他机制（executor 裁剪、reminder 注入、遥测）�
 | US-007 | #253 | 端到端鲁棒性验证场景（长会话压缩 + 大输出截断） | P1 |
 
 > US-007（#253）是跨维度的端到端验证场景，断言压缩与截断机制正确触发、上下文未溢出，用 provider 桩/录制流、不依赖真实外部大模型。它验证维度 1（压缩）与维度 2（截断）的鲁棒性收益，故不单列进上表按维度归类，而在此单独标注。
+
+> **长稳门禁（US-007 的持续形态）**：`.github/workflows/soak.yml` 在每次 push 与 PR 上跑 10 分钟、2 核、`-race` 的 `longstay`（14 客户端、平均 9 次工具调用、thinking、重连/接管/退出交错，mock 上游只给协议违例 400），再加两平台 2 分钟冒烟。协议违例、传输错误、host 错误、事件缺口任一非零即失败，失败时 artifacts 里带摘要、protocol-errors.log、events.jsonl 尾部与客户端明细。首轮验收即为价值证明：它先后抓到回放空消息（`content: ""` 让会话永久 400）、取消后缺终止事件、prompt 回复早于会话置闲（下一轮撞 `a turn is already running`）。
