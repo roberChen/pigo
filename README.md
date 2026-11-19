@@ -1274,7 +1274,7 @@ git push origin v0.2.0
 
 | 工作流 | 触发 | 内容 | 耗时 |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | 每次 commit（所有分支）、所有 PR | 辅助脚本自测 → `gofmt` 检查 → `go build` → `go vet` → `go test -race` → ubuntu/windows 各一轮长稳冒烟 | 约 5 分钟 |
+| `.github/workflows/ci.yml` | 每次 commit（所有分支）、所有 PR | 辅助脚本自测 → `gofmt` 检查 → `go build` → `go vet` → `go test -race` → ubuntu/windows 各一轮长稳冒烟 | 约 2 分钟 |
 | `.github/workflows/soak.yml` | 每天北京时间 09:30（UTC 01:30），也可手动触发 | 构建、vet、全量测试全部通过后，再用 `-race` 版 pigo 跑 **至少 2 小时** 的长稳 | 2 小时以上 |
 
 CI 的长稳只是冒烟：分钟级、固定种子、覆盖工具往返与 task 子 Agent 矩阵，用来在每次提交上确认多客户端链路没被改坏。真正的可靠性证据来自每天的 soak——它跑的是真实 `pigo serve` 守护进程、真实 unix socket / 命名管道和真实多客户端抖动，详见 [e2e/longstay/README.md](e2e/longstay/README.md)。
