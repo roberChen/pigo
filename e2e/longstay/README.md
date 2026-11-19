@@ -132,10 +132,11 @@ GORACE=halt_on_error=1 go tool longstay -duration 10m -pigo ./pigo-soak -output 
 | `events.jsonl` | 客户端加入/退出、session 创建/接管、prompt、mock 请求和错误事件；不包含全量流式文本 |
 | `server.log` | 真实 pigo host 的 stdout/stderr |
 | `summary.json` | 机器可读最终指标与 `pass` 结果 |
+| `protocol-errors.log` | 每条可靠性违例的 `time` / `kind` / `error`（有界，上限 200 条）。`events.jsonl` 每几毫秒就有一条 `llm_request`，尾部 200 行只覆盖十几秒，而违例往往出现在几十分钟前——失败时第一手线索在这里 |
 | `home/` | host 的临时状态目录、父/子 session 持久化文件；子 Agent 文件带 `parentSession` 和 `subAgent=task` |
 | `work/client-*` | 各客户端工作目录；预置文本标记与 1×1 PNG，`created-*` / `editable-*` 用于校验真实写入和编辑 |
 
-摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。计划校验另有独立计数：`toolVerifications`（通过标记校验的工具结果）、`turnsVerified` / `turnsUnverified`（按计划完整跑完 / 无法解释的提前结束）、`turnsDegraded` 与 `degradedResults`（由注入 500 引起的预期降级）、`turnsCompacted`（压缩后以摘要或压缩前尾部正常收尾）、`transcriptsVerified`（最终 transcript 校验次数）。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。
+摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。计划校验另有独立计数：`toolVerifications`（通过标记校验的工具结果）、`turnsVerified` / `turnsUnverified`（按计划完整跑完 / 无法解释的提前结束）、`turnsDegraded` 与 `degradedResults`（由注入 500 引起的预期降级）、`turnsCompacted`（压缩后以摘要或压缩前尾部正常收尾）、`transcriptsVerified`（最终 transcript 校验次数）。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。非 prompt 的客户端 RPC（`create` / `resume` / `cancel`）由 `-call-timeout` 约束，默认 30s，与 hostclient 自己的预算一致：`resume` 要做真实的工作（读 JSONL、重放事件），2 核 CI 上开着 `-race` 跑十几个客户端时几秒钟很正常，把它算成协议违例只会制造假警报；真正卡死的 host 仍会被健康检查与墙钟兜底抓住。
 
 **安全提示：** 产物目录中的 `home/server.token` 可用于连接本次 host，session 文件还可能包含用户提示词。长稳结束后只应把脱敏后的 `summary.json` 和必要的错误片段用于 CI/问题报告，不要直接公开整个产物目录。
 

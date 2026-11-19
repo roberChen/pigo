@@ -30,6 +30,7 @@ type runner struct {
 	binary    string
 	mock      *mockLLM
 	log       *eventLog
+	protocol  *protocolLog
 	metrics   metrics
 
 	hostCmd     *exec.Cmd
@@ -102,7 +103,14 @@ func newRunner(cfg Config) (*runner, error) {
 		return nil, err
 	}
 	r.log = log
+	protocol, err := openProtocolLog(filepath.Join(output, "protocol-errors.log"))
+	if err != nil {
+		_ = log.Close()
+		return nil, err
+	}
+	r.protocol = protocol
 	if err := r.writeConfig(); err != nil {
+		_ = protocol.Close()
 		_ = log.Close()
 		return nil, err
 	}
@@ -112,6 +120,7 @@ func newRunner(cfg Config) (*runner, error) {
 		Tools:  cfg.toolsEnabled(),
 	}, log)
 	if err != nil {
+		_ = protocol.Close()
 		_ = log.Close()
 		return nil, err
 	}
@@ -359,10 +368,14 @@ func (r *runner) injectedFailure(token string) bool { return r.mock.injectedFail
 // three can never disagree about a turn's expected shape.
 func (r *runner) toolsEnabled() bool { return r.cfg.toolsEnabled() }
 
-// recordProtocol marks a reliability violation with structured evidence.
+// recordProtocol marks a reliability violation with structured evidence. It
+// writes to the JSONL log *and* to the bounded sidecar, and prints the finding
+// so the CI console carries the reason without a trip to the artifact.
 func (r *runner) recordProtocol(kind string, err error) {
 	r.metrics.protocolErrors.Add(1)
 	r.log.write("protocol_error", map[string]any{"kind": kind, "error": err.Error()})
+	r.protocol.record(kind, err)
+	fmt.Printf("protocol_error kind=%s error=%s\n", kind, truncate(err.Error(), 300))
 }
 
 // healthy evaluates both correctness and whether the churn actually happened.
@@ -522,6 +535,7 @@ func (r *runner) summary(ok bool) map[string]any {
 // cleanup closes the event log even when startup fails halfway through.
 func (r *runner) cleanup() {
 	if r.log != nil {
+		_ = r.protocol.Close()
 		_ = r.log.Close()
 	}
 }

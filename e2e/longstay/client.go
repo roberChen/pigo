@@ -29,6 +29,11 @@ type turnOutcome struct {
 	err     error
 }
 
+// resumeOwnershipGrace is how long a rejected resume is retried before it is
+// reported. Ownership handoff after a dropped connection is normal; staying
+// owned by a connection that never went away is not.
+const resumeOwnershipGrace = 2 * time.Second
+
 // turnTrace is the stream/plan verification state of one attempt. The mock's
 // reply is a pure function of the prompt token, so the client can check the
 // authoritative turn_end messages and tool results it receives against the plan
@@ -70,14 +75,17 @@ type clientState struct {
 	connected   bool
 	everJoined  bool
 	needsResume bool
-	observed    bool
-	running     bool
-	exitAt      time.Time
-	reconnectAt time.Time
-	nextPrompt  time.Time
-	outcomes    chan struct{}
-	cancel      context.CancelFunc
-	turn        int
+	// resumePendingAt marks the first resume this reconnection attempt had
+	// rejected because the previous connection was still the session's owner.
+	resumePendingAt time.Time
+	observed        bool
+	running         bool
+	exitAt          time.Time
+	reconnectAt     time.Time
+	nextPrompt      time.Time
+	outcomes        chan struct{}
+	cancel          context.CancelFunc
+	turn            int
 	// attempt numbers prompts across reconnects. A late outcome whose attempt no
 	// longer matches is discarded instead of being applied to a newer turn.
 	attempt int
@@ -198,7 +206,7 @@ func (s *clientState) step() {
 func (s *clientState) connect() {
 	client, err := hostclient.Connect(hostclient.Options{
 		Dir: s.runner.homeDir, Client: fmt.Sprintf("longstay-%03d", s.id),
-		CallTimeout: 5 * time.Second,
+		CallTimeout: s.runner.cfg.CallTimeout,
 	})
 	if err != nil {
 		s.reconnectAt = time.Now().Add(s.delay(s.runner.cfg.MinReconnectDelay, s.runner.cfg.MaxReconnectDelay))
@@ -281,6 +289,20 @@ func (s *clientState) resume() {
 			s.nextPrompt = time.Now().Add(50 * time.Millisecond)
 			return
 		}
+		// The host releases ownership when its read loop notices the socket the
+		// harness just dropped, which is a few milliseconds after the client's
+		// resume arrives. Rejecting the resume in that window is correct host
+		// behaviour, so it is retried for a bounded stretch and only counted as a
+		// violation if the session stays owned by a connection that never died.
+		if isCode(err, hostapi.CodeForbidden) && strings.Contains(err.Error(), "attached to another client") {
+			if s.resumePendingAt.IsZero() {
+				s.resumePendingAt = time.Now()
+			}
+			if time.Since(s.resumePendingAt) < resumeOwnershipGrace {
+				s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+				return
+			}
+		}
 		s.runner.recordProtocol("session_resume", err)
 		return
 	}
@@ -295,6 +317,7 @@ func (s *clientState) resume() {
 	}
 	s.observed = false
 	s.needsResume = false
+	s.resumePendingAt = time.Time{}
 	// A resumed idle session keeps its history; the plan is keyed by the token in
 	// each user prompt, so the next turn verifies exactly like the first one did.
 	s.runner.metrics.adoptions.Add(1)

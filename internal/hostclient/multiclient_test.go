@@ -862,6 +862,35 @@ func TestConcurrentSessionCreatesAreUnique(t *testing.T) {
 	}
 }
 
+// awaitSessionEvents waits until every id has at least one recorded event.
+//
+// Events are delivered on the client's own dispatcher goroutine, so a session
+// event can still be queued when the create/prompt RPC returns. Snapshotting the
+// sink immediately asserted something the contract does not promise and failed
+// on a loaded runner ("no session events for <id>") without the host being at
+// fault. The deadline keeps a genuinely lost event a failure.
+func awaitSessionEvents(t *testing.T, sink *eventSink, ids ...string) map[string]int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := sink.snapshot()
+		complete := true
+		for _, id := range ids {
+			if got[id] == 0 {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no session events for %v: %v", ids, got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestOneClientOwnsSeveralSessions is the "one UI, several sessions" half: a
 // tabbed TUI may create more than one session on its connection, and closing one
 // must leave the rest untouched.
@@ -891,12 +920,7 @@ func TestOneClientOwnsSeveralSessions(t *testing.T) {
 			t.Fatalf("prompt %s = (%q, %v), want %q", tc.id, res.Text, err, tc.want)
 		}
 	}
-	gotIDs, _ := sink.snapshot()
-	for _, id := range []string{one.ID, two.ID, three.ID} {
-		if gotIDs[id] == 0 {
-			t.Fatalf("no session events for %s: %v", id, gotIDs)
-		}
-	}
+	awaitSessionEvents(t, sink, one.ID, two.ID, three.ID)
 
 	if err := ui.CloseSession(two.ID); err != nil {
 		t.Fatalf("close two: %v", err)

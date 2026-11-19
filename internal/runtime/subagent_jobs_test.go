@@ -69,7 +69,19 @@ func backgroundTool(t *testing.T, child *gatedProvider) (*SubAgentTool, *SubAgen
 	}
 	tool := NewTaskTool(factory, nil, jobs)
 	ctx := agentcore.WithSessionID(context.Background(), "parent-session-bg")
-	t.Cleanup(func() { closeReleased(child) })
+	t.Cleanup(func() {
+		// Release the gate and then wait for the job to finish: opening it only
+		// lets the goroutine proceed, and that goroutine finishes the child turn
+		// and writes its session file. t.TempDir's cleanup is registered before
+		// this one, so it runs right after it returns — returning while the job
+		// was still writing made RemoveAll race the session file and fail with
+		// "unlinkat .../sessions: directory not empty" (seen ~1 run in 30 on a
+		// loaded CI runner).
+		closeReleased(child)
+		waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		jobs.waitJobs(waitCtx, jobs.List())
+	})
 	return tool, jobs, ctx
 }
 

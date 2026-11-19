@@ -19,6 +19,13 @@ type Config struct {
 	ActionInterval    time.Duration
 	MinClientLifetime time.Duration
 	MaxClientLifetime time.Duration
+	// CallTimeout bounds one non-prompt RPC from a client. Resuming a long
+	// session is real work for the host — read the JSONL, replay events — and on a
+	// two-core CI runner under -race with a dozen clients it can take seconds.
+	// The default matches hostclient's own budget (30s) so a slow runner is not
+	// reported as a protocol violation; a host that is actually wedged is still
+	// caught, by the health checks and the wall-clock guard.
+	CallTimeout       time.Duration
 	MinReconnectDelay time.Duration
 	MaxReconnectDelay time.Duration
 	MinPromptDelay    time.Duration
@@ -68,6 +75,7 @@ func parseConfig() Config {
 	flag.DurationVar(&cfg.ActionInterval, "action-interval", 100*time.Millisecond, "delay between per-client state-machine steps")
 	flag.DurationVar(&cfg.MinClientLifetime, "min-client-lifetime", 2*time.Second, "minimum connected lifetime before a client exits")
 	flag.DurationVar(&cfg.MaxClientLifetime, "max-client-lifetime", 12*time.Second, "maximum connected lifetime before a client exits")
+	flag.DurationVar(&cfg.CallTimeout, "call-timeout", 30*time.Second, "per-RPC timeout for non-prompt client calls (resume, create, cancel)")
 	flag.DurationVar(&cfg.MinReconnectDelay, "min-reconnect-delay", 100*time.Millisecond, "minimum delay before reconnecting")
 	flag.DurationVar(&cfg.MaxReconnectDelay, "max-reconnect-delay", 2*time.Second, "maximum delay before reconnecting")
 	flag.DurationVar(&cfg.MinPromptDelay, "min-prompt-delay", 200*time.Millisecond, "minimum delay between prompts")
@@ -102,6 +110,9 @@ func (c Config) validate() error {
 	}
 	if c.MinClientLifetime <= 0 || c.MaxClientLifetime < c.MinClientLifetime {
 		return errors.New("client lifetimes must satisfy 0 < min <= max")
+	}
+	if c.CallTimeout <= 0 {
+		return fmt.Errorf("call-timeout must be positive")
 	}
 	if c.MinReconnectDelay < 0 || c.MaxReconnectDelay < c.MinReconnectDelay {
 		return errors.New("reconnect delays must satisfy 0 <= min <= max")

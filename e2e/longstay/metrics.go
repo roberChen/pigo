@@ -66,6 +66,66 @@ func openEventLog(path string) (*eventLog, error) {
 	return &eventLog{file: file, enc: json.NewEncoder(file)}, nil
 }
 
+// protocolLog keeps reliability violations in their own bounded file.
+//
+// The JSONL event log is far too chatty to read after the fact: it emits an
+// llm_request line every few milliseconds, so the last two hundred lines cover
+// about fifteen seconds. A ten-minute soak on a slow runner can therefore fail
+// on protocol errors that the uploaded tail never contains, and the run page
+// says only "25 protocol errors" with no way to tell a host bug from a starved
+// runner. This sidecar is written for the whole run, capped so a pathological
+// run cannot fill the disk, and is what the soak artifact uploads.
+type protocolLog struct {
+	mu      sync.Mutex
+	file    *os.File
+	enc     *json.Encoder
+	entries int
+}
+
+// maxProtocolLogEntries bounds the sidecar. Protocol errors are zero-tolerance,
+// so the first few dozen are the evidence; the rest only bloat the artifact.
+const maxProtocolLogEntries = 200
+
+// openProtocolLog creates the sidecar next to the event log.
+func openProtocolLog(path string) (*protocolLog, error) {
+	file, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &protocolLog{file: file, enc: json.NewEncoder(file)}, nil
+}
+
+// record appends one violation, dropping entries past the cap.
+func (l *protocolLog) record(kind string, err error) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.entries >= maxProtocolLogEntries {
+		return
+	}
+	l.entries++
+	entry := map[string]any{
+		"time":  time.Now().UTC().Format(time.RFC3339Nano),
+		"kind":  kind,
+		"error": err.Error(),
+	}
+	if err := l.enc.Encode(entry); err != nil {
+		println("longstay: protocol log:", err.Error())
+	}
+}
+
+// Close flushes and closes the sidecar.
+func (l *protocolLog) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.file.Close()
+}
+
 // write appends one event. Errors are ignored only because the final summary
 // checks file sync; a diagnostic is printed so an unavailable disk is visible.
 func (l *eventLog) write(kind string, fields map[string]any) {
