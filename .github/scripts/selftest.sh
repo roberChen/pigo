@@ -223,7 +223,10 @@ else
 fi
 
 # 缺 GITHUB_REPOSITORY 必须炸，而不是对着空仓库瞎调 gh。
-out=$(GH_LOG="$tmp/gh.log" PATH="$tmp/bin:$PATH" "$here/soak-failure-issue.sh" "$tmp/report.md" 2>&1)
+# 必须用 env -u 显式清掉：GitHub Actions 总会注入 GITHUB_REPOSITORY，不清理的话
+# 这条断言在 CI 上会因为「变量其实存在」而失败，本地却通过——自测本身必须密闭。
+out=$(env -u GITHUB_REPOSITORY GH_LOG="$tmp/gh.log" PATH="$tmp/bin:$PATH" \
+	"$here/soak-failure-issue.sh" "$tmp/report.md" 2>&1)
 if [ $? -ne 0 ]; then
 	ok "缺 GITHUB_REPOSITORY 时非零退出"
 else
