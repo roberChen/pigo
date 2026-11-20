@@ -77,13 +77,13 @@ else
 fi
 
 echo "== soak.yml 定时契约 =="
-# 定时触发没有 inputs，那个兜底值就是它实际跑的时长；下限则是防回退的保险。
-# 这两行是「每天至少跑满 2 小时」的唯一实现，改小必须是一次有意识的修改。
+# 这两行是「每天至少跑满 2 小时」的唯一实现：一行决定实际跑的时长，一行让改小
+# 当场失败。它们一起构成需求，改动必须是一次有意识的修改。
 soak_yml="$here/../workflows/soak.yml"
-if grep -Fq "SOAK_DURATION: \${{ inputs.duration || '2h' }}" "$soak_yml"; then
-	ok "定时兜底时长是 2h"
+if grep -Fq "SOAK_DURATION: \${{ github.event_name == 'schedule' && '2h' || inputs.duration || '10m' }}" "$soak_yml"; then
+	ok "定时时长固定为 2h"
 else
-	no "定时兜底时长是 2h" "soak.yml 里没有 inputs.duration || '2h'"
+	no "定时时长固定为 2h" "soak.yml 里没有 schedule && '2h' 的时长表达式"
 fi
 if grep -Fq "SOAK_MIN_DURATION: \${{ github.event_name == 'schedule' && '2h' || '10m' }}" "$soak_yml"; then
 	ok "定时下限是 2h，改小会当场失败"

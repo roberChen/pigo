@@ -80,7 +80,7 @@ permissions:
 
 jobs:
   soak:
-    name: Soak (${{ inputs.duration || '2h' }})
+    name: Soak (${{ github.event_name == 'schedule' && '2h' || inputs.duration || '10m' }})
     runs-on: ubuntu-latest
     concurrency:
       # 事件名也在 group 里：定时那一轮要跑满 2 小时，若与「每次提交的 10 分钟」
@@ -96,9 +96,10 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes || 340 }}
 
     env:
-      # 唯一没有 inputs 的触发口是定时任务：它必须跑满 2 小时。workflow_call 与
-      # workflow_dispatch 都声明了默认值（10m），所以这里的兜底只对定时生效。
-      SOAK_DURATION: ${{ inputs.duration || '2h' }}
+      # 定时那一轮固定 2 小时。事件名放在最前面而不是靠 inputs 为 null 时的兜底：
+      # 「定时 = 2 小时」是需求，不该依赖一个隐式的空值语义。其余触发口按传入值，
+      # workflow_call 与 workflow_dispatch 都声明了 10m 的默认值。
+      SOAK_DURATION: ${{ github.event_name == 'schedule' && '2h' || inputs.duration || '10m' }}
       # 定时触发的下限。单靠上面的表达式不够：有人把它改成 30m 时，这里会让定时
       # 长稳在第一步就失败，而不是悄悄跑成一次冒烟。
       SOAK_MIN_DURATION: ${{ github.event_name == 'schedule' && '2h' || '10m' }}
