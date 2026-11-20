@@ -12,37 +12,37 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Changed
-- **Every commit and PR now runs a real ten-minute soak, not just a smoke.**
-  The twenty-second `longstay` smokes prove the multi-client path is wired up,
-  but the failures that hurt — reconnects racing a takeover, a compaction pass
-  that drops an event, a data race that only fires after thousands of prompts —
-  need a few minutes of churn to show up at all. Waiting for the nightly run to
-  find them means the commit that introduced the bug has long since landed on
-  `master`. `ci.yml` now has a `soak` job that runs the full ten-minute,
-  `-race`, `GORACE=halt_on_error=1` soak on every branch push and every pull
-  request, in parallel with the other checks and after `go test` so a red unit
-  test does not burn the runner for ten minutes. The implementation is not
-  duplicated: `soak.yml` gained a `workflow_call` trigger and `ci.yml` invokes
-  it, so the every-commit soak and the nightly soak are the same steps and
-  cannot drift apart. The daily scheduled run keeps its full two hours — ten
-  minutes only walks the common paths, while a long session's compaction, a
-  reconnect/takeover storm and a slow leak all need the longer window — and that
-  duration is now a hard requirement rather than a default: the duration is
-  chosen by event (scheduled = 2h, never an implicit input default), and
-  scheduled runs additionally have a `2h` floor, so lowering it fails the run at
-  the first step instead of quietly turning the nightly soak into a smoke. The `workflow_call` path keeps
-  the `10m` floor, so a manual run cannot degrade itself either. Scheduled runs
-  also get their own concurrency lane; sharing one queue with the every-push
-  soak would leave the next push's ten-minute gate pending for up to two hours.
-  A `workflow_call` caller also passes its own job timeout, so a hung
-  ten-minute soak is capped at forty minutes instead of holding the runner to
-  the platform's six-hour limit. The `race` input became a string
-  (`"true"`/`"false"`) because GitHub compares mismatched types numerically:
-  `inputs.race == false` is also true when `inputs` is null, which would have
-  silently disabled `-race` on the scheduled run. Issue filing is now restricted
-  to scheduled and manual runs — a CI failure already shows up on the commit or
-  pull request, a duplicate issue only says the same thing twice, and a fork
-  PR's read-only token would have turned the reporting step red.
+- **Every commit and PR now runs a real ten-minute soak, not just a smoke.** The
+  twenty-second `longstay` smokes prove the multi-client path is wired up, but the
+  failures that hurt — reconnects racing a takeover, a compaction pass that drops
+  an event, a data race that only fires after thousands of prompts — need a few
+  minutes of churn to show up at all. Waiting for the daily 09:30 Beijing-time run
+  to find them means the commit that introduced the bug has long since landed on
+  `master`. `ci.yml` now has a `soak` job that runs the full ten-minute, `-race`,
+  `GORACE=halt_on_error=1` soak on every branch push and every pull request, in
+  parallel with the other checks and after `go test` so a red unit test does not
+  burn the runner for ten minutes. The implementation is not duplicated:
+  `soak.yml` gained a `workflow_call` trigger and `ci.yml` invokes it, so the
+  every-commit soak and the daily soak are the same steps and cannot drift apart.
+  The daily scheduled run keeps its full two hours — ten minutes only walks the
+  common paths, while a long session's compaction, a reconnect/takeover storm and
+  a slow leak all need the longer window — and that duration is now a hard
+  requirement rather than a default: the duration is chosen by event (scheduled =
+  2h, never an implicit input default), and scheduled runs additionally have a
+  `2h` floor, so lowering it fails the run at the first step instead of quietly
+  turning the daily soak into a smoke. The `workflow_call` path keeps the `10m`
+  floor, so a manual run cannot degrade itself either. Scheduled runs also get
+  their own concurrency lane; sharing one queue with the every-push soak would
+  leave the next push's ten-minute gate pending for up to two hours. A
+  `workflow_call` caller also passes its own job timeout, so a hung ten-minute
+  soak is capped at forty minutes instead of holding the runner to the platform's
+  six-hour limit. The `race` input became a string (`"true"`/`"false"`) because
+  GitHub compares mismatched types numerically: `inputs.race == false` is also
+  true when `inputs` is null, which would have silently disabled `-race` on the
+  scheduled run. Issue filing is now restricted to scheduled and manual runs — a
+  CI failure already shows up on the commit or pull request, a duplicate issue
+  only says the same thing twice, and a fork PR's read-only token would have
+  turned the reporting step red.
 
 ### Fixed
 - **A finished prompt leaves the session idle.** The host cleared the
@@ -90,7 +90,7 @@ interactive REPL/TUI.
   DCS, bare C0 controls, DEL — is dropped. The guard sits in `WrapToWidth`, the
   one place card bodies and prose blocks reach before styling, so it also covers
   model text that echoes an escape-laden file.
-- **CI now gates every commit and PR, and runs a nightly two-hour soak.** The
+- **CI now gates every commit and PR, and runs a daily two-hour soak.** The
   `ci` workflow runs on every branch push and every pull request: helper-script
   self-tests, a `gofmt` gate, build, vet, `go test -race`, then short `longstay`
   smokes on both `ubuntu-latest` and `windows-latest`. A new `soak` workflow runs
