@@ -84,9 +84,9 @@ go tool longstay -duration 30m -pigo ./pigo.exe
 |---|---|---|
 | `.github/workflows/ci.yml` 的 `soak` job | **每次 commit 与 PR**，10 分钟，默认 `-race` 版 pigo | 多客户端抖动、重连、接管、压缩与 task 子 Agent 的完整生命周期 |
 | `.github/workflows/ci.yml` 的 `longstay` job | 20s / 10s / 8s 三段冒烟，`ubuntu-latest` 与 `windows-latest` 各一轮 | 完整工具 smoke、强制 task 矩阵、自动 task follow-up；Windows 命名管道只有这里跑得到 |
-| `.github/workflows/soak.yml` | **每天北京时间 09:30**，默认 10 分钟（手动可到 5h），默认 `-race` 版 pigo | 代码没变也能暴露偶发问题；定义在 `soak.yml`，CI 通过 `workflow_call` 复用它，不复制步骤 |
+| `.github/workflows/soak.yml` | **每天北京时间 09:30，跑满 2 小时**（手动可到 5h），默认 `-race` 版 pigo | 代码没变也能暴露偶发问题；定义在 `soak.yml`，CI 通过 `workflow_call` 复用它，不复制步骤 |
 
-20 秒的冒烟只能证明链路没断，问题常常要跑上几分钟才现形，所以每次提交都要真跑一轮十分钟的；凌晨那一轮留着抓「今天什么都没改却挂了」的偶发问题。
+20 秒的冒烟只能证明链路没断，问题常常要跑上几分钟才现形，所以每次提交都要真跑一轮十分钟的；每天那一轮则跑满 2 小时，抓「今天什么都没改却挂了」的偶发问题，也抓十分钟走不到的长尾——长会话压缩、反复重连接管、慢泄漏。定时下限是硬性的：把时长改小，工作流会在第一步失败，不会把 2 小时悄悄降级成冒烟。
 
 长稳先跑构建、vet 与全量测试，全部通过才进入长稳。定时与手动触发的 run 任何一步失败都会自动开一条 issue（当天重复失败改为追加评论）；CI 调用不报 issue，失败已经挂在对应的 commit／PR 上。因为 longstay 把 SIGINT 视为正常停止，工作流另外按墙钟时长兜底：跑不满请求时长即判失败，即使 `summary.json` 写着 `pass: true`。上传到 artifact 的只有脱敏文件（`summary.json`、`config.json` 与各日志尾部），`home/` 不会外传。
 

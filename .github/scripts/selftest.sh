@@ -55,6 +55,9 @@ expect_rc 0 "5h 在 10m..6h 内" -- "$here/soak-duration.sh" 5h 10m 6h
 expect_rc 1 "超过上限被拒（24h 跑不完）" -- "$here/soak-duration.sh" 24h 10m 6h
 expect_rc 1 "下限仍然优先于上限" -- "$here/soak-duration.sh" 5m 10m 6h
 expect_rc 0 "不给上限时不限制" -- "$here/soak-duration.sh" 9h 10m
+expect_rc 0 "定时下限：2h 恰好达标" -- "$here/soak-duration.sh" 2h 2h 5h
+expect_rc 1 "定时下限：10m 不足以算长稳" -- "$here/soak-duration.sh" 10m 2h 5h
+expect_rc 1 "定时下限：1h59m59s 差一秒也拒绝" -- "$here/soak-duration.sh" 1h59m59s 2h 5h
 
 # 换算结果本身要正确，否则"低于下限"的判断毫无意义。
 if [ "$("$here/soak-duration.sh" 2h30m | tail -n1)" = "9000" ]; then
@@ -71,6 +74,21 @@ if [ "$("$here/soak-duration.sh" 2.5h | tail -n1)" = "9000" ]; then
 	ok "2.5h = 9000s"
 else
 	no "2.5h = 9000s" "got $("$here/soak-duration.sh" 2.5h | tail -n1)"
+fi
+
+echo "== soak.yml 定时契约 =="
+# 定时触发没有 inputs，那个兜底值就是它实际跑的时长；下限则是防回退的保险。
+# 这两行是「每天至少跑满 2 小时」的唯一实现，改小必须是一次有意识的修改。
+soak_yml="$here/../workflows/soak.yml"
+if grep -Fq "SOAK_DURATION: \${{ inputs.duration || '2h' }}" "$soak_yml"; then
+	ok "定时兜底时长是 2h"
+else
+	no "定时兜底时长是 2h" "soak.yml 里没有 inputs.duration || '2h'"
+fi
+if grep -Fq "SOAK_MIN_DURATION: \${{ github.event_name == 'schedule' && '2h' || '10m' }}" "$soak_yml"; then
+	ok "定时下限是 2h，改小会当场失败"
+else
+	no "定时下限是 2h，改小会当场失败" "soak.yml 里没有 schedule 的 2h 下限"
 fi
 
 echo "== soak-summary.sh =="

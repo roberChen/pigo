@@ -24,13 +24,18 @@ interactive REPL/TUI.
   test does not burn the runner for ten minutes. The implementation is not
   duplicated: `soak.yml` gained a `workflow_call` trigger and `ci.yml` invokes
   it, so the every-commit soak and the nightly soak are the same steps and
-  cannot drift apart. The nightly run stays, at ten minutes instead of two
-  hours, to catch the "nothing changed and it still failed" class of flake.
-  The duration floor moved with the default: `soak-duration.sh` now rejects
-  anything under `10m` (was `2h`), so a manual run cannot silently degrade into
-  a smoke either. A `workflow_call` caller also passes its own job timeout, so
-  a hung ten-minute soak is capped at forty minutes instead of holding the
-  runner to the platform's six-hour limit. The `race` input became a string
+  cannot drift apart. The daily scheduled run keeps its full two hours — ten
+  minutes only walks the common paths, while a long session's compaction, a
+  reconnect/takeover storm and a slow leak all need the longer window — and that
+  duration is now a hard requirement rather than a default: scheduled runs have
+  a `2h` floor, so lowering it fails the run at the first step instead of
+  quietly turning the nightly soak into a smoke. The `workflow_call` path keeps
+  the `10m` floor, so a manual run cannot degrade itself either. Scheduled runs
+  also get their own concurrency lane; sharing one queue with the every-push
+  soak would leave the next push's ten-minute gate pending for up to two hours.
+  A `workflow_call` caller also passes its own job timeout, so a hung
+  ten-minute soak is capped at forty minutes instead of holding the runner to
+  the platform's six-hour limit. The `race` input became a string
   (`"true"`/`"false"`) because GitHub compares mismatched types numerically:
   `inputs.race == false` is also true when `inputs` is null, which would have
   silently disabled `-race` on the scheduled run. Issue filing is now restricted

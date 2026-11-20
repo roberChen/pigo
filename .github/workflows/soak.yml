@@ -4,11 +4,15 @@
 # 三个触发口，跑的是同一份实现（workflow_call 让 ci.yml 不必复制步骤，否则两处一定
 # 会漂移）：
 #   push / PR   ci.yml 调用，10 分钟，和测试并行，回归在同一次提交上就报出来
-#   定时        每天北京时间 09:30，10 分钟，代码没变的日子也能发现偶发问题
+#   定时        每天北京时间 09:30，跑满 2 小时，代码没变的日子也能发现偶发问题
 #   手动        可选 10m..5h，用来压长尾问题
 #
-# 顺序固定：先构建、vet、跑全量测试，全部通过才开始长稳——长稳要占用十分钟以上的
-# runner 时间，不该为一次编译错误白跑。定时与手动触发时，任何一步失败（含长稳本身
+# 定时那一轮的 2 小时是需求而不是默认值：十分钟只够走完常见路径，长会话压缩、反复
+# 重连接管、慢泄漏都要更长时间才显形。它由 SOAK_MIN_DURATION 兜底校验，改小了会当场
+# 失败，而不是悄悄退化成一次冒烟。
+#
+# 顺序固定：先构建、vet、跑全量测试，全部通过才开始长稳——长稳要占用十几分钟到两
+# 小时的 runner 时间，不该为一次编译错误白跑。定时与手动触发时，任何一步失败（含长稳本身
 # 失败）都会自动开一条 issue；当天重复失败只在原 issue 下追加评论。CI 调用时不报
 # issue：失败已经挂在对应的 commit / PR 上，再开一条只是把同一个信号说两遍。
 name: soak
@@ -76,18 +80,28 @@ permissions:
 
 jobs:
   soak:
-    name: Soak (${{ inputs.duration || '10m' }})
+    name: Soak (${{ inputs.duration || '2h' }})
     runs-on: ubuntu-latest
     concurrency:
-      group: soak-${{ github.ref }}
+      # 事件名也在 group 里：定时那一轮要跑满 2 小时，若与「每次提交的 10 分钟」
+      # 共用一条队列（且不取消），这两小时里 push 上来的 CI 长稳会一直 pending，
+      # 反馈被拖到两小时后。分开之后定时、手动、提交各走各的道；同一 ref 的连续
+      # push 仍然串行，PR 仍然取消旧的那轮。
+      group: soak-${{ github.ref }}-${{ github.event_name }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # GitHub 托管 runner 的 job 上限是 6 小时（360 分钟）。5h 长稳 + 15 分钟
-    # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。CI 里只跑 10 分钟，
-    # 调用方传 40，挂住时就不必占着 runner 到平台的硬上限。
+    # 安全网 + 构建/测试余量，340 既够用也不会被平台先截断。定时那轮是 2 小时，
+    # 加上前置构建与全量测试仍远在 340 之内；CI 里只跑 10 分钟，调用方传 40，
+    # 挂住时就不必占着 runner 到平台的硬上限。
     timeout-minutes: ${{ inputs.timeout_minutes || 340 }}
 
     env:
-      SOAK_DURATION: ${{ inputs.duration || '10m' }}
+      # 唯一没有 inputs 的触发口是定时任务：它必须跑满 2 小时。workflow_call 与
+      # workflow_dispatch 都声明了默认值（10m），所以这里的兜底只对定时生效。
+      SOAK_DURATION: ${{ inputs.duration || '2h' }}
+      # 定时触发的下限。单靠上面的表达式不够：有人把它改成 30m 时，这里会让定时
+      # 长稳在第一步就失败，而不是悄悄跑成一次冒烟。
+      SOAK_MIN_DURATION: ${{ github.event_name == 'schedule' && '2h' || '10m' }}
       SOAK_SEED: ${{ inputs.seed || '' }}
       # race 输入是字符串而不是 boolean，正是为了避开下面这个坑：GitHub 的表达式
       # 在类型不同时按数字比较，null→0、false→0，于是 `inputs.race == false` 在
@@ -110,9 +124,9 @@ jobs:
       - name: Check duration
         id: duration
         run: |
-          seconds=$(bash .github/scripts/soak-duration.sh "$SOAK_DURATION" 10m "$SOAK_MAX_DURATION")
+          seconds=$(bash .github/scripts/soak-duration.sh "$SOAK_DURATION" "$SOAK_MIN_DURATION" "$SOAK_MAX_DURATION")
           echo "seconds=$seconds" >>"$GITHUB_OUTPUT"
-          echo "请求时长 $SOAK_DURATION（${seconds}s），允许范围 10m..$SOAK_MAX_DURATION"
+          echo "请求时长 $SOAK_DURATION（${seconds}s），允许范围 $SOAK_MIN_DURATION..$SOAK_MAX_DURATION"
 
       # ---- 冒烟阶段：构建 + 测试，全绿才值得占用十分钟 ----
 
