@@ -11,6 +11,36 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
+### Added
+- **A compaction checkpoint now remembers what the user actually asked for.**
+  Compaction preserved the *work* (a model-written summary) but not the
+  *requirements*, so every re-compaction rewrote the summary from a thinner
+  input and the user's original constraints — "never touch `deploy/`", "keep the
+  public API stable" — eroded away over a long session. A checkpoint now carries
+  a `## User Instructions` section alongside the technical summary, built from
+  two halves that age differently. The **rolling digest** is produced by the same
+  summarization call that writes the summary: the previous checkpoint's digest is
+  fed back in `<previous-user-instructions>`, so it accumulates and can only be
+  replaced deliberately — a model that omits the block on one turn keeps the
+  previous version instead of erasing it. The **verbatim half** is extracted from
+  the compacted window by code and never passes through the model, so the most
+  recent round of requests is exactly what the human typed. Only real user turns
+  count: harness-injected user-role messages (background sub-agent reports, the
+  guidance a blocking `Stop` hook feeds back, `/goal` continuation nudges) are
+  now tagged with an `Origin` and skipped, and a `/skill` selection's whole
+  `SKILL.md` expansion is stripped down to the prompt the user wrote. The section
+  is budgeted like everything else that rides every request — 1000 chars per
+  request, ~6000 chars overall, oldest entries degrading first because the digest
+  already absorbed them — and its cost is included in the compaction token
+  estimate, so it cannot become a silent thumb on the context meter. It travels
+  with the checkpoint everywhere: `checkpoint.md` stores it as a trailing
+  Markdown section (still greppable and hand-editable; old files load as
+  summary-only), `/rebuild` and `/resume` reload it, `CompactionMessage.Text()`
+  replays it, and the TUI/REPL transcript marker, HTML export and `dream`
+  distillation all show it. `/compact` and auto-compaction now continue from the
+  last checkpoint in context, so a manual compaction after an auto one
+  consolidates rather than restarts the ledger.
+
 ### Changed
 - **Every commit and PR now runs a real ten-minute soak, not just a smoke.** The
   twenty-second `longstay` smokes prove the multi-client path is wired up, but the

@@ -25,7 +25,7 @@
 
 | # | 维度 | 现状 | 已验证的现有实现（pigo 源码） | 主要缺口 | 优先级 | US / Issue |
 |---|------|------|------------------------------|----------|--------|------------|
-| 1 | 上下文管理 | 部分 | 系统提示三层分层；`GetSteeringMessages` / `PrepareNextTurn` / `ShouldStopAfterTurn` / `GetFollowUpMessages` 钩子；阈值自动压缩 | 无通用 `system-reminder` 动态注入机制；AGENTS.md 为静态一次性注入 | **P0** | US-002 → #248 |
+| 1 | 上下文管理 | 部分 | 系统提示三层分层；`GetSteeringMessages` / `PrepareNextTurn` / `ShouldStopAfterTurn` / `GetFollowUpMessages` 钩子；阈值自动压缩；压缩检查点带**用户指令区**（`## User Instructions`：滚动摘要 + 本窗口原话，见 §自动压缩），长会话多次压缩不丢原始要求 | 无通用 `system-reminder` 动态注入机制；AGENTS.md 为静态一次性注入 | **P0**（仅剩注入机制） | US-002 → #248 |
 | 2 | 工具结果裁剪 | **已完成**（US-003/004 落地） | `read` 行数上限；`search` 1000 条上限；`webfetch` 字节 + Markdown 上限；`bash` 输出字节上限（US-003/#249）；executor 层统一字节预算 `clipToolResultContent` + `MaxResultBytes`，对所有工具生效（US-004/#250，2026-09 刷新确认） | 无 | ~~P0~~ 已闭环 | US-003 → #249<br>US-004 → #250 |
 | 3 | 韧性与重试 | **已完成**（US-006 落地） | 传输层连接期重试（仅 429/503/529，尊重 Retry-After，绝不重放已消费流）；工具执行失败分类 + 有限重试（`isRetryableToolError` / `MaxToolRetries`，退避可被 ctx 取消，2026-09 刷新确认） | 无 | ~~P1~~ 已闭环 | US-006 → #252 |
 | 4 | Steering & 中断 | 部分 | `GetSteeringMessages` 每轮工具执行后注入 | steering 触发/来源较薄；无标准化运行时中断—引导 UX | P2 | 记录于本文（见 §Steering），并入 US-002 注入机制协同 |
@@ -59,6 +59,8 @@
   - `PrepareNextTurn`（返回 `TurnUpdate`，可换 Messages / SystemPrompt / Tools / Model / ThinkingLevel），
   - `ShouldStopAfterTurn`、`GetFollowUpMessages`（外层循环）。
 - **自动压缩** —— `loop.go` `maybeAutoCompact` + `internal/compaction/compact.go`：按 `ShouldCompact(tokens, ContextWindow, settings)` 触发，阈值为 `contextWindow - ReserveTokens`（默认 `ReserveTokens = 16384`，见 `internal/compaction/tokens.go`）；压缩失败非致命，发 `CompactionEvent{ErrorMessage}` 后保留原上下文继续。
+- **检查点的用户指令区** —— `internal/compaction/userinstructions.go` + `agentcore.UserInstructionBlock`：技术摘要是有损的模型叙述，每轮重压缩又会在更薄的输入上重写；为防原始要求随压缩次数漂移，检查点额外持久化 `## User Instructions` 区，由两半组成——**滚动摘要**（`### Standing instructions`，同一次摘要调用顺带产出，把上一版回灌进 `<previous-user-instructions>` 因而累积；模型漏写时保留上一版而非清空）与**本窗口原话**（`### Verbatim requests (this window)`，由代码提取、不经模型）。指令的判定是保守的：`agentcore.UserMessage.IsSynthetic` 排除 harness 注入的用户角色消息（子 agent 后台报告、`Stop` hook 驳回指导语、`/goal` 续跑提醒），`/skill` 选择附带的整份 `SKILL.md` 展开也被剔除。预算：单条 1000 字符、整块约 6000 字符，超预算时最老条目先退化（已被滚动摘要吸收），最新要求始终完整；指令区计入 `EstimateTokens` 的 `CompactionMessage` 分支与 `compaction` 事件的 `tokensAfter`。落盘为 `checkpoint.md` 正文末尾的 Markdown 区（`ExtractUserInstructionsSection` 反向解析；旧文件按纯摘要加载），`/rebuild`、`/resume`、`CompactionMessage.Text()`、transcript 标记、HTML 导出与 `dream` 蒸馏均读整节；`PriorCheckpoint` 让 `/compact` 与自动压缩接续上一检查点而非重新开始。
+- **易失上下文的边界**：指令区刻意排除 harness 注入的易失消息（见下节缺口），使"压缩时丢弃易失 reminder"与"保留用户要求"互不冲突——前者按 `Origin` 过滤掉，后者逐字保留。
 
 ### 缺口
 

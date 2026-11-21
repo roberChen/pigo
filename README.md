@@ -31,6 +31,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - [Host 守护进程（`pigo serve` / `pigo attach`）](#host-守护进程pigo-serve--pigo-attach)
 - [作为 SDK 嵌入](#作为-sdk-嵌入)
 - [系统提示词组装](#系统提示词组装)
+- [上下文压缩与检查点](#上下文压缩与检查点)
 - [项目信任](#项目信任)
 - [pigorc：用 shell 脚本配置](#pigorc用-shell-脚本配置)
 - [自定义 sub-agent（Agent 定义）](#自定义-sub-agentagent-定义)
@@ -61,7 +62,7 @@ pigo 可以读写文件、执行命令、检索代码、抓取网页，并借助
 - **工具级准入**：`--allowed-tools` / `--disallowed-tools` 划定工具边界（黑名单优先、子 Agent 继承、`--approve` 不可绕过）。
 - **技能与插件**：`~/.agents/skills` 的技能（`/skill` 选择、可多选注入下一轮）、编译进二进制的**内置技能**（`pigo://` 只读虚拟路径，不落盘）、`~/.pigo/plugins` 下的外部插件。
 - **提示词模板**：`~/.pigo/prompts`、项目 `.pigo/prompts`（受信任时）、config `prompts`、`--prompt-template` 下的可复用 `/name` 模板，支持 `$1`/`$@`/`${1:-default}`/`${@:N}` 等参数语法。
-- **上下文自动压缩**：接近上下文窗口上限时自动摘要，亦可 `/compact` 手动触发。
+- **上下文自动压缩**：接近上下文窗口上限时自动摘要，亦可 `/compact` 手动触发；检查点额外保存**用户指令区**（滚动摘要 + 本窗口原话），长会话压缩多次也不会把最初的要求漂移掉。
 - **包管理**：`pigo install npm:<pkg>` 安装 pi 生态的 extension / skill / prompt / theme。
 - **自更新**：无参 `pigo update` 将 pigo 二进制升级到最新 GitHub Release；进入 TUI 时后台检查新版本并在横幅提示。
 
@@ -581,6 +582,27 @@ fmt.Println(reply)
 3. **`AGENTS.md` 注入**：从仓库根目录到当前工作目录，**由通用到具体**依次拼接——越靠近工作目录（越具体）的 `AGENTS.md` 排在越后，优先级更高。
 
 `--append-system-prompt` 的内容追加在最后，按参数顺序排列；每个值若为存在的普通文件则读取文件内容，否则作为字面文本，空条目跳过。
+
+---
+
+## 上下文压缩与检查点
+
+接近上下文窗口上限时，pigo 自动把较早的对话折叠成一个**检查点**（`/compact` 可手动触发，`/rebuild` 可手动按检查点重排上下文）。被折叠的前缀以一条 `compaction` 消息留在上下文里，后续每轮都按这条消息重放，不再重复发送原文。
+
+检查点由两部分组成，各自解决不同的问题：
+
+- **技术摘要**（`## Goal` … `## Critical Context`）：模型对已做工作的叙述，用于让模型知道"做到哪了"。
+- **用户指令区**（`## User Instructions`）：用户到底要求过什么。它分两半：
+  - `### Standing instructions`——**滚动摘要**，由同一次摘要调用顺带产出，并把上一次检查点的这一半作为输入，因此逐轮累积、只增不减；模型漏写这一块时上一版会被原样保留，不会被抹掉。
+  - `### Verbatim requests (this window)`——**本次被折叠窗口里用户的原话**，由代码直接提取、从不经过模型，因此"用户最近说了什么"永远逐字准确。
+
+> 为什么要单独存一份：技术摘要是模型写的、有损的，每次重新压缩又会在更薄的输入上重写一遍。压缩几次之后，最初那句"不要动 `deploy/`"就会从摘要里消失。指令区把这条要求钉住。
+
+**只有人打的字才算指令。** 用户角色并不等于用户说的话——后台子 agent 的报告、`Stop` hook 驳回结束时喂回的指导语、`/goal` 自动续跑的提醒，都是 harness 注入的，都被 `agentcore.UserMessage.IsSynthetic` 排除；`/skill` 选中技能时附在提问前面的整份 `SKILL.md` 正文也会被剔除，只留用户自己写的那句。否则指令区会塞满脚手架文本，读起来像用户真的要求过。
+
+**预算是硬的。** 单条原话上限 1000 字符（超出截断并标记 `…[truncated]`），整块 verbatim 上限约 6000 字符（约 1.5k token）。超预算时**最老的条目先退化**为开头 200 字符、再被丢弃——它们早已被滚动摘要吸收，原话的重要性最低；最新一轮要求则始终完整保留。指令区计入上下文占用统计（`compaction` 事件的 `tokensAfter` 与状态栏的用量块都包含它），因为它每一轮都要重发。
+
+**指令区随检查点一起落盘。** `~/.pigo/memory/sessions/<id>/checkpoint.md` 的正文就是"技术摘要 + `## User Instructions` 区"，仍是可读、可 grep、可手改的普通 Markdown（不塞进 frontmatter）；读回时按同一套渲染反向解析。因此 `/resume`、`/rebuild`、`pigo --resume` 恢复出来的上下文同样带着指令区，导出（HTML / `dream` 蒸馏）与 transcript 里的压缩点标记也会显示 `user instructions preserved (…)`。旧的、没有这一区的检查点照常加载，当作纯摘要处理。
 
 ---
 
