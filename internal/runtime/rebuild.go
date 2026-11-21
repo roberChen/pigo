@@ -147,9 +147,10 @@ func rebuildFromLoadedCheckpoint(msgs agentcore.MessageList, cp *Checkpoint, tok
 		w = len(msgs)
 	}
 	res := &compaction.CompactionResult{
-		Summary:        cp.Summary,
-		FirstKeptIndex: w,
-		TokensBefore:   tokensBefore,
+		Summary:          cp.Summary,
+		UserInstructions: cp.UserInstructions,
+		FirstKeptIndex:   w,
+		TokensBefore:     tokensBefore,
 	}
 	rebuilt := res.RebuildContext(msgs, now)
 	kept := len(rebuilt) - 1

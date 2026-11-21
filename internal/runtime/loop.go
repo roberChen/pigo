@@ -321,9 +321,13 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 		if cfg.OnStop != nil {
 			if dec := cfg.OnStop(ctx, agentCtx); dec != nil && dec.Block {
 				if dec.Guidance != "" {
+					// The guidance is harness text, not something the human typed:
+					// mark it so the compaction ledger does not record it as a user
+					// requirement (agentcore.UserMessage.IsSynthetic).
 					agentCtx.Messages = append(agentCtx.Messages, agentcore.UserMessage{
 						RoleField: agentcore.RoleUser,
 						Content:   agentcore.ContentList{agentcore.NewTextContent(dec.Guidance)},
+						Origin:    agentcore.UserMessageOriginHookGuidance,
 					})
 				}
 				continue // outer loop: keep the run alive
@@ -427,6 +431,11 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 // runCompaction invokes compaction.Compact with the loop's summarization config,
 // falling back to the primary Stream/Model when the summary-specific fields are
 // unset. Compact derives the cut point from settings.KeepRecentTokens.
+//
+// The checkpoint that precedes this one (if any) is looked up in msgs so a
+// re-compaction consolidates the existing summary and continues the
+// user-instruction ledger instead of starting over from nothing — see
+// compaction.Compact's prevCompactionIndex/prevInstructions arguments.
 func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConfig) (*compaction.CompactionResult, error) {
 	stream := cfg.SummaryStream
 	if stream == nil {
@@ -446,7 +455,9 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 		}
 	}
 	scfg := provider.StreamConfig{APIKey: key, ThinkingLevel: cfg.ThinkingLevel}
-	return compaction.Compact(ctx, stream, model, msgs, cfg.Compaction, -1, nil, "", scfg)
+
+	prior := compaction.PriorCheckpoint(msgs)
+	return compaction.Compact(ctx, stream, model, msgs, cfg.Compaction, prior.Index, prior.Details, prior.Summary, prior.UserInstructions, scfg)
 }
 
 // writeCompactionCheckpoint persists the just-produced compaction summary as a
@@ -458,6 +469,11 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 // its watermark. All failures are non-fatal: they go to the diag sink (silent
 // unless PIGO_DEBUG or a front-end collector is installed) and the run continues
 // on the compacted context (WriteCheckpoint's log-and-continue contract).
+//
+// The user-instruction section travels with the checkpoint: without it a resumed
+// run (/rebuild, session resume) would reload a summary whose requirements have
+// already been paraphrased away, which is exactly the drift the section exists to
+// prevent.
 func writeCompactionCheckpoint(ctx context.Context, msgs agentcore.MessageList, res *compaction.CompactionResult, cfg *RunConfig) {
 	if cfg.MemoryRoot == "" || cfg.SessionID == "" || res == nil {
 		return
@@ -480,6 +496,7 @@ func writeCompactionCheckpoint(ctx context.Context, msgs agentcore.MessageList, 
 		diag.Diagf("checkpoint: build for session %s: %v", cfg.SessionID, err)
 		return
 	}
+	cp.UserInstructions = res.UserInstructions
 	if err := WriteCheckpoint(cfg.SessionID, cfg.MemoryRoot, cp); err != nil {
 		diag.Diagf("checkpoint: write for session %s: %v", cfg.SessionID, err)
 	}

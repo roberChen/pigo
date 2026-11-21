@@ -325,7 +325,7 @@ func entrySummary(e Entry) string {
 	case agentcore.ToolResultMessage:
 		return "tool result: " + treeOneLine(agentcore.ContentToText(m.Content))
 	case agentcore.CompactionMessage:
-		return "compaction: " + treeOneLine(m.Summary)
+		return "compaction: " + treeOneLine(m.Text())
 	default:
 		return e.Message.Role()
 	}

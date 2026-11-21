@@ -204,3 +204,42 @@ func TestAutoCompactionFailureIsNonFatal(t *testing.T) {
 		t.Errorf("failed compaction must not insert a checkpoint")
 	}
 }
+
+// TestAutoCompactionKeepsUserInstructions verifies the loop's auto-compaction puts
+// the ledger into the compacted context: the checkpoint that replaces the prefix
+// must carry the user's requirements, not only a model-authored summary. This is
+// the end-to-end path a long session actually takes.
+func TestAutoCompactionKeepsUserInstructions(t *testing.T) {
+	main := scriptedStream([]agentcore.AssistantMessage{
+		{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonEndTurn, Content: agentcore.ContentList{agentcore.NewTextContent("ok")}},
+	})
+	cfg := newRunCfg(main)
+	cfg.SummaryStream = summaryStream("## Goal\ncompacted\n\n<user-instructions>\n- never write to deploy/\n</user-instructions>")
+	cfg.ContextWindow = 2000
+	cfg.Compaction = compaction.CompactionSettings{Enabled: true, ReserveTokens: 500, KeepRecentTokens: 100}
+
+	msgs := bigUserMessages(12, 800)
+	// One short, distinctive request early on: it must survive the collapse
+	// verbatim even though its own text is negligible next to the big messages.
+	msgs[2] = agentcore.UserMessage{
+		RoleField: agentcore.RoleUser,
+		Content:   agentcore.ContentList{agentcore.NewTextContent("keep the public API stable")},
+	}
+	agentCtx := &agentcore.AgentContext{Messages: msgs}
+
+	collectEvents(t, agentLoop(context.Background(), agentCtx, cfg))
+
+	if len(agentCtx.Messages) == 0 || agentCtx.Messages[0].Role() != agentcore.RoleCompaction {
+		t.Fatalf("context should start with a compaction checkpoint, got %+v", agentCtx.Messages)
+	}
+	head := agentCtx.Messages[0].(agentcore.CompactionMessage)
+	if head.UserInstructions == nil {
+		t.Fatal("checkpoint should carry the user-instruction section")
+	}
+	if head.UserInstructions.Summary != "- never write to deploy/" {
+		t.Errorf("digest = %q", head.UserInstructions.Summary)
+	}
+	if !strings.Contains(head.Text(), "keep the public API stable") {
+		t.Errorf("verbatim request lost from the checkpoint:\n%s", head.Text())
+	}
+}

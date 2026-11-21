@@ -252,9 +252,13 @@ func runGoalLoop(setCancel func(context.CancelFunc), out io.Writer, host cli.Hos
 				}
 				return nil
 			}
+			// Origin marks the nudge as harness-injected so compaction's
+			// user-instruction ledger keeps the human's objective and drops this
+			// boilerplate (agentcore.UserMessage.IsSynthetic).
 			return []agentcore.AgentMessage{agentcore.UserMessage{
 				RoleField: agentcore.RoleUser,
 				Content:   agentcore.ContentList{agentcore.NewTextContent(goalContinuationPrompt)},
+				Origin:    agentcore.UserMessageOriginGoalContinuation,
 			}}
 		},
 	}

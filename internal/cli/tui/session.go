@@ -679,11 +679,14 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 		case agentcore.CompactionMessage:
 			// The checkpoint stands in for the summarized prefix: show where the
 			// conversation was compacted, so a replayed session explains why the
-			// turns before it are only history.
-			t.blocks = append(t.blocks, transcriptBlock{
-				role: roleSystem,
-				text: "… conversation compacted here — earlier turns are shown above but summarized for the model …",
-			})
+			// turns before it are only history. When the checkpoint carries the
+			// user-instruction section, say so — the requirements outlived the
+			// collapse, and the reader cannot tell from the marker alone.
+			text := "… conversation compacted here — earlier turns are shown above but summarized for the model …"
+			if note := msg.UserInstructions.Note(); note != "" {
+				text += "\n" + note
+			}
+			t.blocks = append(t.blocks, transcriptBlock{role: roleSystem, text: text})
 			t.activeAssistant = -1
 		case agentcore.ToolResultMessage:
 			card, ok := cards[msg.ToolCallID]

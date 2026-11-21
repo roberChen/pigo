@@ -98,7 +98,10 @@ func renderEntryHTML(e Entry) string {
 		}
 		return msgBlock("tool", html.EscapeString(label), html.EscapeString(agentcore.ContentToText(m.Content)), "")
 	case agentcore.CompactionMessage:
-		return msgBlock("compaction", "Compaction", html.EscapeString(m.Summary), "")
+		// Text, not Summary: the user-instruction section is part of the
+		// checkpoint, and an export that dropped it would show a session whose
+		// requirements are missing from the very place they were preserved.
+		return msgBlock("compaction", "Compaction", html.EscapeString(m.Text()), "")
 	default:
 		return msgBlock("assistant", html.EscapeString(e.Message.Role()), "", "")
 	}

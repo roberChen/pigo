@@ -136,3 +136,70 @@ func TestBuildCheckpointPropagatesError(t *testing.T) {
 		t.Fatalf("err = %v, want wrapping %v", err, boom)
 	}
 }
+
+// TestCheckpointUserInstructionsRoundTrip verifies the user-instruction section
+// survives the on-disk round trip. The section is stored as a trailing Markdown
+// block (not frontmatter), so the loader has to split it back out; losing it here
+// would mean a resumed run reloads a summary whose requirements were already
+// paraphrased away — the exact drift the section exists to prevent.
+func TestCheckpointUserInstructionsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	cp := Checkpoint{
+		Watermark:       6,
+		Summary:         "## Goal\nrefactor foo()",
+		CreatedAt:       time.Now().UTC(),
+		CoveredMessages: 6,
+		UserInstructions: &agentcore.UserInstructionBlock{
+			Summary:  "never write to deploy/",
+			Verbatim: []string{"refactor the parser", "add a regression test"},
+		},
+	}
+	if err := WriteCheckpoint("sess-sec", root, cp); err != nil {
+		t.Fatalf("WriteCheckpoint: %v", err)
+	}
+	got, ok, err := LoadCheckpoint("sess-sec", root)
+	if err != nil || !ok {
+		t.Fatalf("LoadCheckpoint: ok=%v err=%v", ok, err)
+	}
+	if got.Summary != cp.Summary {
+		t.Errorf("Summary = %q, want %q", got.Summary, cp.Summary)
+	}
+	if got.UserInstructions == nil {
+		t.Fatal("UserInstructions lost on round-trip")
+	}
+	if got.UserInstructions.Summary != cp.UserInstructions.Summary {
+		t.Errorf("digest = %q, want %q", got.UserInstructions.Summary, cp.UserInstructions.Summary)
+	}
+	if strings.Join(got.UserInstructions.Verbatim, "|") != strings.Join(cp.UserInstructions.Verbatim, "|") {
+		t.Errorf("verbatim = %q, want %q", got.UserInstructions.Verbatim, cp.UserInstructions.Verbatim)
+	}
+	// The file is still plain Markdown: the section is greppable, not encoded.
+	content, err := os.ReadFile(CheckpointPath("sess-sec", root))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if !strings.Contains(string(content), agentcore.UserInstructionsHeading) {
+		t.Errorf("checkpoint body should carry the section verbatim:\n%s", content)
+	}
+}
+
+// TestLoadCheckpointWithoutSection verifies a checkpoint written before the
+// section existed still loads, as summary-only. Old files must never be a hard
+// error, because they are on disk in users' memory roots already.
+func TestLoadCheckpointWithoutSection(t *testing.T) {
+	root := t.TempDir()
+	cp := Checkpoint{Watermark: 2, Summary: "## Goal\nold checkpoint", CreatedAt: time.Now().UTC(), CoveredMessages: 2}
+	if err := WriteCheckpoint("legacy", root, cp); err != nil {
+		t.Fatalf("WriteCheckpoint: %v", err)
+	}
+	got, ok, err := LoadCheckpoint("legacy", root)
+	if err != nil || !ok {
+		t.Fatalf("LoadCheckpoint: ok=%v err=%v", ok, err)
+	}
+	if got.Summary != cp.Summary {
+		t.Errorf("Summary = %q, want %q", got.Summary, cp.Summary)
+	}
+	if got.UserInstructions != nil {
+		t.Errorf("UserInstructions = %+v, want nil", got.UserInstructions)
+	}
+}

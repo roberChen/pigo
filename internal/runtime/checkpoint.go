@@ -39,6 +39,12 @@ type Checkpoint struct {
 	// Summary is the distilled context (the Markdown body of checkpoint.md),
 	// produced by the summarization LLM call (see compaction.GenerateSummary).
 	Summary string
+	// UserInstructions is the checkpoint's user-instruction section, stored as a
+	// trailing "## User Instructions" section of the body so a checkpoint stays a
+	// plain, greppable Markdown document (and the memory indexer still sees the
+	// requirements as text). Nil for checkpoints written before the section
+	// existed, which read back as summary-only.
+	UserInstructions *agentcore.UserInstructionBlock
 	// CreatedAt is when the checkpoint was distilled (RFC 3339, UTC).
 	CreatedAt time.Time
 	// CoveredMessages is how many messages the summary actually folded in. It
@@ -136,7 +142,10 @@ func WriteCheckpoint(sessionID, memoryRoot string, cp Checkpoint) error {
 }
 
 // renderCheckpoint serializes cp into the checkpoint.md byte form: a "---"-fenced
-// YAML frontmatter block followed by the Summary as the Markdown body.
+// YAML frontmatter block followed by the Markdown body. The body is the summary
+// plus, when present, the user-instruction section — the same rendering
+// CompactionMessage.Text uses, so the file, the replay and the transcript view
+// can never disagree about what a checkpoint contains.
 func renderCheckpoint(cp Checkpoint) ([]byte, error) {
 	fm := checkpointFrontmatter{
 		Name:        "checkpoint",
@@ -156,7 +165,7 @@ func renderCheckpoint(cp Checkpoint) ([]byte, error) {
 	b.WriteString("---\n")
 	b.Write(fmBytes)
 	b.WriteString("---\n\n")
-	b.WriteString(cp.Summary)
+	b.WriteString(agentcore.CompactionMessage{Summary: cp.Summary, UserInstructions: cp.UserInstructions}.Text())
 	return b.Bytes(), nil
 }
 
@@ -164,6 +173,12 @@ func renderCheckpoint(cp Checkpoint) ([]byte, error) {
 // It returns (nil, false, nil) when the file does not exist — a missing
 // checkpoint is a normal "no collapsed context yet" state, not an error. A
 // present-but-malformed file yields a non-nil error.
+//
+// The body is split into summary and user-instruction section here rather than
+// trusted from frontmatter: the section is ordinary Markdown, so an
+// out-of-band edit of checkpoint.md (the memory files are meant to be human-
+// readable) still loads correctly. A file without the section — every checkpoint
+// written before it existed — loads as summary-only.
 func LoadCheckpoint(sessionID, memoryRoot string) (*Checkpoint, bool, error) {
 	path := CheckpointPath(sessionID, memoryRoot)
 	content, err := os.ReadFile(path)
@@ -183,11 +198,13 @@ func LoadCheckpoint(sessionID, memoryRoot string) (*Checkpoint, bool, error) {
 		return nil, false, fmt.Errorf("runtime: decode checkpoint frontmatter %s: %w", path, err)
 	}
 
+	summary, instructions := agentcore.ExtractUserInstructionsSection(string(bytes.TrimLeft(body, "\r\n")))
 	cp := &Checkpoint{
-		Watermark:       fm.Metadata.Watermark,
-		Summary:         string(bytes.TrimLeft(body, "\r\n")),
-		CreatedAt:       fm.Metadata.CreatedAt.UTC(),
-		CoveredMessages: fm.Metadata.CoveredMessages,
+		Watermark:        fm.Metadata.Watermark,
+		Summary:          summary,
+		UserInstructions: instructions,
+		CreatedAt:        fm.Metadata.CreatedAt.UTC(),
+		CoveredMessages:  fm.Metadata.CoveredMessages,
 	}
 	return cp, true, nil
 }

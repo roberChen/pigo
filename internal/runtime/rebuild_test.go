@@ -192,3 +192,43 @@ func TestRebuildFromCheckpoint_FallbackNoOpWhenNothingToCompact(t *testing.T) {
 		t.Fatalf("no-op should return the original context unchanged: %+v", res)
 	}
 }
+
+// TestRebuildFromCheckpoint_CarriesUserInstructions verifies a rebuild reloads the
+// checkpoint's user-instruction section into the rebuilt context. A /rebuild that
+// kept only the summary would silently drop the requirements the section exists to
+// preserve, which is precisely what the user would invoke it to avoid.
+func TestRebuildFromCheckpoint_CarriesUserInstructions(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "sess-rebuild-ledger"
+
+	msgs := agentcore.MessageList{textUser("m0"), textUser("m1"), textUser("keep-A")}
+	cp := Checkpoint{
+		Watermark:       2,
+		Summary:         "## Goal\ndistilled prefix",
+		CreatedAt:       time.Now().UTC(),
+		CoveredMessages: 2,
+		UserInstructions: &agentcore.UserInstructionBlock{
+			Summary:  "never write to deploy/",
+			Verbatim: []string{"m0", "m1"},
+		},
+	}
+	if err := WriteCheckpoint(sessionID, root, cp); err != nil {
+		t.Fatalf("WriteCheckpoint: %v", err)
+	}
+
+	cfg := newRunCfg(nil)
+	res, err := RebuildFromCheckpoint(context.Background(), msgs, sessionID, root, &cfg, nil)
+	if err != nil {
+		t.Fatalf("RebuildFromCheckpoint: %v", err)
+	}
+	head, ok := res.Messages[0].(agentcore.CompactionMessage)
+	if !ok {
+		t.Fatalf("message[0] should be a compaction checkpoint, got %T", res.Messages[0])
+	}
+	if head.UserInstructions == nil || head.UserInstructions.Summary != "never write to deploy/" {
+		t.Fatalf("section not carried into the rebuilt context: %+v", head.UserInstructions)
+	}
+	if !strings.Contains(head.Text(), "## User Instructions") {
+		t.Fatalf("replayed checkpoint should render the section:\n%s", head.Text())
+	}
+}

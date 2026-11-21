@@ -8,6 +8,7 @@ package compaction
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/provider"
@@ -30,6 +31,12 @@ type CompactionDetails struct {
 type CompactionResult struct {
 	// Summary is the structured summary that replaces the compacted history.
 	Summary string
+	// UserInstructions is the user-instruction section of the checkpoint: the
+	// rolling digest (consolidated by the summarization call, or carried over
+	// from the previous checkpoint when the model omitted the block) plus the
+	// verbatim requests extracted from the compacted window. Nil when the window
+	// contained no user instructions and there was no prior digest.
+	UserInstructions *agentcore.UserInstructionBlock
 	// FirstKeptIndex is the index of the first retained message.
 	FirstKeptIndex int
 	// TokensBefore is the estimated context tokens before compaction.
@@ -49,6 +56,9 @@ type CompactionResult struct {
 // (-1 when none); summarization starts just after it so each compaction only
 // covers the newly accumulated history. prevDetails carries that compaction's
 // file lists so long-lived reads/edits survive across successive compactions.
+// prevInstructions is that compaction's user-instruction section: its digest is
+// fed back into the summarization prompt so the ledger accumulates, and the
+// verbatim half is replaced (not appended to) with this window's requests.
 //
 // It returns (nil, nil) when there is nothing to compact (no valid cut point or
 // an empty summarization range).
@@ -61,6 +71,7 @@ func Compact(
 	prevCompactionIndex int,
 	prevDetails *CompactionDetails,
 	previousSummary string,
+	prevInstructions *agentcore.UserInstructionBlock,
 	cfg provider.StreamConfig,
 ) (*CompactionResult, error) {
 	cut := FindCutPoint(msgs, settings.KeepRecentTokens)
@@ -90,18 +101,86 @@ func Compact(
 	}
 	readFiles, modifiedFiles := computeFileLists(ops)
 
-	summary, err := GenerateSummary(ctx, stream, model, toSummarize, settings.ReserveTokens, previousSummary, cfg)
+	out, err := GenerateSummaryOutput(ctx, stream, model, toSummarize, settings.ReserveTokens, previousSummary, prevInstructions, cfg)
 	if err != nil {
 		return nil, err
 	}
-	summary += formatFileOperations(readFiles, modifiedFiles)
+	summary := out.Summary + formatFileOperations(readFiles, modifiedFiles)
 
 	return &CompactionResult{
-		Summary:        summary,
-		FirstKeptIndex: cut.FirstKeptIndex,
-		TokensBefore:   EstimateContextTokens(msgs).Tokens,
-		Details:        CompactionDetails{ReadFiles: readFiles, ModifiedFiles: modifiedFiles},
+		Summary:          summary,
+		UserInstructions: buildUserInstructions(out, prevInstructions, toSummarize),
+		FirstKeptIndex:   cut.FirstKeptIndex,
+		TokensBefore:     EstimateContextTokens(msgs).Tokens,
+		Details:          CompactionDetails{ReadFiles: readFiles, ModifiedFiles: modifiedFiles},
 	}, nil
+}
+
+// Prior is the state a re-compaction continues from: the last checkpoint already
+// present in the context, unpacked into the arguments Compact takes. The zero
+// value (Index -1, everything else empty) means "no checkpoint yet", which is the
+// first-compaction case.
+type Prior struct {
+	// Index is the position of the previous compaction checkpoint in the message
+	// list, or -1 when there is none.
+	Index int
+	// Details holds that checkpoint's file lists (nil when absent or undecodable).
+	Details *CompactionDetails
+	// Summary is the previous technical summary, used to switch to the iterative
+	// update template.
+	Summary string
+	// UserInstructions is the previous checkpoint's instruction section.
+	UserInstructions *agentcore.UserInstructionBlock
+}
+
+// PriorCheckpoint finds the last compaction checkpoint in msgs and unpacks it for
+// Compact. It scans from the end because a chain of checkpoints keeps only the
+// newest one relevant (each absorbs the ones before it).
+//
+// Undecodable Details are dropped rather than reported: a lost file list costs
+// far less than refusing to compact, and older checkpoints may simply not carry
+// one.
+func PriorCheckpoint(msgs []agentcore.Message) Prior {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		cp, ok := msgs[i].(agentcore.CompactionMessage)
+		if !ok {
+			continue
+		}
+		prior := Prior{Index: i, Summary: cp.Summary, UserInstructions: cp.UserInstructions}
+		if len(cp.Details) > 0 {
+			var d CompactionDetails
+			if err := json.Unmarshal(cp.Details, &d); err == nil {
+				prior.Details = &d
+			}
+		}
+		return prior
+	}
+	return Prior{Index: -1}
+}
+
+// buildUserInstructions assembles the checkpoint's instruction section from the
+// two halves described in agentcore.UserInstructionBlock:
+//
+//   - digest: what the model consolidated this turn. When it emitted no block,
+//     the previous digest is carried over verbatim rather than lost — a model
+//     that drops the format on one turn must not erase the session's requirements.
+//   - verbatim: this window's user requests, extracted by code. It replaces the
+//     previous list wholesale; the previous list was already folded into the
+//     digest, so keeping it would duplicate it on every re-compaction.
+//
+// It returns nil when both halves are empty, so an old-style summary-only
+// checkpoint keeps its exact previous shape.
+func buildUserInstructions(out *SummaryOutput, prev *agentcore.UserInstructionBlock, window []agentcore.Message) *agentcore.UserInstructionBlock {
+	digest := strings.TrimSpace(out.Instructions)
+	if !out.InstructionsFound && prev != nil {
+		digest = strings.TrimSpace(prev.Summary)
+	}
+	verbatim := ExtractUserInstructions(window)
+	block := &agentcore.UserInstructionBlock{Summary: digest, Verbatim: verbatim}
+	if block.IsEmpty() {
+		return nil
+	}
+	return block
 }
 
 // Message builds the CompactionMessage to persist for this result: the summary
@@ -112,12 +191,13 @@ func (r *CompactionResult) Message(now int64) agentcore.CompactionMessage {
 		details = b
 	}
 	return agentcore.CompactionMessage{
-		RoleField:       agentcore.RoleCompaction,
-		Summary:         r.Summary,
-		TokensBefore:    r.TokensBefore,
-		CoveredMessages: r.FirstKeptIndex,
-		Details:         details,
-		Timestamp:       now,
+		RoleField:        agentcore.RoleCompaction,
+		Summary:          r.Summary,
+		UserInstructions: r.UserInstructions,
+		TokensBefore:     r.TokensBefore,
+		CoveredMessages:  r.FirstKeptIndex,
+		Details:          details,
+		Timestamp:        now,
 	}
 }
 

@@ -1206,7 +1206,11 @@ func runManualCompact(out io.Writer, deps replDeps) {
 		scfg.APIKey = deps.creds.GetAPIKey(context.Background(), deps.live.ProviderName)
 	}
 	fmt.Fprintln(out, ui.Colorize(ui.Enabled(), ui.Dim, "Compacting conversation…"))
-	res, err := compaction.Compact(context.Background(), stream, model, msgs, settings, -1, nil, "", scfg)
+	// Continue from any checkpoint already in the context, so a manual /compact
+	// after an auto-compaction consolidates the existing summary and keeps the
+	// user-instruction ledger instead of restarting both.
+	prior := compaction.PriorCheckpoint(msgs)
+	res, err := compaction.Compact(context.Background(), stream, model, msgs, settings, prior.Index, prior.Details, prior.Summary, prior.UserInstructions, scfg)
 	if err != nil {
 		fmt.Fprintf(out, "compaction failed: %v (context left unchanged)\n", err)
 		return
@@ -1319,8 +1323,11 @@ func replayTranscript(out io.Writer, messages []agentcore.AgentMessage) {
 				fmt.Fprintf(out, "  %s %s\n", ui.Colorize(color, ui.Green, "← result:"), ui.OneLine(agentcore.ContentToText(msg.Content)))
 			}
 		case agentcore.CompactionMessage:
-			fmt.Fprintln(out, ui.Colorize(color, ui.Dim,
-				"… conversation compacted here — earlier turns are shown above but summarized for the model …"))
+			marker := "… conversation compacted here — earlier turns are shown above but summarized for the model …"
+			if note := msg.UserInstructions.Note(); note != "" {
+				marker += "\n" + note
+			}
+			fmt.Fprintln(out, ui.Colorize(color, ui.Dim, marker))
 		}
 	}
 }

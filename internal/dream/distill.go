@@ -203,7 +203,7 @@ func renderTranscript(h session.SessionHeader, msgs agentcore.MessageList) strin
 		case agentcore.ToolResultMessage:
 			role, text = "tool", clip(agentcore.ContentToText(mm.Content), 500)
 		case agentcore.CompactionMessage:
-			role, text = "summary", mm.Summary
+			role, text = "summary", mm.Text()
 		default:
 			continue
 		}

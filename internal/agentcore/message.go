@@ -3,6 +3,7 @@ package agentcore
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Message roles, matching pi's wire format.
@@ -63,6 +64,13 @@ const (
 	// UserMessageOriginSubAgentReport marks a finished background sub-agent's
 	// report injected onto the follow-up seam.
 	UserMessageOriginSubAgentReport = "subagent_report"
+	// UserMessageOriginHookGuidance marks the guidance a Stop hook feeds back when
+	// it blocks a run from ending. The model treats it as input, but it is the
+	// harness's words, not the human's.
+	UserMessageOriginHookGuidance = "hook_guidance"
+	// UserMessageOriginGoalContinuation marks the autonomous-mode nudge injected
+	// each turn to keep a /goal run going.
+	UserMessageOriginGoalContinuation = "goal_continuation"
 )
 
 // IsSynthetic reports whether the harness rather than the human produced this
@@ -135,8 +143,180 @@ type CompactionMessage struct {
 	CoveredMessages int `json:"coveredMessages,omitempty"`
 	// Details is opaque at this layer (the compaction package owns its shape);
 	// kept as raw JSON so agentcore stays free of a compaction dependency.
-	Details   json.RawMessage `json:"details,omitempty"`
-	Timestamp int64           `json:"timestamp"`
+	Details json.RawMessage `json:"details,omitempty"`
+	// UserInstructions is the rolling ledger of what the human asked for. It is
+	// the anti-drift half of a checkpoint: Summary is a model's account of the
+	// work, which degrades turn over turn, while this section keeps a cumulative
+	// digest plus the verbatim requests of the window the checkpoint covers.
+	// Nil on a checkpoint produced before the section existed, or when a
+	// checkpoint carried no user instructions. See UserInstructionBlock.
+	UserInstructions *UserInstructionBlock `json:"userInstructions,omitempty"`
+	Timestamp        int64                 `json:"timestamp"`
+}
+
+// UserInstructionBlock is the user-instruction section of a compaction
+// checkpoint: a rolling summary of every instruction given so far plus the
+// verbatim instructions of the compaction window that produced this checkpoint.
+//
+// The two halves age differently on purpose. Summary is rewritten by the
+// summarization call each time (it absorbs the previous Summary and the previous
+// verbatim list), so it is cumulative but paraphrased. Verbatim is replaced
+// wholesale with the current window's requests and never passes through the
+// model, so the most recent round of instructions is always exactly what the
+// human typed. That split is what keeps a long session from slowly drifting away
+// from the original requirements.
+type UserInstructionBlock struct {
+	// Summary is the rolling digest: everything the user asked for across the
+	// whole session, including windows this checkpoint no longer quotes verbatim.
+	Summary string `json:"summary,omitempty"`
+	// Verbatim holds the user's own words from the compacted window, in
+	// chronological order, each already budget-trimmed.
+	Verbatim []string `json:"verbatim,omitempty"`
+}
+
+// IsEmpty reports whether the block carries nothing worth rendering.
+func (b *UserInstructionBlock) IsEmpty() bool {
+	return b == nil || (strings.TrimSpace(b.Summary) == "" && len(b.Verbatim) == 0)
+}
+
+// Section headings of the rendered user-instruction section. They are exported
+// as constants because tests and the summary prompt refer to them literally, and
+// because the model must be able to recognize its own previous output.
+const (
+	// UserInstructionsHeading leads the section inside a rendered summary.
+	UserInstructionsHeading = "## User Instructions"
+	// UserInstructionsSummaryLabel heads the rolling digest half.
+	UserInstructionsSummaryLabel = "### Standing instructions"
+	// UserInstructionsVerbatimLabel heads the verbatim half.
+	UserInstructionsVerbatimLabel = "### Verbatim requests (this window)"
+)
+
+// Render returns the user-instruction section as Markdown: a heading, the
+// rolling digest, and the verbatim list. It returns "" for an empty block so
+// callers can append it unconditionally.
+func (b *UserInstructionBlock) Render() string {
+	if b.IsEmpty() {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(UserInstructionsHeading)
+	sb.WriteString("\n")
+	if s := strings.TrimSpace(b.Summary); s != "" {
+		sb.WriteString(UserInstructionsSummaryLabel)
+		sb.WriteString("\n")
+		sb.WriteString(s)
+		sb.WriteString("\n")
+	}
+	if len(b.Verbatim) > 0 {
+		sb.WriteString(UserInstructionsVerbatimLabel)
+		sb.WriteString("\n")
+		for _, v := range b.Verbatim {
+			sb.WriteString("- ")
+			sb.WriteString(v)
+			sb.WriteString("\n")
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// Note is a one-line, human-facing description of the section, or "" when there
+// is none. The transcript views print it beside the compaction marker so a
+// resumed session says out loud that the user's requirements survived the
+// collapse — a reader otherwise has no way to tell a plain summary from a
+// summary that still carries the ledger.
+func (b *UserInstructionBlock) Note() string {
+	if b.IsEmpty() {
+		return ""
+	}
+	var parts []string
+	if strings.TrimSpace(b.Summary) != "" {
+		parts = append(parts, "standing instructions")
+	}
+	switch n := len(b.Verbatim); n {
+	case 0:
+	case 1:
+		parts = append(parts, "1 verbatim request")
+	default:
+		parts = append(parts, fmt.Sprintf("%d verbatim requests", n))
+	}
+	return "user instructions preserved (" + strings.Join(parts, " + ") + ")"
+}
+
+// Text renders the checkpoint the way the model sees it: the technical summary
+// followed by the user-instruction section. It is the single rendering used for
+// the LLM request, the checkpoint file and the transcript views, so no consumer
+// can accidentally drop a half of the checkpoint.
+func (m CompactionMessage) Text() string {
+	section := m.UserInstructions.Render()
+	if section == "" {
+		return m.Summary
+	}
+	if strings.TrimSpace(m.Summary) == "" {
+		return section
+	}
+	return m.Summary + "\n\n" + section
+}
+
+// ExtractUserInstructionsSection is the inverse of Render: it splits a rendered
+// checkpoint body into its technical summary and the parsed instruction block.
+//
+// It is what makes the section survive the on-disk round trip through a plain
+// Markdown checkpoint: the loader hands the whole body here instead of trusting
+// frontmatter, so the section stays greppable and editable by hand. A body with
+// no (or an unrecognizable) section yields the body unchanged and a nil block,
+// which is exactly how checkpoints written before the section existed behave.
+func ExtractUserInstructionsSection(body string) (string, *UserInstructionBlock) {
+	idx := strings.LastIndex(body, UserInstructionsHeading)
+	if idx < 0 || (idx > 0 && body[idx-1] != '\n') {
+		return body, nil
+	}
+	block, ok := parseUserInstructionsSection(body[idx+len(UserInstructionsHeading):])
+	if !ok {
+		return body, nil
+	}
+	return strings.TrimRight(body[:idx], "\n"), block
+}
+
+// parseUserInstructionsSection parses the text after the heading. ok is false
+// when neither label is present, which means the heading was prose rather than a
+// real section and the caller must treat the body as summary-only.
+func parseUserInstructionsSection(rest string) (*UserInstructionBlock, bool) {
+	block := &UserInstructionBlock{}
+	mode := ""
+	started := false
+	for _, raw := range strings.Split(rest, "\n") {
+		line := strings.TrimSpace(raw)
+		switch line {
+		case UserInstructionsSummaryLabel:
+			mode, started = "summary", true
+			continue
+		case UserInstructionsVerbatimLabel:
+			mode, started = "verbatim", true
+			continue
+		}
+		if !started || line == "" {
+			continue
+		}
+		if mode == "verbatim" && strings.HasPrefix(line, "- ") {
+			block.Verbatim = append(block.Verbatim, strings.TrimSpace(line[2:]))
+			continue
+		}
+		if mode == "summary" {
+			if block.Summary != "" {
+				block.Summary += "\n"
+			}
+			block.Summary += line
+			continue
+		}
+		// A wrapped continuation line of the last verbatim entry.
+		if n := len(block.Verbatim); n > 0 {
+			block.Verbatim[n-1] += " " + line
+		}
+	}
+	if !started {
+		return nil, false
+	}
+	return block, true
 }
 
 func (CompactionMessage) isMessage()     {}
@@ -153,11 +333,12 @@ const (
 // AsUserMessage renders a compaction checkpoint as the user text message that
 // stands in for the compacted history when building the LLM request. The
 // provider encoders call this so a persisted compaction line replays as
-// context rather than being dropped.
+// context rather than being dropped. Text() includes the user-instruction
+// section, so the model receives the anti-drift ledger alongside the summary.
 func (m CompactionMessage) AsUserMessage() UserMessage {
 	return UserMessage{
 		RoleField: RoleUser,
-		Content:   ContentList{NewTextContent(compactionSummaryPrefix + m.Summary + compactionSummarySuffix)},
+		Content:   ContentList{NewTextContent(compactionSummaryPrefix + m.Text() + compactionSummarySuffix)},
 		Timestamp: m.Timestamp,
 	}
 }

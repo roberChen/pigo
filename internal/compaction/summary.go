@@ -282,6 +282,23 @@ func formatToolCall(c agentcore.ToolCallContent) string {
 	return fmt.Sprintf("%s(%s)", c.Name, strings.Join(pairs, ", "))
 }
 
+// SummaryOutput is what one summarization call produces: the technical summary
+// of the compacted range, and the consolidated user-instruction digest asked for
+// by PromptInstructionsAddendum.
+//
+// The digest is empty when the model did not emit the block (InstructionsFound
+// is false). That is a degradation, not a failure: the summary still lands and
+// only the rolling half of the ledger stops advancing. Callers surface it as a
+// diagnostic and keep the previous digest if they have one.
+type SummaryOutput struct {
+	// Summary is the technical checkpoint text (## Goal … ## Critical Context).
+	Summary string
+	// Instructions is the consolidated digest, empty when the model omitted it.
+	Instructions string
+	// InstructionsFound reports whether the model emitted the block at all.
+	InstructionsFound bool
+}
+
 // GenerateSummary drives a provider stream to summarize msgs into a structured
 // checkpoint. When previousSummary is non-empty it uses the update template and
 // embeds the prior summary in <previous-summary> tags; otherwise it uses the
@@ -289,6 +306,10 @@ func formatToolCall(c agentcore.ToolCallContent) string {
 // model.MaxOutputTokens) as in pi. The returned text is the concatenation of
 // the assistant response's text blocks. A terminal error/aborted response is
 // surfaced as an error.
+//
+// It is the summary-only entry point: the user-instruction digest, when the
+// model emits one, is stripped from the returned text and dropped. Callers that
+// keep a checkpoint use GenerateSummaryOutput instead.
 func GenerateSummary(
 	ctx context.Context,
 	stream provider.StreamFn,
@@ -298,10 +319,35 @@ func GenerateSummary(
 	previousSummary string,
 	cfg provider.StreamConfig,
 ) (string, error) {
+	out, err := GenerateSummaryOutput(ctx, stream, model, msgs, reserveTokens, previousSummary, nil, cfg)
+	if err != nil {
+		return "", err
+	}
+	return out.Summary, nil
+}
+
+// GenerateSummaryOutput is GenerateSummary plus the user-instruction digest: the
+// same single request, the same single response, split into its two halves.
+//
+// prevInstructions, when non-nil, is the previous checkpoint's section. It is
+// embedded in the prompt so the model consolidates rather than restarts, which is
+// what makes the digest cumulative across compactions. Passing nil is the first
+// compaction of a session (or an older checkpoint that predates the section).
+func GenerateSummaryOutput(
+	ctx context.Context,
+	stream provider.StreamFn,
+	model provider.Model,
+	msgs []agentcore.Message,
+	reserveTokens int,
+	previousSummary string,
+	prevInstructions *agentcore.UserInstructionBlock,
+	cfg provider.StreamConfig,
+) (*SummaryOutput, error) {
 	base := summarizationPrompt
 	if previousSummary != "" {
 		base = updateSummarizationPrompt
 	}
+	base += PromptInstructionsAddendum
 
 	conversation := serializeConversation(msgs)
 	var b strings.Builder
@@ -312,6 +358,11 @@ func GenerateSummary(
 		b.WriteString("<previous-summary>\n")
 		b.WriteString(previousSummary)
 		b.WriteString("\n</previous-summary>\n\n")
+	}
+	if prev := renderPreviousInstructions(prevInstructions); prev != "" {
+		b.WriteString("<previous-user-instructions>\n")
+		b.WriteString(prev)
+		b.WriteString("\n</previous-user-instructions>\n\n")
 	}
 	b.WriteString(base)
 
@@ -340,7 +391,7 @@ func GenerateSummary(
 	}
 	s, err := stream(ctx, model.ID, llm, cfg)
 	if err != nil {
-		return "", fmt.Errorf("compaction: build summary stream: %w", err)
+		return nil, fmt.Errorf("compaction: build summary stream: %w", err)
 	}
 
 	// Drain events so the stream's result is populated, then read the final
@@ -350,18 +401,24 @@ func GenerateSummary(
 	}
 	final, resErr := s.Result(ctx)
 	if resErr != nil {
-		return "", fmt.Errorf("compaction: summary stream: %w", resErr)
+		return nil, fmt.Errorf("compaction: summary stream: %w", resErr)
 	}
 	switch final.StopReason {
 	case agentcore.StopReasonAborted:
-		return "", fmt.Errorf("compaction: summarization aborted: %s", final.ErrorMessage)
+		return nil, fmt.Errorf("compaction: summarization aborted: %s", final.ErrorMessage)
 	case agentcore.StopReasonError:
-		return "", fmt.Errorf("compaction: summarization failed: %s", final.ErrorMessage)
+		return nil, fmt.Errorf("compaction: summarization failed: %s", final.ErrorMessage)
 	}
 
-	summary := textOf(final.Content)
-	if strings.TrimSpace(summary) == "" {
-		return "", fmt.Errorf("compaction: summarization produced empty output")
+	raw := textOf(final.Content)
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("compaction: summarization produced empty output")
 	}
-	return summary, nil
+	summary, instructions, found := splitUserInstructions(raw)
+	if strings.TrimSpace(summary) == "" && found {
+		// The model emitted only the instruction block. Keep the raw text so the
+		// checkpoint is never empty, and let the digest through as well.
+		summary = strings.TrimSpace(raw)
+	}
+	return &SummaryOutput{Summary: summary, Instructions: instructions, InstructionsFound: found}, nil
 }
