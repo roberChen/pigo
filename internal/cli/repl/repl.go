@@ -727,19 +727,16 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 				hookEvent(ev)
 			}
 			// Surface auto-compaction progress: a "Compacting conversation…" line
-			// when it starts, then a token summary when it finishes. Manual
-			// /compact prints its own summary via runManualCompact (it bypasses
+			// when it starts, then the compaction report when it finishes — the
+			// accounting plus the checkpoint body that replaced the summarized
+			// turns, so it is visible without opening checkpoint.md. Manual
+			// /compact prints its own report via runManualCompact (it bypasses
 			// the loop), so only threshold/overflow events reach here.
 			switch e := ev.(type) {
 			case agentcore.CompactionStartEvent:
 				fmt.Fprintln(out, ui.Colorize(ui.Enabled(), ui.Dim, "Compacting conversation…"))
 			case agentcore.CompactionEvent:
-				if e.ErrorMessage != "" {
-					fmt.Fprintf(out, "compaction failed: %s\n", e.ErrorMessage)
-				} else {
-					fmt.Fprintf(out, "compacted: %d → %d tokens, summarized %d messages, kept %d\n",
-						e.TokensBefore, e.TokensAfter, e.SummarizedCount, e.KeptCount)
-				}
+				ui.RenderCompaction(out, e)
 			}
 		},
 		OnText: func(delta string) {
@@ -1224,8 +1221,9 @@ func runManualCompact(out io.Writer, deps replDeps) {
 	deps.agentCtx.Messages = rebuilt
 	after := compaction.EstimateContextTokens(rebuilt).Tokens
 	summarized := len(msgs) - (len(rebuilt) - 1)
-	fmt.Fprintf(out, "compacted: %d → %d tokens, summarized %d messages, kept %d\n",
-		before, after, summarized, len(rebuilt)-1)
+	ui.RenderCompactionSummary(out,
+		ui.CompactionNote(before, after, summarized, len(rebuilt)-1),
+		res.Text())
 }
 
 // runManualRebuild reconstructs the shared context on an explicit /rebuild

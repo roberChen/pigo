@@ -84,11 +84,12 @@ type telemetryMsg struct{ ev agentcore.TelemetryEvent }
 // summarization request is in flight; compactionMsg clears it.
 type compactionStartMsg struct{}
 
-// compactionMsg signals that the loop compacted the context window. tokensAfter
-// is the post-compaction context-token estimate, so the status bar's context
-// readout can shrink immediately instead of waiting for the run-end telemetry;
-// it is 0 when the loop did not report a usable figure.
-type compactionMsg struct{ tokensAfter int }
+// compactionMsg signals that the loop compacted the context window. It carries
+// the CompactionEvent as-is (like telemetryMsg) so the model can both shrink the
+// context readout immediately — TokensAfter, instead of waiting for the run-end
+// telemetry — and show the checkpoint the model now carries. TokensAfter is 0
+// when the loop did not report a usable figure.
+type compactionMsg struct{ ev agentcore.CompactionEvent }
 
 // runEndMsg is the final message: the run has fully drained. err is non-nil when
 // the run ended in error (or was interrupted).

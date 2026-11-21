@@ -425,6 +425,7 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 		TokensAfter:     after,
 		SummarizedCount: summarized,
 		KeptCount:       len(rebuilt) - 1,
+		Summary:         res.Text(),
 	})
 }
 

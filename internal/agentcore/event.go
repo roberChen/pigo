@@ -113,6 +113,12 @@ type CompactionEvent struct {
 	// ErrorMessage is non-empty when compaction failed; the original context is
 	// preserved in that case.
 	ErrorMessage string
+	// Summary is the checkpoint text the compaction produced — the same body the
+	// model sees on later turns, including the user-instruction section when the
+	// checkpoint carries one. It is empty when compaction failed or was a no-op.
+	// Front-ends show it so an operator can read what replaced their history
+	// instead of only the before/after token counts.
+	Summary string
 }
 
 // CompactionStartEvent is emitted immediately before the loop runs compaction,

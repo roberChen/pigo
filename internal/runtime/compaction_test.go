@@ -115,9 +115,19 @@ func TestAutoCompactionFiresOnThreshold(t *testing.T) {
 	if ce.SummarizedCount <= 0 {
 		t.Errorf("expected some messages summarized, got %d", ce.SummarizedCount)
 	}
+	// The event must carry the checkpoint body, not only the accounting: it is what
+	// every front-end prints (REPL), card-renders (TUI) and exports (stream-json).
+	if !strings.Contains(ce.Summary, "compacted") {
+		t.Errorf("CompactionEvent.Summary should carry the checkpoint text, got %q", ce.Summary)
+	}
 	// The context must now begin with a compaction checkpoint.
 	if len(agentCtx.Messages) == 0 || agentCtx.Messages[0].Role() != agentcore.RoleCompaction {
 		t.Errorf("context should start with a compaction checkpoint, got %+v", agentCtx.Messages)
+	}
+	// ...and the event's summary must be exactly what that checkpoint tells the
+	// model, so a reader of the report is not looking at a different document.
+	if head, ok := agentCtx.Messages[0].(agentcore.CompactionMessage); ok && head.Text() != ce.Summary {
+		t.Errorf("event summary differs from the checkpoint in the context:\nevent=%q\ncheckpoint=%q", ce.Summary, head.Text())
 	}
 }
 
@@ -150,6 +160,7 @@ func TestCompactionEventEnvelope(t *testing.T) {
 		TokensAfter:     400,
 		SummarizedCount: 8,
 		KeptCount:       3,
+		Summary:         "## Goal\ncompacted",
 	})
 	if env["type"] != agentcore.EventCompaction {
 		t.Errorf("type = %v, want %q", env["type"], agentcore.EventCompaction)
@@ -160,13 +171,21 @@ func TestCompactionEventEnvelope(t *testing.T) {
 	if env["summarizedCount"] != 8 || env["keptCount"] != 3 {
 		t.Errorf("count fields wrong: %+v", env)
 	}
+	// The checkpoint body is what the model now carries; a stream-json consumer
+	// must be able to read it, not just the token counts.
+	if env["summary"] != "## Goal\ncompacted" {
+		t.Errorf("summary = %v, want the checkpoint text", env["summary"])
+	}
 	if _, hasErr := env["error"]; hasErr {
 		t.Errorf("no error key expected on success: %+v", env)
 	}
-	// Failure envelope carries the error.
+	// Failure envelope carries the error and no summary (nothing was written).
 	failEnv := eventEnvelope(agentcore.CompactionEvent{Reason: "threshold", ErrorMessage: "boom"})
 	if failEnv["error"] != "boom" {
 		t.Errorf("error key expected on failure, got %+v", failEnv)
+	}
+	if _, hasSummary := failEnv["summary"]; hasSummary {
+		t.Errorf("no summary key expected on failure: %+v", failEnv)
 	}
 }
 

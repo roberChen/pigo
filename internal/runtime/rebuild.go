@@ -54,7 +54,9 @@ type RebuildResult struct {
 
 // Event renders the rebuild as a CompactionEvent so consumers that already
 // handle compaction reporting (the REPL/TUI event surfaces) can present a
-// rebuild with the same shape. Reason is "rebuild".
+// rebuild with the same shape. Reason is "rebuild". Summary carries the rebuilt
+// checkpoint text (the compaction message at the head of Messages), so a rebuild
+// reports what replaced the collapsed prefix just like a compaction does.
 func (r *RebuildResult) Event() agentcore.CompactionEvent {
 	return agentcore.CompactionEvent{
 		Reason:          "rebuild",
@@ -62,7 +64,21 @@ func (r *RebuildResult) Event() agentcore.CompactionEvent {
 		TokensAfter:     r.TokensAfter,
 		SummarizedCount: r.SummarizedCount,
 		KeptCount:       r.KeptCount,
+		Summary:         compactionText(r.Messages),
 	}
+}
+
+// compactionText returns the text of the checkpoint at the head of msgs, or ""
+// when the list does not start with one (a no-op rebuild keeps the original
+// list, whose head is an ordinary turn).
+func compactionText(msgs agentcore.MessageList) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	if cp, ok := msgs[0].(agentcore.CompactionMessage); ok {
+		return cp.Text()
+	}
+	return ""
 }
 
 // RebuildFromCheckpoint reconstructs the working context for sessionID.

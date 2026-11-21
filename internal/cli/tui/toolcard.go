@@ -84,6 +84,11 @@ const (
 	cardTaskLines     = 10  // sub-agent report
 	cardInputLines    = 3   // argument lines before "+N more"
 	cardExpandedLines = 400 // hard ceiling once expanded
+	// cardCompactionLines is the collapsed preview of a compaction checkpoint.
+	// The checkpoint is the only record of what replaced the summarized turns, and
+	// its leading sections (goal/constraints/progress) are what a reader checks, so
+	// it gets more room than a generic result while still staying a preview.
+	cardCompactionLines = 8
 	// cardTaskExpanded caps an expanded sub-agent report far below the generic
 	// ceiling: the report is the child's whole transcript, and the full text lives
 	// in the child's session file, so dumping it into the parent transcript buries
@@ -133,6 +138,48 @@ type toolCard struct {
 func newToolCard(id, name string, args any) *toolCard {
 	input := argsToMap(args)
 	return &toolCard{id: id, name: name, input: input, rawArgs: rawToolArgs(args, input), state: cardRunning}
+}
+
+// compactionCardName is the card name a context compaction is filed under. It is
+// not a tool: no call produced it, the loop emitted a CompactionEvent. It is
+// rendered as a card anyway because that is where a bounded, expandable block of
+// text already renders well, and because the checkpoint it reports is exactly the
+// kind of thing an operator wants to skim and then open (Ctrl+O).
+const compactionCardName = "compaction"
+
+// newCompactionCard builds the card reporting a context compaction, either live
+// (from a CompactionEvent) or replayed (from a persisted CompactionMessage). note
+// is the accounting shown in the header; body is the checkpoint text the model now
+// carries in place of the summarized turns. warn marks a failed compaction, whose
+// body is then the error and whose context was left unchanged.
+//
+// Without this the only trace of a compaction in the transcript was a one-line
+// "(context compacted)": the summary that replaced the conversation was visible
+// only in checkpoint.md on disk, so a reader could not tell what the model kept.
+func newCompactionCard(id, note, body string, warn bool) *toolCard {
+	card := &toolCard{id: id, name: compactionCardName, state: cardSuccess}
+	if note != "" {
+		card.input = map[string]any{"note": note}
+	}
+	if warn {
+		card.state = cardWarn
+	}
+	card.response = parseToolResult(body)
+	return card
+}
+
+// compactionNote renders a compaction's before/after accounting for the card
+// header: the token drop plus the summarized/retained message counts. Zero counts
+// are omitted (a failed or no-op compaction reports neither).
+func compactionNote(before, after, summarized, kept int) string {
+	note := fmt.Sprintf("%s → %s tokens", humanizeInt(before), humanizeInt(after))
+	if summarized > 0 {
+		note += fmt.Sprintf(" · summarized %d", summarized)
+	}
+	if kept > 0 {
+		note += fmt.Sprintf(" · kept %d", kept)
+	}
+	return note
 }
 
 // rawToolArgs returns the raw argument text to display when input did not decode
@@ -381,6 +428,11 @@ func (c toolCard) summaryArg() string {
 		return ""
 	case "memory_search":
 		return clipLine(argText(c.input, "query"), 80)
+	case "compaction":
+		// A compaction card's only "argument" is the run's before/after accounting;
+		// the checkpoint body is the response, so the header just says what the
+		// collapse cost.
+		return clipLine(argText(c.input, "note"), 80)
 	}
 	keys := sortedKeys(c.input)
 	if len(keys) == 0 {
@@ -574,6 +626,8 @@ func (c toolCard) headerOnlyArgs() map[string]bool {
 		return map[string]bool{"description": true, "prompt": true, "job_id": true}
 	case "question":
 		return map[string]bool{"questions": true}
+	case "compaction":
+		return map[string]bool{"note": true}
 	}
 	return nil
 }
@@ -687,6 +741,8 @@ func (c toolCard) previewBudget() int {
 		return cardBashLines
 	case "task", "task_output":
 		return cardTaskLines
+	case "compaction":
+		return cardCompactionLines
 	case "edit", "write":
 		return 2 // the summary line; the change itself is the Diff section
 	}

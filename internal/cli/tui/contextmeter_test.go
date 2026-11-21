@@ -176,7 +176,7 @@ func TestStatusBarUpdatesOnTurnEnd(t *testing.T) {
 	}
 
 	// Compaction shrinks it without waiting for the run-end telemetry.
-	m = apply(t, m, compactionMsg{tokensAfter: 5_000})
+	m = apply(t, m, compactionMsg{ev: agentcore.CompactionEvent{TokensAfter: 5_000}})
 	if got := m.statusBar.tokens; got != 5_000 {
 		t.Errorf("after compaction tokens = %d, want 5000", got)
 	}
@@ -200,19 +200,27 @@ func TestStatusBarContextSurvivesModelSwitch(t *testing.T) {
 	}
 }
 
-// TestCompactionMsgCarriesTokensAfter checks the bridge forwards the loop's
-// post-compaction token count into compactionMsg.
-func TestCompactionMsgCarriesTokensAfter(t *testing.T) {
+// TestCompactionMsgCarriesEvent checks the bridge forwards the loop's
+// CompactionEvent (token counts and the checkpoint text) into compactionMsg.
+func TestCompactionMsgCarriesEvent(t *testing.T) {
 	ch := newEventChan()
 	h := newStreamHandler(ch, nil)
-	h.OnEvent(agentcore.CompactionEvent{Reason: "threshold", TokensBefore: 90_000, TokensAfter: 12_000})
+	h.OnEvent(agentcore.CompactionEvent{
+		Reason:       "threshold",
+		TokensBefore: 90_000,
+		TokensAfter:  12_000,
+		Summary:      "## Goal\ncompacted",
+	})
 
 	msg, ok := (<-ch).(compactionMsg)
 	if !ok {
 		t.Fatalf("got %T, want compactionMsg", msg)
 	}
-	if msg.tokensAfter != 12_000 {
-		t.Errorf("tokensAfter = %d, want 12000", msg.tokensAfter)
+	if msg.ev.TokensAfter != 12_000 {
+		t.Errorf("TokensAfter = %d, want 12000", msg.ev.TokensAfter)
+	}
+	if msg.ev.Summary != "## Goal\ncompacted" {
+		t.Errorf("Summary = %q, want the checkpoint text", msg.ev.Summary)
 	}
 }
 

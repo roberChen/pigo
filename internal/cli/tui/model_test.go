@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/cli/ui"
 )
 
@@ -323,7 +324,7 @@ func TestModelSubagentPanelLifecycle(t *testing.T) {
 
 // TestModelCompactionIndicator verifies compactionStartMsg pins the spinner to
 // "Compacting conversation…" while summarization runs, and compactionMsg clears
-// the label and records the "(context compacted)" system note.
+// the label and reports the compaction in the transcript as a card.
 func TestModelCompactionIndicator(t *testing.T) {
 	m := apply(t, NewModel(Options{}), tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.running = true
@@ -334,12 +335,34 @@ func TestModelCompactionIndicator(t *testing.T) {
 		t.Errorf("spinner view %q should show the compaction label", view)
 	}
 
-	m = apply(t, m, compactionMsg{})
+	m = apply(t, m, compactionMsg{ev: agentcore.CompactionEvent{
+		Reason:          "threshold",
+		TokensBefore:    40_000,
+		TokensAfter:     6_000,
+		SummarizedCount: 9,
+		KeptCount:       2,
+		Summary:         "## Goal\nship the compaction card",
+	}})
 	if m.spinner.pinned != "" {
 		t.Errorf("compactionMsg should unpin the spinner, got %q", m.spinner.pinned)
 	}
-	if joined := strings.Join(blockTexts(m.transcript), "\n"); !strings.Contains(joined, "(context compacted)") {
-		t.Errorf("transcript should note the compaction, got:\n%s", joined)
+	card := m.toolCards["compaction-1"]
+	if card == nil {
+		t.Fatal("compactionMsg should add a compaction card")
+	}
+	if card.state != cardSuccess {
+		t.Errorf("successful compaction card state = %v, want cardSuccess", card.state)
+	}
+	// The header carries the accounting; the body carries what the model now holds.
+	// Both live on the card, not in raw block text, so read them from there.
+	if got := card.headerText(); !strings.Contains(got, "40,000 → 6,000 tokens") {
+		t.Errorf("card header %q should show the token drop", got)
+	}
+	if got := card.headerText(); !strings.Contains(got, "summarized 9") {
+		t.Errorf("card header %q should show the summarized count", got)
+	}
+	if got := responseText(card); !strings.Contains(got, "ship the compaction card") {
+		t.Errorf("card body should carry the checkpoint summary, got %q", got)
 	}
 }
 

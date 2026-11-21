@@ -447,10 +447,12 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 }
 
 // rebuildDoneMsg reports the outcome of a manual /rebuild to the model: summary
-// is the status line to show in the transcript, err is set when the rebuild
-// failed (the context is then left unchanged).
+// is the status line to show in the transcript, body is the checkpoint text the
+// context now starts from (empty for a no-op or a failure), and err is set when
+// the rebuild failed (the context is then left unchanged).
 type rebuildDoneMsg struct {
 	summary string
+	body    string
 	err     error
 }
 
@@ -460,9 +462,17 @@ type rebuildDoneMsg struct {
 // REPL's runManualRebuild.
 func (s *runSession) rebuildCmd() tea.Cmd {
 	return func() tea.Msg {
-		summary, err := s.rebuild()
-		return rebuildDoneMsg{summary: summary, err: err}
+		res, err := s.rebuild()
+		return rebuildDoneMsg{summary: res.summary, body: res.body, err: err}
 	}
+}
+
+// rebuildResult is what rebuild reports back: the status line for the transcript
+// and the checkpoint text the context now starts from, so /rebuild can show what
+// it collapsed the history into the way a compaction does.
+type rebuildResult struct {
+	summary string
+	body    string
 }
 
 // rebuild reconstructs the shared context from the session's persisted checkpoint
@@ -470,7 +480,7 @@ func (s *runSession) rebuildCmd() tea.Cmd {
 // the recent tail verbatim), falling back to lossy compaction when no checkpoint
 // exists. It replaces agentCtx.Messages in place on success and flags compacted
 // so persist() re-saves the flattened context linearly (as after a /compact).
-func (s *runSession) rebuild() (string, error) {
+func (s *runSession) rebuild() (rebuildResult, error) {
 	msgs := s.agentCtx.Messages
 	before := compaction.EstimateContextTokens(msgs).Tokens
 	// Checkpoints live under <memoryRoot>/sessions/<id>/; recover from the same
@@ -480,10 +490,10 @@ func (s *runSession) rebuild() (string, error) {
 	cfg := s.buildConfig()
 	res, err := runtime.RebuildFromCheckpoint(context.Background(), msgs, s.header.ID, memoryRoot, &cfg, nil)
 	if err != nil {
-		return "", err
+		return rebuildResult{}, err
 	}
 	if res.NoOp {
-		return fmt.Sprintf("nothing to rebuild (%d tokens, %d messages)", before, len(msgs)), nil
+		return rebuildResult{summary: fmt.Sprintf("nothing to rebuild (%d tokens, %d messages)", before, len(msgs))}, nil
 	}
 	s.agentCtx.Messages = res.Messages
 	s.compacted = true
@@ -491,8 +501,11 @@ func (s *runSession) rebuild() (string, error) {
 	if !res.FromCheckpoint {
 		source = "compaction (no checkpoint)"
 	}
-	return fmt.Sprintf("context rebuilt from %s: %d → %d tokens, collapsed %d messages, kept %d",
-		source, res.TokensBefore, res.TokensAfter, res.SummarizedCount, res.KeptCount), nil
+	return rebuildResult{
+		summary: fmt.Sprintf("context rebuilt from %s: %d → %d tokens, collapsed %d messages, kept %d",
+			source, res.TokensBefore, res.TokensAfter, res.SummarizedCount, res.KeptCount),
+		body: res.Event().Summary,
+	}, nil
 }
 
 // prompt to the growing context as a user message, then hands the context and a
@@ -679,14 +692,11 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 		case agentcore.CompactionMessage:
 			// The checkpoint stands in for the summarized prefix: show where the
 			// conversation was compacted, so a replayed session explains why the
-			// turns before it are only history. When the checkpoint carries the
-			// user-instruction section, say so — the requirements outlived the
-			// collapse, and the reader cannot tell from the marker alone.
-			text := "… conversation compacted here — earlier turns are shown above but summarized for the model …"
-			if note := msg.UserInstructions.Note(); note != "" {
-				text += "\n" + note
-			}
-			t.blocks = append(t.blocks, transcriptBlock{role: roleSystem, text: text})
+			// turns before it are only history. It renders as the same card a live
+			// compaction produces, carrying the checkpoint text the model continues
+			// from — so a resumed conversation shows what replaced its history
+			// instead of only that something did.
+			appendCard(replayedCompactionCard(fmt.Sprintf("compaction-%d", len(t.blocks)), msg))
 			t.activeAssistant = -1
 		case agentcore.ToolResultMessage:
 			card, ok := cards[msg.ToolCallID]

@@ -245,6 +245,13 @@ func eventEnvelope(ev agentcore.AgentEvent) map[string]any {
 		env["tokensAfter"] = e.TokensAfter
 		env["summarizedCount"] = e.SummarizedCount
 		env["keptCount"] = e.KeptCount
+		// summary is the checkpoint body the model now carries in place of the
+		// summarized turns. A consumer that records a run (a CI transcript, a log
+		// pipeline) can keep it; it is omitted when empty so the envelope for a
+		// failed or no-op compaction stays as small as before.
+		if e.Summary != "" {
+			env["summary"] = e.Summary
+		}
 		if e.ErrorMessage != "" {
 			env["error"] = e.ErrorMessage
 		}

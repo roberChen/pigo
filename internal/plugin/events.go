@@ -79,13 +79,20 @@ func eventPayload(ev agentcore.AgentEvent) map[string]any {
 	case agentcore.ToolExecutionEndEvent:
 		return map[string]any{"toolCallId": e.ToolCallID, "toolName": e.ToolName, "isError": e.IsError}
 	case agentcore.CompactionEvent:
-		return map[string]any{
+		p := map[string]any{
 			"reason":          e.Reason,
 			"tokensBefore":    e.TokensBefore,
 			"tokensAfter":     e.TokensAfter,
 			"summarizedCount": e.SummarizedCount,
 			"keptCount":       e.KeptCount,
 		}
+		// A plugin that archives or inspects a session needs what the compaction
+		// kept, not only how many tokens it saved; omitted when empty so the
+		// payload for a failed or no-op compaction is unchanged.
+		if e.Summary != "" {
+			p["summary"] = e.Summary
+		}
+		return p
 	default:
 		return map[string]any{}
 	}

@@ -214,6 +214,11 @@ type Model struct {
 	images map[int]string
 	// imageSeq is the monotonic counter behind the image placeholder ids.
 	imageSeq int
+
+	// compactionSeq is the monotonic counter behind compaction card ids. A
+	// compaction is not a tool call, so it has no tool-call id to key on; the
+	// counter keeps each card's transcript-entry and map key unique.
+	compactionSeq int
 }
 
 // NewModel builds the root model from the assembled Options. It reads the
@@ -653,9 +658,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The context just shrank: reflect the loop's post-compaction count right
 		// away instead of waiting for the run-end telemetry.
-		m.ctxMeter.observeCompaction(msg.tokensAfter)
+		m.ctxMeter.observeCompaction(msg.ev.TokensAfter)
 		m.statusBar.SetContext(m.ctxMeter.view())
-		m.transcript.addSystem("(context compacted)")
+		m.addCompactionCard(msg.ev)
 		return m, m.pumpNext()
 
 	case diagMsg:
@@ -736,6 +741,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// pumping, so re-seed the context readout from it (it shrank).
 			m.seedContextMeter()
 			m.transcript.addSystem(msg.summary)
+			// A rebuild is a compaction by another route: it collapses the prefix
+			// into a checkpoint. Show that checkpoint as the same card a compaction
+			// produces, so /rebuild reports what it collapsed the history into.
+			if msg.body != "" {
+				m.addRebuildCard(msg.summary, msg.body)
+			}
 		}
 		m.relayout()
 		return m, nil

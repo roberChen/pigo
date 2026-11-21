@@ -260,3 +260,29 @@ func containsField(raw json.RawMessage, key, value string) bool {
 	s, ok := m[key].(string)
 	return ok && s == value
 }
+
+// TestEventPayloadCarriesCompactionSummary verifies a compaction event tells a
+// plugin what the model now carries, not only how many tokens were saved: an
+// archiving or auditing plugin needs the checkpoint body. A failed compaction has
+// no summary, so the key is omitted rather than sent as an empty string.
+func TestEventPayloadCarriesCompactionSummary(t *testing.T) {
+	ok := eventPayload(agentcore.CompactionEvent{
+		Reason:          "threshold",
+		TokensBefore:    90_000,
+		TokensAfter:     12_000,
+		SummarizedCount: 14,
+		KeptCount:       3,
+		Summary:         "## Goal\nthe checkpoint body",
+	})
+	if ok["summary"] != "## Goal\nthe checkpoint body" {
+		t.Errorf("summary = %v, want the checkpoint body", ok["summary"])
+	}
+	if ok["tokensAfter"] != 12_000 || ok["keptCount"] != 3 {
+		t.Errorf("payload lost its accounting fields: %+v", ok)
+	}
+
+	failed := eventPayload(agentcore.CompactionEvent{Reason: "threshold", ErrorMessage: "boom"})
+	if _, has := failed["summary"]; has {
+		t.Errorf("a failed compaction should carry no summary: %+v", failed)
+	}
+}

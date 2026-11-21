@@ -100,10 +100,21 @@ func TestResumeLoadsActiveBranchAndTrimsContext(t *testing.T) {
 		t.Errorf("curLeaf = %q, want the path tip (err=%v)", s.curLeaf, err)
 	}
 
-	// The transcript explains the gap rather than silently starting mid-conversation.
+	// The transcript explains the gap rather than silently starting mid-conversation:
+	// the replay renders the checkpoint as the same card a live compaction produces,
+	// carrying the summary text the model continues from.
 	tr := newTranscript(DefaultTheme())
 	seedTranscript(&tr, history)
-	if !strings.Contains(transcriptText(tr), "compacted here") {
-		t.Errorf("replay should mark the compaction point:\n%s", transcriptText(tr))
+	var compactionCard *toolCard
+	for _, b := range tr.blocks {
+		if b.role == roleTool && b.card != nil && b.card.toolFamily() == compactionCardName {
+			compactionCard = b.card
+		}
+	}
+	if compactionCard == nil {
+		t.Fatalf("replay should mark the compaction point with a card:\n%s", transcriptText(tr))
+	}
+	if got := responseText(compactionCard); !strings.Contains(got, "summary of the root question") {
+		t.Errorf("replayed compaction card should carry the checkpoint text, got %q", got)
 	}
 }

@@ -201,6 +201,15 @@ func (r *CompactionResult) Message(now int64) agentcore.CompactionMessage {
 	}
 }
 
+// Text renders the checkpoint exactly as the model will read it on later turns:
+// the technical summary followed by the user-instruction section (see
+// agentcore.CompactionMessage.Text). Front-ends report this on the CompactionEvent
+// so an operator can see what replaced the summarized history, rather than having
+// to reload the checkpoint from disk to find out.
+func (r *CompactionResult) Text() string {
+	return agentcore.CompactionMessage{Summary: r.Summary, UserInstructions: r.UserInstructions}.Text()
+}
+
 // RebuildContext returns the post-compaction message list: the compaction
 // checkpoint followed by the retained recent messages (msgs[FirstKeptIndex:]).
 // The summarized prefix is dropped and replaced by the single checkpoint,
