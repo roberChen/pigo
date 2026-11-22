@@ -130,6 +130,21 @@ type toolCard struct {
 	// was built from, so a streamed delta or keystroke elsewhere does not re-draw
 	// every finished card.
 	rev int
+
+	// context marks a block whose body is conversation content rather than a
+	// record of an event that happened: it is drawn without a border, on the same
+	// footing as a user turn or a thinking block (see renderContext). A compaction
+	// checkpoint is the only one — the model carries it in place of the turns it
+	// replaced, so a frame would say "a tool ran and here is its output", which is
+	// the wrong claim about text that is now part of the conversation.
+	context bool
+
+	// body is a context block's source text kept verbatim, before parseToolResult
+	// flattens it into response nodes. The checkpoint is authored Markdown ("## Goal",
+	// list markers, fenced commands), and the parse that gives a tool result its tree
+	// shape also eats the leading indentation that carries Markdown's meaning — so
+	// the Markdown renderer reads this field instead. Only a context block fills it.
+	body string
 }
 
 // newToolCard builds a card for a tool call from its untyped arguments. When the
@@ -157,13 +172,14 @@ const compactionCardName = "compaction"
 // "(context compacted)": the summary that replaced the conversation was visible
 // only in checkpoint.md on disk, so a reader could not tell what the model kept.
 func newCompactionCard(id, note, body string, warn bool) *toolCard {
-	card := &toolCard{id: id, name: compactionCardName, state: cardSuccess}
+	card := &toolCard{id: id, name: compactionCardName, state: cardSuccess, context: true}
 	if note != "" {
 		card.input = map[string]any{"note": note}
 	}
 	if warn {
 		card.state = cardWarn
 	}
+	card.body = body
 	card.response = parseToolResult(body)
 	return card
 }
@@ -292,9 +308,14 @@ func (c toolCard) displayName() string {
 // header, the extra arguments, the todo checklist, the response preview and - when
 // the tool reported a diff (edit) - a colored Diff section. A selected card gets an
 // accent-colored border; a capped section says how many lines are hidden.
+//
+// A compaction checkpoint is drawn without a border instead; see contextText.
 func (c toolCard) render(theme Theme, width int) string {
 	if width < 4 {
 		width = 4
+	}
+	if c.contextText() {
+		return c.renderContext(theme, width)
 	}
 	// The rounded border consumes one column on each side; wrap everything to the
 	// inner width so nothing overflows the frame.
@@ -317,6 +338,146 @@ func (c toolCard) render(theme Theme, width int) string {
 		BorderForeground(lipgloss.Color(borderColor)).
 		Width(inner)
 	return border.Render(strings.Join(rendered, "\n"))
+}
+
+// contextText reports whether the card is drawn as conversation content rather
+// than as a bordered record of an event.
+func (c toolCard) contextText() bool { return c.context }
+
+// renderContext draws a context block: no border, no status glyph, no rounded
+// frame — a one-line header in the accent style followed by the body indented
+// beneath it, the same shape a thinking block uses for its aside under a header.
+//
+// A border is the transcript's mark for "this is a record of something that
+// happened" (a tool ran, here is what it returned), and every bordered block is
+// also a click target that expands a budgeted preview. Neither fits a compaction
+// checkpoint: the checkpoint is not output, it is the conversation's own content
+// — the text the model now carries in place of the summarized turns — so framing
+// it as a tool result makes it read like a log entry sitting beside the dialogue
+// when it is actually part of it. Drawing it flush with the surrounding text is
+// both the honest shape and the quieter one, which matters because a long
+// session compacts repeatedly and each one would otherwise add another heavy
+// frame to the log.
+//
+// The header keeps the accounting (the token drop and the message counts) and
+// gains the expand marker, because the body is still budgeted: compacting does
+// not change how much of a few-hundred-line checkpoint belongs in the transcript.
+func (c toolCard) renderContext(theme Theme, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	marker := "▸"
+	if c.expanded {
+		marker = "▾"
+	}
+	// The header is wrapped to the width left over after the marker gutter, and the
+	// gutter is added per row. Wrapping the marker into the text instead would let a
+	// continuation row start at column zero, where it reads as a new block rather
+	// than the rest of the header.
+	const gutter = 2
+	headWidth := width - gutter
+	if headWidth < 1 {
+		headWidth = 1
+	}
+	head := c.contextHeader()
+	if note := argText(c.input, "note"); note != "" {
+		head += "(" + note + ")"
+	}
+
+	// There is no border to color, so selection is shown by underlining the header.
+	// It has to be *some* visible change: the card can still be picked with Alt+↑/↓,
+	// and a selection the user cannot see is indistinguishable from no selection.
+	headStyle := theme.ToolHeader
+	if c.selected {
+		headStyle = headStyle.Underline(true)
+	}
+
+	rows := strings.Split(WrapToWidth(head, headWidth), "\n")
+	out := make([]string, 0, len(rows)+2)
+	for i, row := range rows {
+		if i == 0 {
+			out = append(out, theme.System.Render(marker)+" "+headStyle.Render(row))
+			continue
+		}
+		out = append(out, "  "+headStyle.Render(row))
+	}
+
+	// The body is the checkpoint itself, indented under the header. Argument lines
+	// are deliberately not rendered: a context block's only "argument" is the note
+	// that is already spelled out in full in the header, and repeating it as
+	// "note: …" on expansion was pure duplication.
+	//
+	// A failed compaction has no checkpoint to show: the body is the reason the
+	// summarization did not happen, and the requirement is that the operator still
+	// learns it — in the warn color, since it is the one thing worth reading there.
+	bodyWidth := width - 2
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	if c.markdownBody() {
+		out = append(out, c.contextMarkdownRows(theme, bodyWidth)...)
+		return strings.Join(out, "\n")
+	}
+	for _, ln := range c.responseLines() {
+		style := cardLineStyle(theme, ln.kind)
+		if c.state == cardWarn {
+			style = theme.Warn
+		}
+		for _, row := range strings.Split(WrapToWidth(ln.text, bodyWidth), "\n") {
+			out = append(out, style.Render("  "+row))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// markdownBody reports whether the body is authored Markdown rather than tool
+// output. Only a successful compaction checkpoint is: the summarizer writes it in
+// its fixed Markdown shape (## Goal … ## Critical Context, bullets, fenced
+// commands), and drawn as plain text the markers were shown literally — "## Goal"
+// and "**done**" instead of a heading and bold text, which made the one block an
+// operator reads to judge a compaction harder to skim than the model's own reply,
+// rendered as Markdown in the same transcript. A failed compaction is excluded: its
+// body is a single error sentence whose whole job is to appear in the warn color.
+func (c toolCard) markdownBody() bool {
+	return c.context && c.toolFamily() == compactionCardName && c.state != cardWarn
+}
+
+// contextMarkdownRows renders the checkpoint as Markdown, indents it under the
+// header and applies the block's line budget: the head while collapsed (the
+// leading Goal/Constraints/Progress sections are what a reader checks) and the
+// card's ceiling once expanded, with the same "N lines omitted" note the plain
+// path shows.
+//
+// The rows are indented rather than wrapped in a style: glamour's output carries
+// its own colors and WrapToWidth would count those escapes as columns. Budgeting
+// happens after rendering, because a Markdown rewrite changes how many rows the
+// source occupies.
+func (c toolCard) contextMarkdownRows(theme Theme, width int) []string {
+	rows := markdownRows(c.body, width)
+	limit := c.previewBudget()
+	if c.expanded {
+		limit = c.expandedBudget()
+	}
+	clamped, hidden := clampStrings(rows, limit, false)
+	out := make([]string, 0, len(clamped)+1)
+	for _, row := range clamped {
+		out = append(out, "  "+row)
+	}
+	if hidden > 0 {
+		out = append(out, theme.System.Render("  "+c.hiddenHint(hidden)))
+	}
+	return out
+}
+
+// contextHeader names a context block: the block's own label without the card's
+// tool framing. A compaction is reported as "context compacted" — the same words
+// the REPL and the pre-card TUI used for the event, which is what makes the line
+// readable as a statement about the conversation rather than a tool name.
+func (c toolCard) contextHeader() string {
+	if c.toolFamily() == compactionCardName {
+		return "context compacted"
+	}
+	return c.displayName()
 }
 
 // headerLines renders the card's title rows: the expand marker, the status glyph and

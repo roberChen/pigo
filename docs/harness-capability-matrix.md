@@ -155,7 +155,7 @@ steering 的触发/来源较薄；无标准化的运行时中断—引导 UX。
 
 - **事件流** —— `internal/agentcore/event.go`：10 种 `AgentEvent`（`agent_start/end`、`turn_start/end`、`message_start/update/end`、`tool_execution_start/update/end`）+ `CompactionEvent`（含 `TokensBefore` / `TokensAfter` / `SummarizedCount` / `KeptCount` / `ErrorMessage`，以及 `Summary`——这次写出的检查点正文，也就是压缩后模型每轮真正携带的那份文本）。
 - **导出途径** —— `internal/runtime/headless.go`：stream-json 模式把每个事件序列化输出（`CompactionEvent` 导出 `tokensBefore` / `tokensAfter` / `summary` 等字段）；plugin `OnEvent` 钩子观察每个事件，`compaction` 负载同样带 `summary`。
-- **压缩报告** —— 同一份 `Summary` 在三个前端可见，不必打开 `checkpoint.md`：TUI 渲染成压缩卡片（`internal/cli/tui/compactioncard.go`，表头为 token/消息计数，正文为检查点全文，可折叠展开；`/resume` 重放与 `/rebuild` 复用同一张卡片），REPL 打印计数行 + 缩进的正文预览（`internal/cli/ui/compactionrender.go`，上限 30 行并提示剩余行数）。
+- **压缩报告** —— 同一份 `Summary` 在三个前端可见，不必打开 `checkpoint.md`：TUI 渲染成无边框的**上下文块**（`internal/cli/tui/compactioncard.go`，表头为 token/消息计数，正文为检查点全文并**按 Markdown 渲染**——与助手回复同一套 glamour 渲染，先渲染再按行预算截断，可折叠展开；`/resume` 重放与 `/rebuild` 复用同一张卡片），REPL 打印计数行 + 缩进的正文预览（`internal/cli/ui/compactionrender.go`，上限 30 行并提示剩余行数）。卡片 id 是 transcript 条目的身份：重放检查点走 `compaction-replay-<n>` 独立命名空间，`revealCard` 按卡片指针而非 id 字符串定位，因此展开/点击不会跳到另一张卡片。
 - **token 计量** —— `agentcore.Usage{InputTokens, OutputTokens}`（`message.go`）挂在 assistant 消息上。
 
 ### 缺口

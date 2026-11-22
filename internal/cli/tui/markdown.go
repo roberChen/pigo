@@ -85,6 +85,12 @@ func rendererFor(width int) *glamour.TermRenderer {
 	return r
 }
 
+// markdownStyled reports whether Markdown is rendered with styling. It mirrors
+// ui.Enabled — interactive stdout, NO_COLOR unset — but is a package variable so a
+// test can exercise the styled path: a test binary's stdout is a pipe, so the
+// default would leave every Markdown assertion looking at raw source.
+var markdownStyled = ui.Enabled
+
 // renderMarkdown returns src rendered as styled terminal Markdown wrapped to
 // width columns. It is gated exactly like the REPL's renderer: when output is
 // not an interactive terminal (pipes, tests) the raw source is returned so
@@ -93,7 +99,7 @@ func rendererFor(width int) *glamour.TermRenderer {
 // trailing newline glamour appends is trimmed so the block joins cleanly with
 // its neighbors in the transcript.
 func renderMarkdown(src string, width int) string {
-	if !ui.Enabled() {
+	if !markdownStyled() {
 		return src
 	}
 	if strings.TrimSpace(src) == "" {
@@ -119,4 +125,24 @@ func renderMarkdown(src string, width int) string {
 		trimmed = ansi.Hardwrap(trimmed, width, false)
 	}
 	return trimmed
+}
+
+// markdownRows renders src as Markdown at width and returns it one laid-out row
+// per element, so a caller that budgets rows (a collapsible block) can count them
+// after the Markdown rewrite rather than before it.
+//
+// renderMarkdown already hard-wraps the styled output, but its degraded path
+// returns the source untouched — and the caller's column is still a hard limit, so
+// an unstyled result is wrapped here as plain text. WrapToWidth counts escape
+// sequences as columns and so cannot be applied to glamour's output; the fallback
+// result carries none.
+func markdownRows(src string, width int) []string {
+	if strings.TrimSpace(src) == "" {
+		return nil
+	}
+	out := renderMarkdown(src, width)
+	if out == src {
+		out = WrapToWidth(src, width)
+	}
+	return strings.Split(strings.TrimRight(out, "\n"), "\n")
 }

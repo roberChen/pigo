@@ -95,6 +95,27 @@ interactive REPL/TUI.
   typically an informative head, a long uninteresting middle and an informative
   tail. It now keeps both ends and drops the middle, cutting on rune and line
   boundaries so CJK/emoji input cannot become invalid UTF-8 or stop mid-line.
+- **A compaction checkpoint now reads as conversation, not as a tool result.**
+  The TUI drew the checkpoint as a bordered tool card, which is the transcript's
+  mark for "a tool ran and here is what it returned" — the wrong claim about text
+  that is now part of the conversation, carrying the place of the turns it
+  replaced. It renders borderless instead, a header line (`context compacted
+  40,000 → 6,000 tokens · summarized 9 · kept 2`, still expandable with `Ctrl+O`
+  or a click) over a body indented beneath it, the same shape as a user turn or
+  a thinking block. A failed compaction keeps the same shape and reports the
+  reason in the warn color, because the operator still has to learn that the
+  context was not summarized. The card's note no longer repeats itself on
+  expansion, and a header longer than the width wraps under the gutter instead
+  of continuing at column zero where it would read as a new block.
+- **A checkpoint is rendered as Markdown.** The summarizer writes a fixed Markdown
+  shape (`## Goal` … `## Critical Context`, bullets, fenced commands), and the
+  block drew that source literally — `## Goal` and `**done**` on screen — for the
+  one block an operator reads to judge what a compaction kept. It now goes through
+  the same renderer as an assistant reply (headings, bullets, code blocks), still
+  indented under its header and still budgeted: the rewrite happens first and the
+  row budget applies to the laid-out rows, with the same "N lines omitted · Ctrl+O"
+  note. Tool output is deliberately left alone — it is not Markdown.
+
 - **The summarization prompts now say what the summary is for.** Compaction's
   output replaces the messages it was written from; a prompt that reads like
   "write a note about this conversation" produces exactly the omissions that make

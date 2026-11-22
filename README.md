@@ -622,7 +622,7 @@ fmt.Println(reply)
 
 **压缩结果直接看得见。** `compaction` 事件除了 token 与消息计数，还带着这次写出的**检查点正文**（`Summary`），三个前端都据此把"模型现在到底拿的是什么"摊开给你看，不必再去翻 `checkpoint.md`：
 
-- TUI：压缩点渲染成一张工具风格的卡片，表头是 `40,000 → 6,000 tokens · summarized 9 · kept 2`，正文是检查点全文（与普通工具输出一样折叠、`Ctrl+O` 或点击展开）；`/resume` 重放历史时也显示同一张卡片，`/rebuild` 成功后同样补一张，指向它重排出的检查点。压缩失败则是一张 warn 卡片，写明原因并注明上下文未改动。
+- TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个，指向它重排出的检查点。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动。
 - REPL：`Compacting conversation…` 之后打印 `compacted: 90000 → 12000 tokens, summarized 14 messages, kept 3`，其下缩进显示检查点正文（默认最多 30 行，超出提示剩余行数与文件位置）；`/compact`、`/rebuild` 打印同一份格式。失败时打印 `compaction failed: … (context left unchanged)`。
 - `stream-json`：`compaction` 事件多一个 `summary` 字段（检查点正文，为空时省略），CI 或日志管线可以直接归档；plugin `OnEvent` 收到的 `compaction` 负载同样带 `summary`。
 
