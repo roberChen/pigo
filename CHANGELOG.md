@@ -66,6 +66,46 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Changed
+- **Streaming a long answer no longer slows down as the answer grows.** The TUI
+  used to re-lay out the whole transcript on every streamed delta: the streaming
+  block was re-wrapped and re-styled from scratch, every block above it was
+  re-split and re-joined, and the viewport re-measured the result. That made one
+  delta cost O(history + answer) — a half-hour conversation with a 64 KiB answer
+  spent milliseconds per delta, and the cost grew quadratically over the answer
+  itself. Both halves are now incremental. The live block is wrapped by a cursor
+  (`streamwrap.go`) that keeps the rows it has already closed and only re-wraps
+  and re-styles the single row new text lands in, so a delta costs O(delta); the
+  text is appended into a growing buffer instead of being re-concatenated. The
+  transcript splices its assembled rows from the first changed block on
+  (`assemble`), so blocks above the live one are skipped without being rendered,
+  split or joined again. `ContentToText` returns a single text block by reference
+  rather than copying the accumulated answer on each delta. Measured on the
+  in-repo benchmark, one delta into a 64 KiB answer went from ~23 µs to ~3 µs and
+  is now flat in the answer's length; a delta into a 400-block transcript no
+  longer touches the history at all. Correctness is pinned by tests that compare
+  the incremental rows against the whole-block render after *every* delta —
+  including CJK/emoji, hard newlines, exact wrap boundaries, control bytes and a
+  mid-stream width change — and by a painted-frame comparison, since the
+  incremental path styles row by row and relies on the window's padding.
+- **The reasoning block is incremental too, and it was the worse of the two.**
+  A thinking block is capped for display (six rows, four hundred when expanded),
+  but every reasoning update re-wrapped, re-styled and re-split the *entire* chain
+  of thought before throwing all but the last few rows away — and reasoning
+  routinely runs to tens of thousands of bytes, far more often than an answer does.
+  The block now uses the same stream cursor as the answer: an update (the provider
+  resends the whole partial) ingests only the suffix past what the cursor has seen,
+  and the cursor wraps only that suffix, keeping every row it has already closed.
+  The header, the "… N earlier lines" note and the indent are laid over the tail at
+  emit time, so a delta costs the handful of rows actually drawn rather than the
+  whole text. One update went from ~22 µs at 2 KiB, ~78 µs at 16 KiB and ~235 µs at
+  64 KiB to a flat ~12 µs at every size, with per-update allocations down from up
+  to 300 KB to ~3 KB. Expanding or collapsing a block mid-stream now only changes
+  which rows of the tail are shown, and a width change still re-wraps the whole
+  text, which is why the cursor distinguishes the two. Equivalence is pinned the
+  same way as the answer's: the incremental rows are compared against the
+  whole-block render after every partial, including hard newlines (a partial
+  commonly ends on one), blank rows, CJK and emoji, control bytes, and a width
+  change in the middle of the stream.
 - **Every commit and PR now runs a real ten-minute soak, not just a smoke.** The
   twenty-second `longstay` smokes prove the multi-client path is wired up, but the
   failures that hurt — reconnects racing a takeover, a compaction pass that drops
@@ -99,6 +139,14 @@ interactive REPL/TUI.
   turned the reporting step red.
 
 ### Fixed
+- **A streamed chunk that splits a multi-byte character no longer leaves a
+  replacement character on screen.** Providers split their stream on byte offsets,
+  not rune boundaries, so with any CJK or emoji text a delta can end in the middle
+  of a rune. The streaming cursor decoded that tail as a lone byte, wrote U+FFFD
+  into an already-closed row, and nothing re-decoded it — so the answer (or the
+  reasoning) kept the replacement character for the rest of the turn and settled
+  into a different layout than the same text rendered whole. An incomplete trailing
+  sequence now stays pending in the cursor until the rest of it arrives.
 - **A finished prompt leaves the session idle.** The host cleared the
   "running" flag in a deferred cleanup *after* it sent the prompt result, so a
   client that reacted to the result — the next turn, a `/compact`, a close — could

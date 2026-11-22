@@ -501,15 +501,15 @@ REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`
 
 "输出怎么越来越慢" 通常不是模型的问题，而是**历史长度**的问题：每来一个流式增量，TUI 都要重排整个 transcript。为了能定位而不是猜，pigo 在热路径上无条件记录各阶段耗时（`internal/perf`，每次记录只是一次 map 查表加几个计数器，被测量的阶段本身都是毫秒级），随时用 `/perf` 查看：
 
-- **阶段表**：`stream.ttft`（发出请求到第一个分片，含请求组装）、`stream.gap`（分片之间的停顿）、`stream.turn`（首个分片到 turn 结束，字节数即吞吐）、`drain.concat` / `drain.on_text`（delta 记账与交给前端的时间）、`tui.update` / `tui.view`（每帧 Update/View，帧预算的直接占用者）、`tui.reflow`（拆成 `tui.render_all` 与 `tui.viewport_set`，后者按整篇 transcript 的行数计费），`tui.block_render`（缓存未命中的 Markdown 渲染）、`tui.bridge.send_wait`（run goroutine 被 UI 反压阻塞的时间，直接说明"UI 跟不上流"）、`llm.build_request` / `context.estimate` / `session.append`（每轮一次、随历史线性增长的固定开销）。表里给出 calls / total / mean / p95 / max / bytes，并标出占测量时间最多的 hotspot。
-- **怎么读**：`stream.*` 高 = provider 或网络；`tui.bridge.send_wait` 总量大 = UI 是瓶颈，模型早就发完了；只有 `context.estimate` / `session.append` 高而 `stream.*` 正常 = 每轮固定开销。`tui.reflow` 的 mean 随 `transcript.bytes` 一起长 = 历史渲染开销。命令末尾会附这段说明。
+- **阶段表**：`stream.ttft`（发出请求到第一个分片，含请求组装）、`stream.gap`（分片之间的停顿）、`stream.turn`（首个分片到 turn 结束，字节数即吞吐）、`drain.concat` / `drain.on_text`（delta 记账与交给前端的时间）、`tui.update` / `tui.view`（每帧 Update/View，帧预算的直接占用者）、`tui.reflow`（拆成 `tui.render_all` 与 `tui.viewport_set`；两者都应又小又平——每个 delta 只重排正在流式输出的那一段的新文本、只从该块起重新拼接行，窗口本身既不拷贝也不测量），`tui.block_render`（缓存未命中的 Markdown 渲染）、`tui.bridge.send_wait`（run goroutine 被 UI 反压阻塞的时间，直接说明"UI 跟不上流"）、`llm.build_request` / `context.estimate` / `session.append`（每轮一次、随历史线性增长的固定开销）。表里给出 calls / total / mean / p95 / max / bytes，并标出占测量时间最多的 hotspot。
+- **怎么读**：`stream.*` 高 = provider 或网络；`tui.bridge.send_wait` 总量大 = UI 是瓶颈，模型早就发完了；只有 `context.estimate` / `session.append` 高而 `stream.*` 正常 = 每轮固定开销。`tui.reflow` 的 mean 本应与 `transcript.bytes` **无关**：若它随历史一起长，说明布局被整篇重算了（宽度变化、滚动条列的出现/消失，或某次让缓存失效的重载），而不是正常的每 delta 路径。命令末尾会附这段说明。
 - **报告之外**：`/perf reset` 清零计数器（复现同一条慢提问前先清零，读数才干净）；`PIGO_PERF=1` 让每次 run 结束输出一行汇总（走诊断通道，不污染 `-p` / `stream-json` 的 stdout），`PIGO_PERF_LOG=<path>`（与 `PIGO_PERF` 一起设置时）把每轮完整报告作为一行 JSON 追加，方便在长稳或基准里逐轮 diff 而不必解析人类格式。
 
 ### TUI 显示与工具卡
 
 - **常驻且实时的上下文用量块**：状态栏右侧的琥珀色 `◔` 块永远在，不会再等到第一次 run 结束才出现——尚无测量时显示 `◔ --`，有了数据后显示 `◔ 12,345 (9%)`。它在整轮对话中连续更新：按下回车时就把提问计入，回答流式输出时随之增长，每个 turn 结束按 provider 上报的 usage 校正（无 usage 时按字符估算），压缩完成时立即回落到循环上报的压缩后 token 数（`compaction` 事件现在带有 `tokensAfter`），run 结束时再用遥测汇总对齐，`/rebuild`、`/resume`、`/new` 之后从新会话的上下文重新播种。切换模型会沿用已测量的 token 数、更换窗口预算。所有更新都走桥接事件里的副本值，绝不从 tea goroutine 读 pump goroutine 正在写的上下文，因此没有数据竞争。
 - **用户输入有标记**：每条人类输入带 `▌ you` 侧栏，换行后每一行都保留侧栏，不会和模型输出混在一起；**超长输入（例如粘贴整个文件）完整展开显示**，不再截断为前若干行、也不再出现 `… N more lines` 提示——人自己刚输入的内容永远整段可见。
-- **思考内容**：推理模型的思考流以暗色 `✻ thinking` 块显示在回答上方，默认只显示**最新的 6 行**（`… N earlier lines · click to expand` 标注上面省略了多少行），流式输出时始终停在模型此刻的思路上，不会挤占回答；点击该块的任意一行即可展开整段思考（展开后最多 400 行，超出提示用 `/export` 取全文），再点一次收起。
+- **思考内容**：推理模型的思考流以暗色 `✻ thinking` 块显示在回答上方（增量重排：每次更新只处理新增的那一段，不重排整条思考），默认只显示**最新的 6 行**（`… N earlier lines · click to expand` 标注上面省略了多少行），流式输出时始终停在模型此刻的思路上，不会挤占回答；点击该块的任意一行即可展开整段思考（展开后最多 400 行，超出提示用 `/export` 取全文），再点一次收起。
 - **工具卡按工具渲染**：`bash` 头部是命令、输出保留**开头与结尾**（中间省略，失败日志的结尾才是有用信息）；`read`/`write`/`edit` 头部是路径、只列 offset/limit 等额外参数、改动以彩色 diff 区块展示；`grep`/`find` 头部是 pattern；`webfetch`/`websearch` 是 url/query；`todo` 渲染成 `[x]/[~]/[ ]` 清单 + `1/3 completed`；**MCP 工具**只显示 `mcp server/tool`、单行参数摘要与结果预览，不再整段打印 JSON 与全文；未知/插件工具同样精简。
 - **长内容限行**：除用户输入外，每个区块都有行数预算，超出时以 `… N more lines · Ctrl+O` 标注（展开后仍有上限，可用 `/export` 取全文）。子 Agent（`task`）卡片的展开上限单独收紧到 40 行并提示去子 Agent 的会话里看完整报告——报告本身就是子 Agent 的整段对话，全倒进主会话会淹没你自己的提问。
 - **展开即完整入参**：展开一张工具卡时，会把它收到的参数完整列出——每个键都在（包括头部那行已被截断/压平的 `command`、`path`、`prompt` 等），值不再按折叠时的列数截断，多行脚本与文件内容保留换行；MCP 卡也会从一行 JSON 摘要展开成逐键列出。参数超过 400 行时仍以 `… N more argument lines (see /export)` 收尾，避免一次写入巨型文件把整帧拖慢。

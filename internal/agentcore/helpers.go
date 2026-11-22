@@ -10,7 +10,39 @@ import (
 // the lowest-common-denominator representation accepted by every OpenAI-
 // compatible gateway. Non-text blocks (thinking, tool calls) are surfaced
 // through their own fields, so they are skipped here.
+//
+// The single-text-block case returns the block's string directly. That case is
+// the streaming hot path — a decoder accumulates one text block and every
+// MessageUpdateEvent re-flattens it — so copying the answer on each delta would
+// make the accounting quadratic in the answer's length for no benefit. The
+// caller only ever appends to or slices the result, so aliasing it is safe;
+// callers that hand it out as a fresh string should copy (none do today).
 func ContentToText(list ContentList) string {
+	if len(list) == 1 {
+		if tc, ok := list[0].(TextContent); ok {
+			return tc.Text
+		}
+		return ""
+	}
+	// Most mixed lists still hold exactly one text block (text plus a tool call or
+	// a thinking block), so this avoids the builder for them as well.
+	var only string
+	n := 0
+	for _, c := range list {
+		if tc, ok := c.(TextContent); ok {
+			n++
+			if n > 1 {
+				break
+			}
+			only = tc.Text
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return only
+	}
 	var b strings.Builder
 	for _, c := range list {
 		if tc, ok := c.(TextContent); ok {

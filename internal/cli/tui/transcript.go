@@ -3,22 +3,23 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/perf"
 )
 
 // This file implements the scrolling transcript region of the full-screen TUI
-// (US-005, SPEC 5.1 transcript, FR-5/FR-10). The transcript owns a
-// viewport.Model and an ordered list of rendered blocks (user / assistant /
-// system turns). Streaming assistant text arrives as textDeltaMsg values that
-// append to the current assistant block; turnEndMsg finalizes it. Content is
-// re-flowed through the viewport with theme.WrapToWidth at the live width so CJK
-// and emoji never split mid-rune. Tool cards are a later node (#389); this file
-// leaves a clean seam (system lines) without building cards.
+// (US-005, SPEC 5.1 transcript, FR-5/FR-10). The transcript owns a line window
+// (lines.go) over an ordered list of rendered blocks (user / assistant / system
+// turns). Streaming assistant text arrives as textDeltaMsg values that append to
+// the current assistant block; turnEndMsg finalizes it. Content is re-flowed
+// with theme.WrapToWidth at the live width so CJK and emoji never split mid-rune.
+// Tool cards are a later node (#389); this file leaves a clean seam (system
+// lines) without building cards.
 
 // blockRole distinguishes the three transcript block kinds so each renders with
 // its own theme style.
@@ -57,6 +58,15 @@ const (
 // rendered from (see renderRev). renderHeight is the cached row count of that
 // render, so the row arithmetic behind clicks and the paint map never has to
 // re-scan a long transcript.
+//
+// renderRows is that same render already split into display rows — the form the
+// transcript's line window consumes — so re-assembling the log after a streamed
+// delta re-uses rows instead of re-splitting (and re-measuring) the whole
+// conversation. renderRowsFrom records the rendered string the rows came from, so
+// a render swapped in from outside the cache (a test replacing `rendered`) still
+// invalidates them. stream is the incremental wrap state of a block that is still
+// streaming: it lets an appended delta re-wrap only the open row rather than the
+// whole answer (see streamwrap.go).
 type transcriptBlock struct {
 	role     blockRole
 	text     string
@@ -64,19 +74,37 @@ type transcriptBlock struct {
 	id       string // roleThinking blocks only: the id a click targets
 	expanded bool   // roleThinking blocks only: show the whole chain of thought
 
-	rendered     string
-	renderWidth  int
-	renderRev    int
-	renderHeight int
-	renderOK     bool
+	rendered       string
+	renderRows     []string
+	renderRowsFrom string
+	renderWidth    int
+	renderRev      int
+	renderHeight   int
+	renderOK       bool
+	stream         streamRender
+
+	// placed* record what the transcript's assembled row log holds for this
+	// block, so a reflow can tell which blocks still describe their rows and
+	// which have to be spliced again: placedWidth is the content width the rows
+	// were laid out at, placedRev the revision they were rendered from (a tool
+	// card's rev), placedRenderLen the byte length of that render, placedStreaming
+	// whether the block was mid-stream, and placedTextLen how much text the stream
+	// cursor had consumed when they were placed. See rowsCurrent for how these
+	// combine with renderOK.
+	placedWidth     int
+	placedRev       int
+	placedRenderLen int
+	placedStreaming bool
+	placedTextLen   int
+	placedExpanded  bool // the thinking block's expand state when its rows were placed
 }
 
-// transcript is the scrolling message log. It wraps a viewport.Model and keeps
-// the source blocks so it can re-flow on width changes. activeAssistant indexes
-// the assistant block currently receiving streaming deltas, or -1 when no turn
-// is streaming.
+// transcript is the scrolling message log. It wraps a line window and keeps the
+// source blocks so it can re-flow on width changes. activeAssistant indexes the
+// assistant block currently receiving streaming deltas, or -1 when no turn is
+// streaming.
 type transcript struct {
-	vp    viewport.Model
+	vp    lineWindow
 	theme Theme
 
 	// totalWidth is the full width the transcript may occupy (terminal columns
@@ -130,6 +158,22 @@ type transcript struct {
 	// Blocks are only ever appended, so an id stays unique and stable for the life
 	// of the transcript.
 	thinkSeq int
+
+	// rows is the assembled log: every block already rendered, split into display
+	// rows, with the blank separators a new user turn gets. It is what the line
+	// window draws, and it is spliced rather than rebuilt: rowStart[i] is the index
+	// of block i's first row, so a change to block i truncates the log at
+	// rowStart[i] and re-appends only from there. A streamed delta into the last
+	// block therefore touches one block's rows, not the conversation's. rowBytes
+	// is the cumulative rendered byte size through block i, so the splice can
+	// resume the total in O(1) instead of re-walking the log; rowsWidth is the
+	// width the rows were laid out at, and a change to it invalidates every row
+	// (wrapping changes) and forces a rebuild.
+	rows      []string
+	rowStart  []int
+	rowBytes  []int
+	bytes     int
+	rowsWidth int
 }
 
 // paintRows is the row → clickable-block map of one painted frame: targets[y] is
@@ -148,9 +192,8 @@ type rowTarget struct {
 // newTranscript builds an empty transcript with the given theme. The viewport
 // starts zero-sized; the model drives setSize from the first tea.WindowSizeMsg.
 func newTranscript(theme Theme) transcript {
-	vp := viewport.New()
 	return transcript{
-		vp:              vp,
+		vp:              lineWindow{},
 		theme:           theme,
 		activeAssistant: -1,
 		activeThinking:  -1,
@@ -190,6 +233,7 @@ func (t *transcript) setSize(width, height int) {
 func (t *transcript) invalidateRenders() {
 	for i := range t.blocks {
 		t.blocks[i].renderOK = false
+		t.blocks[i].stream.rewrap()
 	}
 }
 
@@ -201,37 +245,58 @@ func (t *transcript) invalidateRenders() {
 // accumulate off-screen and look like nothing happened. Subsequent streaming
 // deltas keep the bottom via follow, which the user can pause by scrolling up.
 func (t *transcript) addUser(text string) {
+	// A turn can be abandoned mid-stream (Ctrl-C between deltas), so a live block
+	// may still be holding its text in its cursor. Publishing it here keeps the
+	// transcript truthful instead of leaving a block whose body was never copied
+	// back and therefore renders empty.
+	t.closeStreaming()
 	t.blocks = append(t.blocks, transcriptBlock{role: roleUser, text: text})
-	t.activeAssistant = -1
-	t.activeThinking = -1
 	t.follow = true
 	t.reflow()
 }
 
+// closeStreaming hands each live block's accumulated text back to the block and
+// drops its cursor, so the block falls back to a normal cached render. It is for a
+// stream that is being abandoned rather than finalized (a new prompt arriving);
+// finalizeTurn keeps its own copy because it prefers the text in the turn's final
+// message over the accumulated deltas.
+func (t *transcript) closeStreaming() {
+	if t.activeAssistant >= 0 {
+		blk := &t.blocks[t.activeAssistant]
+		blk.text = blk.stream.text()
+		blk.stream.reset()
+		blk.renderOK = false
+		t.activeAssistant = -1
+	}
+	t.endThinking()
+}
+
 // newThinking builds a thinking block with a fresh id, so a click can name the
-// block it toggles after the log has grown past the frame the user clicked.
-func (t *transcript) newThinking(text string) transcriptBlock {
+// block it toggles after the log has grown past the frame the user clicked. The
+// body starts empty: while the block streams, its text lives in the cursor (see
+// setThinking) and only endThinking copies it back.
+func (t *transcript) newThinking() transcriptBlock {
 	t.thinkSeq++
 	return transcriptBlock{
-		role: roleThinking,
-		text: text,
-		id:   fmt.Sprintf("think-%d", t.thinkSeq),
+		role:   roleThinking,
+		id:     fmt.Sprintf("think-%d", t.thinkSeq),
+		stream: streamRender{raw: true},
 	}
 }
 
 // setThinking writes the accumulated reasoning text of the current turn into the
-// streaming thinking block (creating it on the first delta). The provider sends the
-// whole partial each time, so the block is replaced rather than appended to; the
-// rendered view caps it (see renderBlock), so a long chain of thought cannot push
-// the answer off the screen.
+// streaming thinking block (creating it on the first update). The provider resends
+// the whole partial each time, so the cursor ingests only the suffix past what it
+// has already seen — reasoning is otherwise the same problem as the answer: the
+// block is capped for display (see renderThinking) but re-wrapping the entire chain
+// of thought on every update made a long one quadratic, and reasoning runs to tens
+// of thousands of bytes far more often than an answer does.
 func (t *transcript) setThinking(text string) {
 	if t.activeThinking < 0 {
-		t.blocks = append(t.blocks, t.newThinking(text))
+		t.blocks = append(t.blocks, t.newThinking())
 		t.activeThinking = len(t.blocks) - 1
-	} else {
-		t.blocks[t.activeThinking].text = text
-		t.blocks[t.activeThinking].renderOK = false
 	}
+	t.blocks[t.activeThinking].stream.ingest(text)
 	t.reflow()
 }
 
@@ -252,8 +317,17 @@ func (t *transcript) setThinkingExpanded(id string, expanded bool) bool {
 }
 
 // endThinking closes the streaming thinking block. The text stays in the
-// transcript (capped) so the reasoning remains readable after the turn.
+// transcript (capped) so the reasoning remains readable after the turn; it moves
+// from the cursor back into the block, which then renders through the cache like
+// any settled block.
 func (t *transcript) endThinking() {
+	if t.activeThinking < 0 {
+		return
+	}
+	blk := &t.blocks[t.activeThinking]
+	blk.text = blk.stream.text()
+	blk.stream.reset()
+	blk.renderOK = false
 	t.activeThinking = -1
 }
 
@@ -290,8 +364,16 @@ func (t *transcript) appendDelta(delta string) {
 		t.activeAssistant = len(t.blocks) - 1
 	}
 	blk := &t.blocks[t.activeAssistant]
-	blk.text += delta
-	blk.renderOK = false
+	// The cursor owns the streamed text while the turn is live: it appends the
+	// delta into a growing byte buffer (amortized, so a delta costs O(delta) rather
+	// than a copy of the answer) and wraps it at layout time, when reflow has
+	// decided the width. blk.text stays empty until finalizeTurn, which is the one
+	// point that needs the whole string.
+	//
+	// renderOK is deliberately not cleared: the cursor is the live block's render
+	// and stays current, so leaving it set is what lets assemble skip every block
+	// above this one. rowsCurrent compares the cursor's length instead.
+	blk.stream.append(delta)
 	t.reflow()
 }
 
@@ -302,12 +384,20 @@ func (t *transcript) finalizeTurn(msg agentcore.AssistantMessage) {
 	t.endThinking()
 	text := agentcore.ContentToText(msg.Content)
 	if t.activeAssistant >= 0 {
+		blk := &t.blocks[t.activeAssistant]
 		if text != "" {
-			t.blocks[t.activeAssistant].text = text
+			blk.text = text
+		} else {
+			// No authoritative text in the final message (a provider that only
+			// streams deltas): the cursor's buffer is what the user already saw, so
+			// that is the body the Markdown render has to lay out.
+			blk.text = blk.stream.text()
 		}
-		// The streaming block was rendered as plain text; drop that render so the
-		// finalized block is laid out as Markdown on this reflow.
-		t.blocks[t.activeAssistant].renderOK = false
+		// The streaming block was rendered as plain text; drop that render (and the
+		// stream cursor behind it) so the finalized block is laid out as Markdown on
+		// this reflow.
+		blk.renderOK = false
+		blk.stream.reset()
 	} else if text != "" {
 		t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant, text: text})
 	}
@@ -319,8 +409,7 @@ func (t *transcript) finalizeTurn(msg agentcore.AssistantMessage) {
 // PgUp/PgDn/arrow scrolling works, then re-syncs the follow intent: scrolling up
 // off the bottom pauses auto-scroll, and scrolling back to the bottom re-arms it.
 func (t *transcript) update(msg tea.Msg) tea.Cmd {
-	var cmd tea.Cmd
-	t.vp, cmd = t.vp.Update(msg)
+	cmd := t.vp.Update(msg)
 	t.follow = t.vp.AtBottom()
 	return cmd
 }
@@ -563,12 +652,14 @@ func (t transcript) scrollbar() string {
 	return b.String()
 }
 
-// reflow re-renders the blocks to the current width and pushes the joined
-// content into the viewport. When the follow intent is set it snaps to the
-// bottom so new content auto-scrolls; otherwise the offset is preserved so
-// reading history is not interrupted. follow is tracked in update/scrollToRow
-// (user scroll) and addUser (new turn) rather than sampled here, because setSize
-// resizes the viewport before reflow runs and an AtBottom() sample would misread.
+// reflow re-lays the blocks to the current width and hands the rows to the line
+// window. Only the tail that changed is re-assembled (see assemble), so this is
+// cheap on every streamed delta, not just on a resize. When the follow intent is
+// set it snaps to the bottom so new content auto-scrolls; otherwise the offset is
+// preserved so reading history is not interrupted. follow is tracked in
+// update/scrollToRow (user scroll) and addUser (new turn) rather than sampled
+// here, because setSize resizes the viewport before reflow runs and an AtBottom()
+// sample would misread.
 //
 // Width is decided here rather than in setSize so it stays correct as a run
 // streams in new lines (which reach reflow via appendDelta/finalizeTurn, not
@@ -581,6 +672,19 @@ func (t transcript) scrollbar() string {
 // still fits at totalWidth-1 fits at the full width too and the column is
 // released.
 func (t *transcript) reflow() {
+	// reflow runs on every streamed delta and every keystroke. It is no longer the
+	// stage whose cost grows with the transcript: a delta re-wraps only the
+	// streaming block's pending text (streamwrap.go) and re-splices only the rows
+	// from that block on (assemble), so an unchanged conversation costs a pass of
+	// comparisons. /perf's tui.reflow row is still the first place to look when
+	// streaming slows down, but a mean that grows with tui.transcript.bytes now
+	// means a *width* change (which re-wraps every block) or a stale cache, not
+	// the normal per-delta path.
+	start := time.Now()
+	defer func() {
+		perf.Record("tui.reflow", time.Since(start))
+		perf.SetGauge("tui.transcript.blocks", int64(len(t.blocks)))
+	}()
 	if t.narrowed && t.totalWidth > 0 {
 		t.layout(t.totalWidth - 1)
 		if t.vp.TotalLineCount() > t.vp.Height() {
@@ -600,48 +704,230 @@ func (t *transcript) reflow() {
 	}
 }
 
-// layout renders the blocks at width, hands the result to the viewport, and
-// re-arms the follow intent. Callers own the narrowing decision.
+// layout renders the blocks at width, assembles their rows, and hands them to
+// the line window. Callers own the narrowing decision.
+//
+// The stages are measured separately because they fail differently: rows_assemble
+// is per-block work (a stale block re-renders; a placed block is a cache hit),
+// and viewport_set is the hand-off to the window, which copies no rows, splits no
+// strings and measures no widths.
 func (t *transcript) layout(width int) {
+	layoutStart := time.Now()
 	t.width = width
 	t.vp.SetWidth(width)
-	t.vp.SetContent(t.renderAll())
+
+	setStart := time.Now()
+	t.assemble(width)
+	t.vp.SetLines(t.rows)
+	perf.RecordN("tui.render_all", time.Since(setStart), t.bytes)
+	perf.RecordN("tui.viewport_set", 0, t.bytes)
+	perf.SetGauge("tui.transcript.bytes", int64(t.bytes))
+	perf.SetGauge("tui.transcript.rows", int64(len(t.rows)))
+
 	if t.follow {
 		t.vp.GotoBottom()
 	}
+	perf.Record("tui.layout", time.Since(layoutStart))
 }
 
-// renderAll joins every block, rendered to the current content width, into the
-// transcript body string. Consecutive turns are separated by a blank line before
-// a new user turn so requests read as visually distinct.
-func (t *transcript) renderAll() string {
-	var b strings.Builder
+// assemble brings t.rows up to date with the blocks at the current width.
+//
+// Only the tail that actually changed is rebuilt: each block records what its
+// placed rows were laid out from (placedWidth/placedRev, plus placedStreaming and
+// placedTextLen while it is still streaming), so the first block whose rows no
+// longer describe it marks the splice point. Everything before it keeps its rows
+// — the log is truncated there and re-appended from that block on. A streamed
+// delta lands in the last block, so a delta costs one block's rows instead of the
+// whole conversation's, and a reflow with nothing changed (a keystroke, a
+// repaint, a spinner tick) costs one pass of integer comparisons.
+//
+// A width change invalidates every row (the wrapping changes) and a shrunken
+// block list means the tail no longer exists; either forces a full rebuild.
+func (t *transcript) assemble(width int) {
+	if t.rowsWidth != width || len(t.rowStart) > len(t.blocks) {
+		t.resetRows()
+	}
+	t.rowsWidth = width
+
+	from := len(t.blocks) // the splice point; len(blocks) means "nothing to do"
 	for i := range t.blocks {
-		if i > 0 {
-			b.WriteByte('\n')
-			if t.blocks[i].role == roleUser {
-				b.WriteByte('\n')
+		if !t.rowsCurrent(i) {
+			from = i
+			break
+		}
+	}
+	if from == len(t.blocks) && len(t.rowStart) == len(t.blocks) {
+		return // every block is placed: the rows are current
+	}
+
+	// Truncate the log at the splice point, dropping block `from`'s own separator
+	// row too (it precedes the block's first row and is re-emitted below). Then
+	// resume the byte total from the block before it.
+	total := 0
+	if from < len(t.rowStart) {
+		cut := t.rowStart[from] - t.separatorRows(from)
+		t.rows = t.rows[:cut]
+		t.rowStart = t.rowStart[:from]
+		t.rowBytes = t.rowBytes[:from]
+	}
+	if from > 0 && from-1 < len(t.rowBytes) {
+		total = t.rowBytes[from-1]
+	}
+
+	for i := from; i < len(t.blocks); i++ {
+		blk := &t.blocks[i]
+		rows := t.blockRows(i) // refreshes the render / advances the stream cursor
+		if sep := t.separatorRows(i); sep > 0 {
+			for j := 0; j < sep; j++ {
+				t.rows = append(t.rows, "")
 			}
 		}
-		b.WriteString(t.blockView(i))
+		t.rowStart = append(t.rowStart, len(t.rows))
+		t.rows = append(t.rows, rows...)
+		for _, row := range rows {
+			total += len(row)
+		}
+		t.rowBytes = append(t.rowBytes, total)
+		blk.placedWidth = t.width
+		blk.placedRev = t.renderRev(i)
+		blk.placedRenderLen = len(blk.rendered)
+		blk.placedStreaming = i == t.activeAssistant || i == t.activeThinking
+		blk.placedExpanded = blk.expanded
+		blk.placedTextLen = len(blk.text)
+		if blk.placedStreaming {
+			blk.placedTextLen = blk.stream.len()
+		}
 	}
-	return b.String()
+	t.bytes = total
+}
+
+// resetRows empties the assembled log so the next assemble rebuilds it.
+func (t *transcript) resetRows() {
+	t.rows = t.rows[:0]
+	t.rowStart = t.rowStart[:0]
+	t.rowBytes = t.rowBytes[:0]
+	t.bytes = 0
+}
+
+// rowsCurrent reports whether block i's rows in t.rows still describe its
+// current render, so assemble can skip it. It is a pure comparison — nothing is
+// rendered — because the answer for an unchanged block must cost O(1).
+//
+// Everything here is a comparison, never a render, because the answer for an
+// unchanged block has to cost O(1). A block is invalidated by the content width
+// (wrapping changes), and by its own render: renderOK is cleared whenever the
+// text or the expanded flag changes, the revision catches a tool card mutating
+// in place (toolEndMsg bumps card.rev without touching the block), and the
+// render's byte length catches a render replaced from outside the cache, which
+// the cache cannot see at all.
+//
+// The streaming block is compared by text length instead, because appended
+// deltas deliberately do not clear renderOK: its stream cursor is its render and
+// stays current by construction.
+func (t *transcript) rowsCurrent(i int) bool {
+	if i >= len(t.rowStart) {
+		return false
+	}
+	blk := &t.blocks[i]
+	if blk.placedWidth != t.width {
+		return false
+	}
+	if i == t.activeAssistant || i == t.activeThinking {
+		// The expand flag is part of a thinking block's layout (it selects how many
+		// rows the tail shows), and it does not move the cursor.
+		return blk.placedStreaming && blk.placedTextLen == blk.stream.len() &&
+			blk.placedExpanded == blk.expanded
+	}
+	if blk.placedStreaming {
+		return false // the turn just ended: its plain render no longer applies
+	}
+	return blk.renderOK &&
+		blk.placedRev == t.renderRev(i) &&
+		blk.placedRenderLen == len(blk.rendered)
+}
+
+// blockRows returns block i's display rows, rendered and split.
+//
+// The still-streaming block is rendered incrementally: streamRender keeps the
+// rows it has already closed and only re-wraps and re-styles the row the new
+// text lands in, so a delta costs O(delta) rather than O(answer). Every other
+// block goes through the render cache and keeps its split rows for as long as
+// the rendered string is unchanged.
+func (t *transcript) blockRows(i int) []string {
+	if i < 0 || i >= len(t.blocks) {
+		return nil
+	}
+	blk := &t.blocks[i]
+	if i == t.activeAssistant {
+		rows := blk.stream.sync(t.theme.Assistant, t.width)
+		// The cursor's rows are the block's render: publish them as the cache (so
+		// the height arithmetic reads the same rows the log got) and mark it
+		// current, but leave rendered empty — the joined text is only wanted once
+		// the turn ends, where it goes through the Markdown render anyway.
+		t.publishStreamRows(blk, rows)
+		return rows
+	}
+	if i == t.activeThinking {
+		// Reasoning is laid out against the content width minus the two-column
+		// indent its rows carry, exactly as renderThinking wraps it; the cursor
+		// produces those rows and the header/elision note are laid over them.
+		inner := t.width - 2
+		if inner < 1 {
+			inner = 1
+		}
+		blk.stream.sync(t.theme.System, inner) // raw rows; thinkingRows styles them
+		rows := thinkingRows(t.theme, *blk, blk.stream.trimmed())
+		t.publishStreamRows(blk, rows)
+		return rows
+	}
+	if blk.renderRows != nil && blk.renderOK && blk.renderWidth == t.width &&
+		blk.renderRev == t.renderRev(i) && blk.renderRowsFrom == blk.rendered {
+		return blk.renderRows
+	}
+	out := t.blockView(i)
+	blk.renderRows = strings.Split(out, "\n")
+	blk.renderRowsFrom = out
+	return blk.renderRows
+}
+
+// publishStreamRows records a live block's cursor rows as its cache, so the row
+// arithmetic behind clicks, scrolling and the paint map reads the rows the log
+// actually got. rendered stays empty: the joined text is only wanted once the
+// block settles, and then it is rendered again (Markdown for the answer).
+//
+// renderHeight has to be set here — renderCurrent is true for a live block (its
+// revision is -1 and its width matches), so blockHeight takes the cached height
+// rather than counting the joined rows.
+func (t *transcript) publishStreamRows(blk *transcriptBlock, rows []string) {
+	blk.renderRows = rows
+	blk.rendered = ""
+	blk.renderWidth = t.width
+	blk.renderRev = -1
+	blk.renderHeight = len(rows)
+	blk.renderOK = true
 }
 
 // blockView returns block i's rendered text, reusing its cached render when
-// neither its content nor the content width changed. The still-streaming block
-// is never cached: it changes on every delta and renders as plain text, so a
-// cache there would only add bookkeeping.
+// neither its content nor the content width changed. For the still-streaming
+// block the rows are authoritative and are joined here only for the callers that
+// want text (tests, and the height of a block that is not the streaming one);
+// assemble and the click map go through blockRows and never pay for it.
 func (t *transcript) blockView(i int) string {
 	if i < 0 || i >= len(t.blocks) {
 		return ""
+	}
+	if i == t.activeAssistant || i == t.activeThinking {
+		return strings.Join(t.blockRows(i), "\n")
 	}
 	if t.renderCurrent(i) {
 		return t.blocks[i].rendered
 	}
 	blk := &t.blocks[i]
-	streaming := i == t.activeAssistant
-	out := renderBlock(t.theme, *blk, t.width, streaming)
+	start := time.Now()
+	out := renderBlock(t.theme, *blk, t.width)
+	// Only cache misses are recorded: a hit is a string return, and folding those
+	// into the same stage would drown the glamour/wrap cost this exists to show.
+	perf.RecordN("tui.block_render", time.Since(start), len(out))
 	blk.rendered = out
 	blk.renderWidth = t.width
 	blk.renderRev = t.renderRev(i)
@@ -652,12 +938,12 @@ func (t *transcript) blockView(i int) string {
 
 // renderRev is the revision block i's render is keyed on beyond the content width:
 // the tool card's rev for a card, or -1 while the block is still streaming. A
-// streaming block renders as plain text and is re-styled as Markdown once it ends,
-// so the streaming state is part of the key — otherwise the plain render would
-// outlive the turn. Every text change clears renderOK, so the text itself needs no
-// revision number.
+// streaming block is laid out from its cursor rather than the cache, and it
+// re-renders (as Markdown, for an answer) once it ends, so the streaming state is
+// part of the key — otherwise the streaming rows would outlive the turn. Every
+// text change clears renderOK, so the text itself needs no revision number.
 func (t *transcript) renderRev(i int) int {
-	if i == t.activeAssistant {
+	if i == t.activeAssistant || i == t.activeThinking {
 		return -1
 	}
 	if blk := &t.blocks[i]; blk.card != nil {
@@ -690,13 +976,13 @@ const (
 // renderBlock wraps a block's text to width and applies the role's theme style.
 // Wrapping happens on the raw text (measured in display columns via WrapToWidth)
 // before styling so ANSI escapes never confuse the width math and no double-width
-// rune is split. A finalized assistant block is rendered as Markdown (fix #3,
-// mirroring the REPL's turn-end render); the still-streaming block
-// (streaming==true) stays plain text because Markdown can only be laid out once
-// the whole block is known. A user turn carries a "▌ you" gutter so the human's
-// input is impossible to confuse with model output, and thinking blocks render dim,
-// labeled and capped.
-func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) string {
+// rune is split. An assistant block is rendered as Markdown (fix #3, mirroring the
+// REPL's turn-end render); the blocks that are still streaming never reach here,
+// because Markdown can only be laid out once the whole block is known and their
+// rows come from the stream cursor instead (see blockRows). A user turn carries a
+// "▌ you" gutter so the human's input is impossible to confuse with model output,
+// and thinking blocks render dim, labeled and capped.
+func renderBlock(theme Theme, blk transcriptBlock, width int) string {
 	if blk.role == roleTool && blk.card != nil {
 		return blk.card.render(theme, width)
 	}
@@ -710,9 +996,6 @@ func renderBlock(theme Theme, blk transcriptBlock, width int, streaming bool) st
 	case roleThinking:
 		return renderThinking(theme, blk, width)
 	default:
-		if streaming {
-			return theme.Assistant.Render(WrapToWidth(blk.text, width))
-		}
 		return renderMarkdown(blk.text, width)
 	}
 }
@@ -757,11 +1040,20 @@ func renderThinking(theme Theme, blk transcriptBlock, width int) string {
 		inner = 1
 	}
 	rows := strings.Split(strings.TrimRight(WrapToWidth(blk.text, inner), "\n"), "\n")
+	return strings.Join(thinkingRows(theme, blk, rows), "\n")
+}
+
+// thinkingRows lays a thinking block out over its already-wrapped content rows: the
+// header, the elision note when rows are hidden, then the newest visible rows,
+// indented under the header. content is plain row text — the live block passes the
+// rows its stream cursor produced (see blockRows) and a settled block passes the
+// whole-text render's, so both get the identical header, note, indent and cap.
+func thinkingRows(theme Theme, blk transcriptBlock, content []string) []string {
 	limit := thinkingPreviewLines
 	if blk.expanded {
 		limit = thinkingExpandedLines
 	}
-	truncated := len(rows) > limit
+	truncated := len(content) > limit
 	header := "✻ thinking"
 	if truncated || blk.expanded {
 		header = "▸ thinking"
@@ -769,24 +1061,26 @@ func renderThinking(theme Theme, blk transcriptBlock, width int) string {
 			header = "▾ thinking"
 		}
 	}
-	shown, hidden := rows, 0
+	shown, hidden := content, 0
 	if truncated {
-		shown, hidden = rows[len(rows)-limit:], len(rows)-limit
+		shown, hidden = content[len(content)-limit:], len(content)-limit
 	}
 
-	var b strings.Builder
-	b.WriteString(theme.System.Render(header))
+	out := make([]string, 0, len(shown)+2)
+	out = append(out, theme.System.Render(header))
 	if hidden > 0 {
 		note := fmt.Sprintf("  … %d earlier lines · click to expand", hidden)
 		if blk.expanded {
 			note = fmt.Sprintf("  … %d earlier lines not shown (see /export)", hidden)
 		}
-		b.WriteString("\n" + theme.System.Render(note))
+		out = append(out, theme.System.Render(note))
 	}
+	// The indent is inside the styled span, so the whole row including its leading
+	// blanks is dim: the block reads as one quoted aside under its header.
 	for _, row := range shown {
-		b.WriteString("\n" + theme.System.Render("  "+row))
+		out = append(out, theme.System.Render("  "+row))
 	}
-	return b.String()
+	return out
 }
 
 // blockAtRow maps a transcript content row (0-based, counting from the top of the

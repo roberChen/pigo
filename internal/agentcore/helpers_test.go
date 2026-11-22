@@ -3,6 +3,7 @@ package agentcore
 import (
 	"encoding/json"
 	"testing"
+	"unsafe"
 )
 
 func TestContentToText(t *testing.T) {
@@ -28,6 +29,16 @@ func TestContentToText(t *testing.T) {
 			"only non-text",
 			ContentList{NewThinkingContent("x"), NewImageContent("d", "image/png")},
 			"",
+		},
+		{
+			"one text among non-text",
+			ContentList{NewThinkingContent("x"), NewTextContent("body"), NewToolCallContent("c1", "ls", json.RawMessage(`{}`))},
+			"body",
+		},
+		{
+			"two adjacent text blocks",
+			ContentList{NewTextContent("a"), NewTextContent("b")},
+			"ab",
 		},
 	}
 	for _, tc := range cases {
@@ -137,5 +148,22 @@ func TestRoleAccessors(t *testing.T) {
 	}
 	if got := (ToolResultMessage{}).Role(); got != RoleToolResult {
 		t.Errorf("ToolResultMessage.Role = %q, want %q", got, RoleToolResult)
+	}
+}
+
+// TestContentToTextSingleBlockDoesNotCopy pins the streaming hot path: a single
+// text block is returned by reference, so re-flattening an accumulated message
+// on every delta does not copy the answer. Callers may only append to or slice
+// the result, so the aliasing is deliberate — this test is what documents it.
+func TestContentToTextSingleBlockDoesNotCopy(t *testing.T) {
+	block := NewTextContent("answer so far")
+	got := ContentToText(ContentList{block})
+	if got != block.Text {
+		t.Fatalf("ContentToText = %q, want %q", got, block.Text)
+	}
+	// Same backing array. A copy would satisfy the equality above, so the sharing
+	// has to be checked on the string header.
+	if unsafe.StringData(got) != unsafe.StringData(block.Text) {
+		t.Error("a single text block should be returned without copying")
 	}
 }

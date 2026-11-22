@@ -680,7 +680,9 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 			// dropping that content. It is truncated to its newest rows like a live
 			// block, and clickable to reveal the whole chain of thought.
 			if thinking := agentcore.ThinkingText(msg.Content); thinking != "" {
-				t.blocks = append(t.blocks, t.newThinking(thinking))
+				blk := t.newThinking()
+				blk.text = thinking
+				t.blocks = append(t.blocks, blk)
 			}
 			if text := agentcore.ContentToText(msg.Content); text != "" {
 				t.blocks = append(t.blocks, transcriptBlock{role: roleAssistant, text: text})
