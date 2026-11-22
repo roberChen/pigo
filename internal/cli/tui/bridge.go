@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
 )
@@ -45,10 +47,10 @@ func newEventChan() chan tea.Msg {
 func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime.StreamHandler {
 	return runtime.StreamHandler{
 		OnText: func(delta string) {
-			ch <- textDeltaMsg{delta: delta}
+			sendEvent(ch, textDeltaMsg{delta: delta})
 		},
 		OnTurnEnd: func(msg agentcore.AssistantMessage, results []agentcore.ToolResultMessage) {
-			ch <- turnEndMsg{msg: msg, results: results}
+			sendEvent(ch, turnEndMsg{msg: msg, results: results})
 		},
 		OnEvent: func(ev agentcore.AgentEvent) {
 			// Deliver observer events (plugin notifier, SessionEnd/PreCompact hook)
@@ -63,27 +65,27 @@ func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime
 				if _, ok := e.AssistantMessageEvent.(provider.StreamThinkingEvent); ok {
 					if partial, ok := e.Message.(agentcore.AssistantMessage); ok {
 						if text := agentcore.ThinkingText(partial.Content); text != "" {
-							ch <- thinkingDeltaMsg{text: text}
+							sendEvent(ch, thinkingDeltaMsg{text: text})
 						}
 					}
 				}
 			case agentcore.ToolExecutionStartEvent:
 				input := argsToMap(e.Args)
-				ch <- toolStartMsg{id: e.ToolCallID, name: e.ToolName, input: input, rawArgs: rawToolArgs(e.Args, input)}
+				sendEvent(ch, toolStartMsg{id: e.ToolCallID, name: e.ToolName, input: input, rawArgs: rawToolArgs(e.Args, input)})
 			case agentcore.ToolExecutionUpdateEvent:
-				ch <- toolUpdateMsg{id: e.ToolCallID, partial: agentcore.ContentToText(e.PartialResult.Content)}
+				sendEvent(ch, toolUpdateMsg{id: e.ToolCallID, partial: agentcore.ContentToText(e.PartialResult.Content)})
 			case agentcore.ToolExecutionEndEvent:
-				ch <- toolEndMsg{id: e.ToolCallID, ok: !e.IsError, result: agentcore.ContentToText(e.Result.Content), details: e.Result.Details}
+				sendEvent(ch, toolEndMsg{id: e.ToolCallID, ok: !e.IsError, result: agentcore.ContentToText(e.Result.Content), details: e.Result.Details})
 			case agentcore.SubAgentProgressEvent:
-				ch <- subagentProgressMsg{id: e.ToolCallID, desc: e.Description, activity: e.Activity, tokens: e.Tokens}
+				sendEvent(ch, subagentProgressMsg{id: e.ToolCallID, desc: e.Description, activity: e.Activity, tokens: e.Tokens})
 			case agentcore.SubAgentEndEvent:
-				ch <- subagentDoneMsg{id: e.ToolCallID}
+				sendEvent(ch, subagentDoneMsg{id: e.ToolCallID})
 			case agentcore.TelemetryEvent:
-				ch <- telemetryMsg{ev: e}
+				sendEvent(ch, telemetryMsg{ev: e})
 			case agentcore.CompactionStartEvent:
-				ch <- compactionStartMsg{}
+				sendEvent(ch, compactionStartMsg{})
 			case agentcore.CompactionEvent:
-				ch <- compactionMsg{ev: e}
+				sendEvent(ch, compactionMsg{ev: e})
 			}
 		},
 	}
@@ -127,7 +129,21 @@ func unmarshalArgsMap(b []byte) map[string]any {
 func pump(ctx context.Context, ch chan tea.Msg, agentCtx *agentcore.AgentContext, cfg runtime.RunConfig, onEvent func(agentcore.AgentEvent)) {
 	stream := runtime.StartRun(ctx, agentCtx, cfg)
 	_, err := runtime.DrainStream(ctx, stream, newStreamHandler(ch, onEvent))
+	// One perf report per user-visible run (never per sub-agent): PIGO_PERF makes
+	// this a diagnostic line in the transcript, PIGO_PERF_LOG appends JSON.
+	perf.RunEnd(cfg.SessionID)
 	ch <- runEndMsg{err: err}
+}
+
+// sendEvent hands one bridge message to the UI goroutine. The send blocks while
+// the UI is behind (the channel is bounded and nothing may be dropped), so the
+// time it takes is the run goroutine's back-pressure wait — the direct measure of
+// "the model is done with this chunk but the TUI has not drawn the last ones".
+// It is recorded on every send, which is cheap next to the send itself.
+func sendEvent(ch chan tea.Msg, msg tea.Msg) {
+	start := time.Now()
+	ch <- msg
+	perf.Record("tui.bridge.send_wait", time.Since(start))
 }
 
 // waitForEvent returns a tea.Cmd that blocks until the next bridge msg arrives.

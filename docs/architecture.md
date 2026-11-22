@@ -24,6 +24,7 @@ internal/trust                目录信任三态
 internal/hooks                用户 shell hooks（9 类事件）
 internal/plugin / pkgmgr / pihost   外部插件、pi 生态包安装、内嵌 Node host
 internal/memory / dream       SQLite + FTS5 持久记忆、LLM 归纳整理
+internal/perf                 热路径阶段耗时/字节数采集（无条件记录，/perf 与 PIGO_PERF 读取）
 internal/remotecontrol        /remote-control：局域网 WebSocket + 内嵌 SPA
 internal/jsonrpc              子进程 JSON-RPC 2.0（MCP / plugin / process 隔离子 agent）
 agent/                        唯一可导入的公开 SDK
@@ -36,6 +37,7 @@ cmd/pigo → internal/cli/{tui,repl,headless,run,hostcmd}
          → internal/hostserver → internal/cli/run → internal/runtime
          → internal/agenttool → internal/provider / internal/compaction
          → internal/agentcore（叶子，依赖极少）
+internal/{runtime,cli/tui,cli/repl,cli/perfcmd,session} → internal/perf（叶子）
 ```
 
 `internal/agentcore` 是最底层：它不认识 provider，也不认识 runtime。任何跨层的“能力”都通过 `agentcore` 的类型（`AgentEvent`、`AgentTool`、`AgentContext`）或函数字段（`BeforeToolCall`、`GetFollowUpMessages`）表达，而不是反向 import。
@@ -52,7 +54,7 @@ final, err := runtime.DrainStream(ctx, stream, handler) // 消费者，永远 dr
 ```
 
 4. loop 内层：流式 assistant 消息 → `agenttool.BatchConfig` 三阶段执行工具（registry 校验 → `BeforeToolCall`/trust/hooks → 执行 → `AfterToolCall`）→ 结果追加 → 继续；无工具调用后由 `GetFollowUpMessages` 决定外层是否再跑。
-5. 每个事件同时经 `StreamHandler.OnEvent` 分发给 UI、plugin notifier、telemetry、hooks。
+5. 每个事件同时经 `StreamHandler.OnEvent` 分发给 UI、plugin notifier、telemetry、hooks。`DrainStream` 顺带把 ttft、分片间隔、每轮吞吐与消费者耗时记进 `internal/perf`（tui 侧记 Update/View/reflow/bridge 背压，loop 侧记请求组装与上下文估算），`/perf` 只负责把这些数字排版出来。
 6. 会话以分支追加方式落盘：`AppendBranch(header, curLeaf, tail)`；压缩后改用 `PersistCompactedContext`。
 
 关键契约：

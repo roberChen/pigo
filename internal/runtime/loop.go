@@ -28,6 +28,7 @@ import (
 	"github.com/roberChen/pigo/internal/agenttool"
 	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/diag"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/provider"
 )
 
@@ -361,13 +362,27 @@ func afterTurn(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunCo
 	// figure. This runs even when auto-compaction is disabled so utilization is
 	// still observable whenever the context window is known.
 	if tel != nil && cfg.ContextWindow > 0 {
-		tokens := compaction.EstimateContextTokens(agentCtx.Messages).Tokens
+		tokens := estimateContextTokens(agentCtx.Messages)
 		tel.recordContext(tokens, cfg.ContextWindow)
 	}
 	if cfg.ShouldStopAfterTurn != nil {
 		return cfg.ShouldStopAfterTurn(ctx, agentCtx)
 	}
 	return false
+}
+
+// estimateContextTokens counts the context's tokens and publishes the size of
+// what the next request will carry (messages, tokens, and — when the caller knows
+// it — the window). The estimate is a full walk over every message, so it is
+// measured per turn: with a long history it is the part of a turn that grows even
+// though the reply is short, and /perf's context.estimate row is where that shows.
+func estimateContextTokens(msgs agentcore.MessageList) int {
+	start := time.Now()
+	tokens := compaction.EstimateContextTokens(msgs).Tokens
+	perf.Record("context.estimate", time.Since(start))
+	perf.SetGauge("context.messages", int64(len(msgs)))
+	perf.SetGauge("context.tokens", int64(tokens))
+	return tokens
 }
 
 // maybeAutoCompact checks whether the context has outgrown its usable window and,
@@ -380,7 +395,7 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 	if !cfg.Compaction.Enabled || cfg.ContextWindow <= 0 {
 		return
 	}
-	before := compaction.EstimateContextTokens(agentCtx.Messages).Tokens
+	before := estimateContextTokens(agentCtx.Messages)
 	// Record pre-compaction utilization so the ratio reflects the peak that
 	// triggered (or nearly triggered) compaction even when the summary is read
 	// mid-run. afterTurn overwrites it with the post-settle figure.

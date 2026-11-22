@@ -30,6 +30,7 @@ import (
 	"github.com/roberChen/pigo/internal/cli/btw"
 	"github.com/roberChen/pigo/internal/cli/goal"
 	"github.com/roberChen/pigo/internal/cli/memstatus"
+	"github.com/roberChen/pigo/internal/cli/perfcmd"
 	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/status"
 	"github.com/roberChen/pigo/internal/cli/ui"
@@ -38,6 +39,7 @@ import (
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/mcp"
 	"github.com/roberChen/pigo/internal/memory"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/plugin"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
@@ -496,6 +498,22 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			status.RunStatus(out, &deps)
 			continue
 		}
+		if line == "/perf" || strings.HasPrefix(line, "/perf ") {
+			// /perf prints the stage timings recorded by internal/perf plus the
+			// live session size they should be read against — state a pure
+			// string→string Action closure cannot see. "/perf reset" clears the
+			// counters afterwards so the next reproduction starts from zero. The
+			// exact-or-space-prefix guard keeps "/performance" from matching.
+			perfcmd.RunPerf(out, perfcmd.Input{
+				SessionID:     deps.header.ID,
+				Model:         deps.live.Model,
+				Provider:      deps.live.ProviderName,
+				Messages:      len(deps.agentCtx.Messages),
+				ContextWindow: deps.live.ContextWindow,
+				Reset:         perfcmd.ResetArg(line),
+			})
+			continue
+		}
 		if line == "/memory" || strings.HasPrefix(line, "/memory ") {
 			// /memory prints the persistent-memory + infinite-context report.
 			// Like /status it needs live state (the memory store, memory root,
@@ -778,6 +796,10 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 			}
 		},
 	})
+	// One perf report per user-visible run (PIGO_PERF / PIGO_PERF_LOG), emitted
+	// after the drain so the report covers the whole turn including persistence.
+	perf.RunEnd(deps.header.ID)
+
 	// A run can end (error or interrupt) with buffered text from a final turn
 	// that never fired OnTurnEnd; flush it so no reply is silently dropped.
 	flushReply()

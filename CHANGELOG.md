@@ -40,6 +40,30 @@ interactive REPL/TUI.
   distillation all show it. `/compact` and auto-compaction now continue from the
   last checkpoint in context, so a manual compaction after an auto one
   consolidates rather than restarts the ledger.
+- **`/perf` says which stage is slow instead of leaving it to guesswork.** "Output
+  gets slower once the conversation is long" is usually not the provider: every
+  streamed delta re-renders the whole transcript, and that cost grows with the
+  history while the provider's does not. pigo now records the latency and size of
+  the stages a streaming turn crosses — `stream.ttft` / `stream.gap` /
+  `stream.turn` (provider, with throughput in chars/s), `drain.concat` /
+  `drain.on_text` (delta accounting and the hand-off to the front-end),
+  `tui.update` / `tui.view` / `tui.reflow` (split into `tui.render_all` and
+  `tui.viewport_set`, the part that is proportional to the whole transcript) /
+  `tui.block_render` / `tui.bridge.send_wait` (run-goroutine back-pressure while
+  the UI catches up), and the per-turn work that scales with history
+  (`llm.build_request`, `context.estimate`, `session.append`). Recording is
+  unconditional — a flag set before the slow run is a flag nobody set — and costs
+  a map lookup per observation, and a turn's streaming ends at `message_end`
+  rather than at the loop's `turn_end`, so a long tool call is never charged to
+  the model's throughput. `/perf` prints the table (calls / total / mean / p95 /
+  max / bytes) with a hotspot line, the session facts it must be read against
+  (messages, context occupancy, transcript size, last-turn throughput) and a
+  reading guide; `/perf reset` zeroes the
+  counters so one reproduction can be measured cleanly. `PIGO_PERF=1` emits a
+  one-line summary per run through `diag` (so `-p` / `stream-json` stdout stays
+  clean, and the TUI folds it into the transcript); `PIGO_PERF_LOG=<path>` (honored
+  when `PIGO_PERF` is set) appends that report as one JSON line for soak and
+  benchmark diffs.
 
 ### Changed
 - **Every commit and PR now runs a real ten-minute soak, not just a smoke.** The

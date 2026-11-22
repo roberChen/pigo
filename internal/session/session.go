@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/perf"
 )
 
 // SchemaVersion is the current session file schema version. It is written into
@@ -448,18 +449,27 @@ func (s *Store) SaveEntries(header SessionHeader, entries []Entry) error {
 // sees a half-written file. It is the shared write plumbing behind Save and
 // SaveEntries.
 func (s *Store) atomicWrite(id string, write func(w io.Writer) error) error {
+	start := time.Now()
+	var written int64
+	defer func() {
+		perf.RecordN("session.write", time.Since(start), int(written))
+		if written > 0 {
+			perf.SetGauge("session.bytes", written)
+		}
+	}()
 	tmp := s.path(id) + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return fmt.Errorf("session: create %s: %w", tmp, err)
 	}
-	w := bufio.NewWriter(f)
+	bw := bufio.NewWriter(f)
+	w := &countingWriter{w: bw, n: &written}
 	if err := write(w); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
 	}
-	if err := w.Flush(); err != nil {
+	if err := bw.Flush(); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("session: flush %s: %w", tmp, err)
@@ -474,6 +484,19 @@ func (s *Store) atomicWrite(id string, write func(w io.Writer) error) error {
 		return fmt.Errorf("session: commit %s: %w", id, err)
 	}
 	return nil
+}
+
+// countingWriter forwards writes to w and adds their size to n, so a session
+// write can report how many bytes it rewrote (the whole file, every turn).
+type countingWriter struct {
+	w io.Writer
+	n *int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	*c.n += int64(n)
+	return n, err
 }
 
 // writeSession emits the header line followed by one entry line per message.
@@ -776,6 +799,12 @@ func (s *Store) loadHeader(id string) (SessionHeader, error) {
 // load-modify-save under the hood, which is simple and correct for the session
 // sizes pigo produces.
 func (s *Store) Append(id string, updatedAt time.Time, messages agentcore.MessageList) error {
+	// Append round-trips the whole file (load-modify-save), so its cost is
+	// proportional to the session's length. It runs once per turn, not per delta,
+	// but with a long history it is a visible part of a short reply's latency —
+	// /perf's session.append / session.write rows quantify it.
+	start := time.Now()
+	defer func() { perf.Record("session.append", time.Since(start)) }()
 	header, existing, err := s.Load(id)
 	if err != nil {
 		return err

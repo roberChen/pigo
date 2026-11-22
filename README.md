@@ -495,7 +495,15 @@ Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动�
 - webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
 - 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
-REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/jobs`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。恢复会话（启动时 `--resume`／`/resume`，TUI 与 REPL 一致）还会把该会话之前**键入过的提问**重新放回 ↑/↓ 历史输入列表，可以直接召回；列表取自当前分支的完整历史（包含已被压缩摘要掉的轮次），与重放的 transcript 一致，而不是只保留压缩检查点之后的上下文。`/jobs [running]` 一次列出当前所有后台工作（`bash` 后台命令与后台 sub-agent）：id、状态、耗时、命令行/任务描述，并给出读取与终止的调用示例（`bash_output` / `kill_bash` / `task_output`）；带 `running` 时只显示仍在运行的条目。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/rewind tool [n]` 是更细粒度的回滚：空参列出当前对话里的每一次工具调用（名称、输出的首行，失败或已是占位符的会标注），`/rewind tool n` 只把第 n 次调用的输出替换成一段 **abnormal tool call** 占位文本（保留模型当时发来的参数，并说明输出为何不可用），对话从这次调用处分出新分支——发起该调用的 assistant 轮次保留，因此各方要求的“调用必有结果”配对不破，模型会被告知可以重新发起这次调用；它不需要文件快照、也不改动任何文件，被弃用的分支仍留在磁盘上，可用 `/tree` 回去。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`/jobs`、`/think`、`/reload`、`/help`、`/compact`、`/fork`、`/clone`、`/new`、`/tree`、`/rewind`、`/export`、`/import`、`/resume`、`/copy`、`/session`、`/status`、`/perf`、`/exit` 等。`/new` 就地开始一个空会话（新 session id、清空上下文、重放 SessionStart hook），当前会话会先落盘，事后可用 `/resume` 或 `--resume` 回到它；工具、hooks、MCP 连接、记忆库等会话级设施保持不变，不需要重启 pigo。`/resume` 列出已存储的会话（时间、项目、模型与首条提问预览），TUI 下用 ↑/↓ 选中后 Enter 载入，REPL 下用 `/resume <n>` 序号或 `/resume <id>`（支持唯一前缀）；载入会就地切换当前会话并重放历史，无需重启。重放的是该会话**当前分支**：`/tree` 切分支、`/rewind` 回退后留下的旁支不会被重放，下一轮从当前叶子继续；若会话经历过上下文压缩，重放仍显示压缩前的完整历史并在压缩点标注，而模型上下文从最近的压缩检查点继续（被摘要的前缀不会重复发送），压缩也不会再删除磁盘上的旧对话。恢复会话（启动时 `--resume`／`/resume`，TUI 与 REPL 一致）还会把该会话之前**键入过的提问**重新放回 ↑/↓ 历史输入列表，可以直接召回；列表取自当前分支的完整历史（包含已被压缩摘要掉的轮次），与重放的 transcript 一致，而不是只保留压缩检查点之后的上下文。`/jobs [running]` 一次列出当前所有后台工作（`bash` 后台命令与后台 sub-agent）：id、状态、耗时、命令行/任务描述，并给出读取与终止的调用示例（`bash_output` / `kill_bash` / `task_output`）；带 `running` 时只显示仍在运行的条目。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/rewind tool [n]` 是更细粒度的回滚：空参列出当前对话里的每一次工具调用（名称、输出的首行，失败或已是占位符的会标注），`/rewind tool n` 只把第 n 次调用的输出替换成一段 **abnormal tool call** 占位文本（保留模型当时发来的参数，并说明输出为何不可用），对话从这次调用处分出新分支——发起该调用的 assistant 轮次保留，因此各方要求的“调用必有结果”配对不破，模型会被告知可以重新发起这次调用；它不需要文件快照、也不改动任何文件，被弃用的分支仍留在磁盘上，可用 `/tree` 回去。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
+
+### 性能观测（`/perf`）
+
+"输出怎么越来越慢" 通常不是模型的问题，而是**历史长度**的问题：每来一个流式增量，TUI 都要重排整个 transcript。为了能定位而不是猜，pigo 在热路径上无条件记录各阶段耗时（`internal/perf`，每次记录只是一次 map 查表加几个计数器，被测量的阶段本身都是毫秒级），随时用 `/perf` 查看：
+
+- **阶段表**：`stream.ttft`（发出请求到第一个分片，含请求组装）、`stream.gap`（分片之间的停顿）、`stream.turn`（首个分片到 turn 结束，字节数即吞吐）、`drain.concat` / `drain.on_text`（delta 记账与交给前端的时间）、`tui.update` / `tui.view`（每帧 Update/View，帧预算的直接占用者）、`tui.reflow`（拆成 `tui.render_all` 与 `tui.viewport_set`，后者按整篇 transcript 的行数计费），`tui.block_render`（缓存未命中的 Markdown 渲染）、`tui.bridge.send_wait`（run goroutine 被 UI 反压阻塞的时间，直接说明"UI 跟不上流"）、`llm.build_request` / `context.estimate` / `session.append`（每轮一次、随历史线性增长的固定开销）。表里给出 calls / total / mean / p95 / max / bytes，并标出占测量时间最多的 hotspot。
+- **怎么读**：`stream.*` 高 = provider 或网络；`tui.bridge.send_wait` 总量大 = UI 是瓶颈，模型早就发完了；只有 `context.estimate` / `session.append` 高而 `stream.*` 正常 = 每轮固定开销。`tui.reflow` 的 mean 随 `transcript.bytes` 一起长 = 历史渲染开销。命令末尾会附这段说明。
+- **报告之外**：`/perf reset` 清零计数器（复现同一条慢提问前先清零，读数才干净）；`PIGO_PERF=1` 让每次 run 结束输出一行汇总（走诊断通道，不污染 `-p` / `stream-json` 的 stdout），`PIGO_PERF_LOG=<path>`（与 `PIGO_PERF` 一起设置时）把每轮完整报告作为一行 JSON 追加，方便在长稳或基准里逐轮 diff 而不必解析人类格式。
 
 ### TUI 显示与工具卡
 
@@ -781,6 +789,8 @@ UserPromptSubmit() { echo '{"additionalContext":"branch: '"$(git branch --show-c
 | `PIGO_STREAM_IDLE_TIMEOUT` | 流式空闲超时 |
 | `PIGO_PIGORC_TIMEOUT` | pigorc 求值总超时（默认 15s）；脚本里要访问网络时调大，如 `45s` |
 | `PIGO_DEBUG` | 打开诊断输出（默认静默）。TUI 下诊断信息渲染进对话区而不是写 stderr，避免破坏全屏画面 |
+| `PIGO_PERF` | 每次 run 结束时输出一行阶段耗时汇总（走 `diag`，因此需要 `PIGO_DEBUG=1` 才可见；TUI 里随诊断进对话区） |
+| `PIGO_PERF_LOG` | 每次 run 结束时把完整报告以一行 JSON 追加到该文件（与 `PIGO_PERF` 同时设置生效），便于长稳/基准逐轮 diff |
 | `PIGO_EVENT_LOG` | 事件日志路径 |
 | `XDG_CONFIG_HOME` | 改变 `config.toml` 的查找根 |
 
@@ -1298,6 +1308,7 @@ git push origin v0.2.0
 |-------------|------|
 | `PIGO_HOME` | 覆盖 `~/.pigo` 基础目录（影响 plugins、commands、prompts） |
 | `PIGO_SKILLS_DIR` | 覆盖技能目录（默认 `~/.agents/skills`） |
+| `PIGO_PERF` / `PIGO_PERF_LOG` | 性能观测：每次 run 结束时打印一行汇总 / 追加一行 JSON 报告（见[性能观测](#性能观测perf)） |
 | `~/.pigo/sessions` | 会话存储（JSONL） |
 | `~/.pigo/server.sock` / `.token` / `.json` | `pigo serve` 的 endpoint（POSIX 上是 unix socket 文件）、bearer token（POSIX 0600，Windows 仅当前用户 DACL）与状态文件；Windows 上 endpoint 是命名管道，不落盘 |
 | `~/.pigo/server.log` | `pigo serve --daemon` 的 stdout/stderr |

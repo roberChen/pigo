@@ -9,8 +9,10 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/perf"
 )
 
 // StreamHandler is the set of callbacks DrainStream invokes as it consumes a
@@ -43,10 +45,28 @@ func DrainStream(ctx context.Context, stream *LoopEventStream, h StreamHandler) 
 	printed := 0
 	var lastTurn *agentcore.AssistantMessage
 
+	// The streaming measurements below split one turn into the numbers that answer
+	// "why does this feel slow": ttft (waiting for the first chunk), gap (stalls
+	// between chunks), stream.turn (chars per second the user perceives) and
+	// on_text (time the consumer — a channel send into the TUI — held the draining
+	// goroutine). A turn's end is taken from message_end, the provider's own
+	// completion signal, not from turn_end: the loop emits turn_end after it has
+	// executed the turn's tool calls, so measuring there would fold a ten-second
+	// bash call into the model's throughput.
+	var (
+		turnStart  time.Time
+		firstAt    time.Time
+		lastAt     time.Time
+		turnClosed bool
+	)
+
 	emitText := func(text string) {
 		if len(text) > printed {
+			delta := text[printed:]
 			if h.OnText != nil {
-				h.OnText(text[printed:])
+				start := time.Now()
+				h.OnText(delta)
+				perf.RecordN("drain.on_text", time.Since(start), len(delta))
 			}
 			printed = len(text)
 		}
@@ -57,16 +77,67 @@ func DrainStream(ctx context.Context, stream *LoopEventStream, h StreamHandler) 
 			h.OnEvent(ev)
 		}
 		switch e := ev.(type) {
+		case agentcore.TurnStartEvent:
+			// turn_start is emitted before the request is assembled and sent, so
+			// ttft is measured from here: it includes everything pigo does before the
+			// provider can answer, which is the number a user experiences.
+			turnStart, firstAt, lastAt, turnClosed = time.Now(), time.Time{}, time.Time{}, false
 		case agentcore.MessageUpdateEvent:
 			if a, ok := e.Message.(agentcore.AssistantMessage); ok {
-				emitText(agentcore.ContentToText(a.Content))
+				now := time.Now()
+				if firstAt.IsZero() {
+					if !turnStart.IsZero() {
+						perf.Record("stream.ttft", now.Sub(turnStart))
+					}
+					firstAt = now
+				} else {
+					perf.Record("stream.gap", now.Sub(lastAt))
+				}
+				lastAt = now
+
+				// ContentToText re-walks the whole accumulated message on every
+				// update, so this stage grows with the answer length; measuring it
+				// is how an O(n²) delta path shows up instead of hiding behind the
+				// provider's name.
+				start := time.Now()
+				text := agentcore.ContentToText(a.Content)
+				perf.RecordN("drain.concat", time.Since(start), len(text))
+				emitText(text)
+			}
+		case agentcore.MessageEndEvent:
+			// The provider is done with this turn (message_end precedes the loop's
+			// turn_end, which also covers tool execution).
+			if a, ok := e.Message.(agentcore.AssistantMessage); ok && !turnClosed {
+				turnClosed = true
+				now := time.Now()
+				if !turnStart.IsZero() {
+					perf.Record("llm.turn_total", now.Sub(turnStart))
+				}
+				if !firstAt.IsZero() {
+					streamed := now.Sub(firstAt)
+					surfaced := len(agentcore.ContentToText(a.Content))
+					perf.RecordN("stream.turn", streamed, surfaced)
+					if secs := streamed.Seconds(); secs > 0 {
+						perf.SetGauge("stream.chars_per_sec", int64(float64(surfaced)/secs))
+					}
+				}
 			}
 		case agentcore.TurnEndEvent:
 			// Flush any tail the streaming updates did not cover (covers providers
 			// that only deliver the complete message at turn end), then reset for
 			// the next turn and hand the turn to the consumer.
-			emitText(agentcore.ContentToText(e.Message.Content))
+			now := time.Now()
+			start := time.Now()
+			text := agentcore.ContentToText(e.Message.Content)
+			perf.RecordN("drain.concat", time.Since(start), len(text))
+			emitText(text)
 			printed = 0
+			// A turn whose provider stream never reported message_end (an emit error
+			// swallowed the terminal event) still owes the report its total.
+			if !turnStart.IsZero() && !turnClosed {
+				perf.Record("llm.turn_total", now.Sub(turnStart))
+				turnClosed = true
+			}
 			m := e.Message
 			lastTurn = &m
 			if h.OnTurnEnd != nil {

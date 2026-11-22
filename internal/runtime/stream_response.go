@@ -6,10 +6,12 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/imageload"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/provider"
 )
 
@@ -66,6 +68,12 @@ type LoopConfig struct {
 // identical to pi. It never returns an error for a request failure — such
 // failures arrive as a terminal assistant message with stopReason error/aborted.
 func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentContext, cfg LoopConfig, emit agentcore.EmitFunc) (agentcore.AssistantMessage, error) {
+	// Request assembly is O(history): transformContext, filtering, image
+	// sanitation and key resolution all walk the message list, once per turn.
+	// context.estimate (loop.go) and llm.build_request together separate that
+	// per-turn cost from the per-delta streaming cost.
+	buildStart := time.Now()
+
 	// 1. transformContext (optional, must not error).
 	msgs := agentCtx.Messages
 	if cfg.TransformContext != nil {
@@ -111,12 +119,19 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 			key = dyn
 		}
 	}
+	perf.Record("llm.build_request", time.Since(buildStart))
+	perf.SetGauge("llm.request.messages", int64(len(llm.Messages)))
+	perf.SetGauge("llm.request.tools", int64(len(llm.Tools)))
+	perf.SetGauge("llm.system_bytes", int64(len(llm.SystemPrompt)))
+
 	// 5. build the provider stream.
+	openStart := time.Now()
 	stream, err := cfg.Stream(ctx, cfg.Model, llm, provider.StreamConfig{
 		APIKey:        key,
 		ThinkingLevel: cfg.ThinkingLevel,
 		Extra:         cfg.Extra,
 	})
+	perf.Record("llm.open", time.Since(openStart))
 	if err != nil {
 		// Early "cannot build stream" failure: synthesize a terminal message so
 		// the loop has a uniform assistant message to record.

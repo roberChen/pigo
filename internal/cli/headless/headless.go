@@ -16,6 +16,7 @@ import (
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/plugin"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
@@ -134,6 +135,9 @@ func Run(ctx context.Context, p RunParams, out, errOut io.Writer) int {
 	}
 	cfg.OnEvent = onEvent
 	runErr := runtime.RunHeadless(ctx, agentCtx, cfg)
+	// One perf report per run. In a machine mode the report never touches stdout:
+	// it goes to diag (stderr only with PIGO_DEBUG=1) or to PIGO_PERF_LOG.
+	perf.RunEnd(hs.header.ID)
 	// Persist the run's messages regardless of run outcome so a partial run is
 	// still resumable; a persistence failure is reported but does not mask a run
 	// error.

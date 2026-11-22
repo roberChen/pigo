@@ -15,11 +15,13 @@ import (
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/memstatus"
+	"github.com/roberChen/pigo/internal/cli/perfcmd"
 	"github.com/roberChen/pigo/internal/cli/prompts"
 	"github.com/roberChen/pigo/internal/cli/status"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/diag"
 	"github.com/roberChen/pigo/internal/memory"
+	"github.com/roberChen/pigo/internal/perf"
 	"github.com/roberChen/pigo/internal/runtime"
 )
 
@@ -318,6 +320,10 @@ func (m Model) Init() tea.Cmd {
 // transcript and status bar. It quits on the standard exit keys (Ctrl+C /
 // Ctrl+D).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// One measurement per tea message: with a delta arriving every few
+	// milliseconds, the time Update spends (dominated by the transcript reflow it
+	// triggers) is what determines whether the interface keeps up with the stream.
+	defer perf.Span("tui.update")()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1448,6 +1454,28 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	}
+	// /perf is intercepted before registry resolution (like /memory): it reads the
+	// process-wide stage measurements plus the live session's size (messages,
+	// context window), state a slash Action closure cannot reach. "/perf reset"
+	// clears the counters afterwards so the next reproduction starts from zero.
+	if line == "/perf" || strings.HasPrefix(line, "/perf ") {
+		m.transcript.addUser(line)
+		m.input.Clear()
+		m.menu.close()
+		in := perfcmd.Input{Reset: perfcmd.ResetArg(line)}
+		if m.session != nil {
+			in.SessionID = m.session.header.ID
+			in.Model = m.live.Model
+			in.Provider = m.live.ProviderName
+			in.Messages = len(m.session.agentCtx.Messages)
+			in.ContextWindow = m.live.ContextWindow
+		}
+		var buf bytes.Buffer
+		perfcmd.RunPerf(&buf, in)
+		m.transcript.addSystem(strings.TrimRight(buf.String(), "\n"))
+		m.relayout()
+		return m, nil
+	}
 	// /session is intercepted before registry resolution (like /memory): it prints
 	// the conversation summary (session id, message count, estimated tokens, model/
 	// provider, created time, compaction count) from the live context — state a
@@ -1826,6 +1854,10 @@ func (m Model) pumpNext() tea.Cmd {
 // AltScreen on the returned View is how Bubble Tea v2 enters/leaves the alternate
 // screen buffer, so the user's scrollback is restored on quit.
 func (m Model) View() tea.View {
+	// View runs once per frame (and on every repaint-worthy message), so its cost
+	// is the floor under the frame time; a large transcript makes renderContent's
+	// line joining visible here.
+	defer perf.Span("tui.view")()
 	if m.quitting {
 		return tea.View{AltScreen: true}
 	}

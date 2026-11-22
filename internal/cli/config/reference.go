@@ -131,6 +131,8 @@ var envVarDocs = []fieldDoc{
 	{"PIGO_PIGORC_TIMEOUT", "duration", "Deadline for evaluating the pigorc scripts (default 15s). Raise it for a script that fetches a model catalogue over the network."},
 	{"PIGO_DEBUG", "bool", "Debug output."},
 	{"PIGO_EVENT_LOG", "path", "Event log file for diagnostics."},
+	{"PIGO_PERF", "bool", "Record latency instrumentation and, at the end of each run, report the slowest stages via diag (visible with PIGO_DEBUG). Read /perf for the live report."},
+	{"PIGO_PERF_LOG", "path", "JSONL file that receives one performance report per run; read when PIGO_PERF is set (recording itself is always on, this only persists it)."},
 	{"XDG_CONFIG_HOME", "path", "Root for config.toml (default ~/.config)."},
 	{"<PROVIDER>_API_KEY", "string", "Provider credential; first-class providers have their own variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...)."},
 	{"<PROVIDER>_BASE_URL", "string", "Provider endpoint override."},
