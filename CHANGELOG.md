@@ -66,6 +66,44 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Fixed
+- **A failed compaction no longer walks away from an over-budget context.** The
+  old contract was "non-fatal": emit a `CompactionEvent` with an `ErrorMessage`,
+  leave the context untouched, carry on. But that is not a state the run can stay
+  in — the context is *still* over the threshold, so the next turn crosses it
+  again and fails the same way, and every remaining request of the session is one
+  the model cannot fit. A single transient summarizer failure (a 429, a dropped
+  connection, one malformed response) therefore degraded every later turn.
+  Compaction is now sticky until it succeeds. Automatic compaction retries in
+  place with an exponential backoff (250ms doubling to an 8s cap); each failed
+  attempt is still reported, now carrying `Attempt` and `Retrying: true`, so the
+  failure stays observable while a consumer can tell an intermediate report from
+  the last word. The wait is bound to the run's context, so interrupting a run
+  ends the retry loop at once and emits a final `Retrying: false` failure — a
+  front-end that only clears its indicator on a final word would otherwise stay
+  stuck in "compacting" after the interrupt it asked for. A panic inside the
+  summarizer is recovered and turned into a retryable error, because a provider
+  adapter bug should not take down the run and the session. `nothing to compact`
+  (a cut point with no prefix) is a resolution, not a failure: retrying cannot
+  change it.
+- **The TUI's `/compact` no longer leaves the composer silently refusing input
+  after a failure.** A failed manual compaction used to end the compacting state,
+  which made the refusal invisible: the operator was told nothing and the next
+  message crossed the threshold again. The state is now sticky — the row above
+  the composer reads `compaction failed (attempt N): <reason> (context left
+  unchanged · Enter retries · Esc quits)`, Enter (or `/compact` again) starts a
+  fresh attempt from the untouched history, and only a success ends it. While
+  stuck the composer accepts commands only (`/status` `/session` `/memory`
+  `/perf` — the last four only between attempts, when no attempt goroutine owns
+  the message list — plus `/help` and `/exit`); a prompt is dropped at the
+  keystroke, not collected and then rejected. The escape hatch stays open:
+  `/exit`, `/quit` and `Ctrl+D` always work, and `Ctrl+C`/`Esc` aborts the
+  in-flight attempt first and quits on the next press, so a summarizer that is
+  down for good cannot pin the terminal. On a narrow terminal the hint is laid
+  out before the error text, so the part that says how to get out is never the
+  part that gets clipped. Mid-run retries no longer file a card each: the
+  spinner keeps a climbing attempt number and only a final failure reaches the
+  transcript. `stream-json` carries `attempt` and `retrying` (`compaction_start`
+  carries `attempt`) so CI pipelines can make the same distinction.
 - **A compaction no longer reports the size it compacted *from* as its result.**
   The TUI's `/compact` card could read `90,502 → 90,500 tokens` for a context that
   really did shrink to a few thousand — a report that says the command did

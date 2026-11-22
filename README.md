@@ -598,6 +598,8 @@ fmt.Println(reply)
 
 接近上下文窗口上限时，pigo 自动把较早的对话折叠成一个**检查点**（`/compact` 可手动触发，`/rebuild` 可手动按检查点重排上下文）。被折叠的前缀以一条 `compaction` 消息留在上下文里，后续每轮都按这条消息重放，不再重复发送原文。手动 `/compact` 与自动压缩走同一条路径（REPL 与 TUI 共用 `runtime.CompactContext`）：同样把摘要写成会话检查点（此后 `/rebuild` 或 `--resume` 直接复用它，而不是重新摘要一次）、同样把结果作为 `compaction` 事件交给 PreCompact hook（trigger 为 `manual`）、也同样沿用上下文里已有的检查点——多次压缩只滚动更新同一份摘要与用户指令区。TUI 里它在正文区留下与自动压缩完全相同的检查点块，并立即落盘（不必等下一轮结束）；有 run 正在进行时会被拒绝（此时消息列表归 pump goroutine 所有），历史短到没有可折叠的前缀时如实报告 `nothing to compact`。
 
+**压缩是粘性的：失败不会退出这个状态。** 一次压缩没成功，上下文依然超预算，放行对话只会让下一轮再撞一次阈值——所以自动压缩与手动 `/compact` 都会重试，直到有一次成功（历史短到没有可折叠前缀的 `nothing to compact` 也算收束，重试改变不了它）。自动压缩在循环内部重试：每次失败都照常发出带 `ErrorMessage` 的 `CompactionEvent`（可观测性不变），同时带 `retrying: true` 与 1 起算的 `attempt`，然后按 250ms 起步、翻倍、上限 8s 的退避再试；等待绑定 run 的 context，所以中断 run 能立刻结束重试，并补发一条 `retrying: false` 的最终失败事件，前端因此不会卡在"正在压缩"上。手动 `/compact` 由 TUI 自己重试：失败后界面停在压缩态，spinner 位置换成一行 `compaction failed (attempt N): <原因> (context left unchanged · Enter retries · Esc quits)`，按 Enter（或再敲一次 `/compact`）就从头再来一遍——失败的那次没有写入任何东西，重试是从原始历史重新摘要，而不是接着半截结果往下写。压缩态下输入框只收命令：`/status`、`/session`、`/memory`、`/perf`（只在两次尝试之间，正在尝试时消息列表归尝试 goroutine 所有）、`/help` 与 `/exit`／`/quit`；普通提问在击键层就被挡下，不会先被收进输入框再被拒绝。**逃生口始终在**：`/exit`、`/quit`、`Ctrl+D` 永远可用，`Ctrl+C`／`Esc` 在有尝试在飞时先中止这次尝试（留在压缩态），没有尝试在飞时退出程序——摘要模型彻底不可用时也不会把人锁死。窄终端下那行提示优先保留"怎么退出去"，被截断的是失败原因正文。
+
 检查点由两部分组成，各自解决不同的问题：
 
 - **技术摘要**（`## Goal` … `## Files & Code Map` … `## Critical Context`）：模型对已做工作的叙述，用于让模型知道"做到哪了"。其中 `## Files & Code Map` 记的是**每个文件里有什么**而不是"动过它"：文件存在的目的、关键符号（函数/类型名）、正在改的那一块区域、只读来排除的文件也照记（"查过，不在这里"本身就是结论，否则下一轮还会去找）。harness 自己会在摘要末尾附上 `<read-files>` / `<modified-files>` 的裸路径清单，所以这一节不浪费行数重复路径，只写路径解释不了的东西。
@@ -626,9 +628,9 @@ fmt.Println(reply)
 
 **压缩结果直接看得见。** `compaction` 事件除了 token 与消息计数，还带着这次写出的**检查点正文**（`Summary`），三个前端都据此把"模型现在到底拿的是什么"摊开给你看，不必再去翻 `checkpoint.md`：
 
-- TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个指向它重排出的检查点，手动 `/compact` 完成后也补一个（压缩前是 `Compacting conversation…` 的固定 spinner，结束后同一张块给出摘要正文）。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动。
+- TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个指向它重排出的检查点，手动 `/compact` 完成后也补一个（压缩前是 `Compacting conversation…` 的固定 spinner，结束后同一张块给出摘要正文）。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动；自动压缩的重试中失败（`retrying`）不逐次插卡——它们只是中间报告，前端保持"正在压缩"指示并显示尝试次数，只有最终失败才落一张卡，免得一串相同失败把对话埋掉。
 - REPL：`Compacting conversation…` 之后打印 `compacted: 90000 → 12000 tokens, summarized 14 messages, kept 3`，其下缩进显示检查点正文（默认最多 30 行，超出提示剩余行数与文件位置）；`/compact`、`/rebuild` 打印同一份格式。失败时打印 `compaction failed: … (context left unchanged)`。
-- `stream-json`：`compaction` 事件多一个 `summary` 字段（检查点正文，为空时省略），CI 或日志管线可以直接归档；plugin `OnEvent` 收到的 `compaction` 负载同样带 `summary`。
+- `stream-json`：`compaction` 事件多一个 `summary` 字段（检查点正文，为空时省略），CI 或日志管线可以直接归档；plugin `OnEvent` 收到的 `compaction` 负载同样带 `summary`。重试期间还会多出 `attempt`（1 起算）与 `retrying: true`，`compaction_start` 也带 `attempt`：消费方据此区分"还在重试"与"最终失败"，不必把每次瞬时失败都当成定论（两者都在为零/false 时省略，成功压缩的信封与从前一致）。
 
 ---
 

@@ -80,8 +80,11 @@ func TestCompactCommandCompactsContext(t *testing.T) {
 	if !m.running {
 		t.Fatal("/compact should flip to running while the summarizer works")
 	}
-	if m.spinner.pinned != "Compacting conversation" {
+	if !strings.Contains(m.spinner.pinned, "Compacting conversation") {
 		t.Errorf("spinner label = %q, want the compaction label", m.spinner.pinned)
+	}
+	if !m.compacting.active || m.compacting.attempt != 1 {
+		t.Errorf("compacting state = %+v, want active on attempt 1", m.compacting)
 	}
 	if len(s.agentCtx.Messages) != 40 {
 		t.Errorf("the context must not change before the Cmd runs: %d messages", len(s.agentCtx.Messages))
@@ -188,11 +191,20 @@ func TestCompactCommandNoOpReported(t *testing.T) {
 	}
 
 	m = apply(t, m, compactDoneMsg{err: errCompact("summarizer down")})
-	if !strings.Contains(transcriptText(m.transcript), "compaction failed: summarizer down") {
+	if !strings.Contains(transcriptText(m.transcript), "compaction failed") ||
+		!strings.Contains(transcriptText(m.transcript), "summarizer down") {
 		t.Errorf("a failed compaction should report the error:\n%s", transcriptText(m.transcript))
 	}
 	if !strings.Contains(transcriptText(m.transcript), "context left unchanged") {
 		t.Errorf("a failed compaction should say the context is intact:\n%s", transcriptText(m.transcript))
+	}
+	// Compaction is sticky: the failure keeps the state on so the operator can
+	// retry instead of continuing on a context that is still over budget.
+	if !m.compacting.active {
+		t.Error("a failed attempt must not end the compacting state")
+	}
+	if m.compacting.lastErr != "summarizer down" {
+		t.Errorf("compacting.lastErr = %q, want the failure reason", m.compacting.lastErr)
 	}
 }
 

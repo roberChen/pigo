@@ -442,17 +442,25 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 	if !compaction.ShouldCompact(before, cfg.ContextWindow, cfg.Compaction) {
 		return
 	}
-	res, err := runCompaction(ctx, agentCtx.Messages, cfg)
-	kept := len(agentCtx.Messages)
-	if err != nil {
-		_ = emit(agentcore.CompactionEvent{
-			Reason: "threshold", TokensBefore: before, TokensAfter: before,
-			KeptCount: kept, ErrorMessage: err.Error(),
-		})
-		return
-	}
-	if res == nil {
-		return // Nothing to summarize; leave context as-is.
+	var res *compaction.CompactionResult
+	for attempt := 1; ; attempt++ {
+		_ = emit(agentcore.CompactionStartEvent{Reason: "threshold", TokensBefore: before, Attempt: attempt})
+		att := attemptCompaction(ctx, agentCtx.Messages, cfg)
+		if att.err == nil && att.noop {
+			return // Nothing to summarize; retrying cannot change that.
+		}
+		if att.err != nil {
+			// 失败照常上报，但这时上下文依然超预算：退避后再试一次。
+			_ = emit(attemptFailure(before, len(agentCtx.Messages), attempt, att.err, true))
+			if !waitCompactionRetry(ctx, compactionRetryDelay(attempt)) {
+				emitFinal(attemptFailure(before, len(agentCtx.Messages), attempt,
+					fmt.Errorf("%w (run interrupted before the retry)", att.err), false))
+				return
+			}
+			continue
+		}
+		res = att.res
+		break
 	}
 	now := nowMillis()
 	rebuilt := res.RebuildContext(agentCtx.Messages, now)
@@ -468,7 +476,19 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 
 这段代码把前面所有部件串成了一条完整链路：先 `EstimateContextTokens` 算账，`ShouldCompact` 判定，越线才 `runCompaction` 生成结果，`RebuildContext` 原地替换 `agentCtx.Messages`，最后发一个 `CompactionEvent` 汇报 前/后 token 数与 摘要/保留 的消息条数。整个过程发生在两次模型请求之间，正在进行的对话对它毫无察觉。
 
-这里最值得琢磨的是**失败处理**。压缩要额外调一次模型来生成摘要，这次调用完全可能失败（网络抖动、摘要模型不可用、缺 Key）。pigo 的选择是：压缩失败绝不拖垮整轮对话。失败分支里，它保留原始上下文一字不动，只发一个带 `ErrorMessage` 的 `CompactionEvent`，`TokensAfter` 等于 `TokensBefore`（明示没变化），然后正常返回。`internal/runtime/compaction_test.go` 的 `TestAutoCompactionFailureIsNonFatal` 精确锁定了这个契约：即便摘要流构建失败，本轮 run 仍以 `agent_end` 正常收尾，且不会插入任何检查点。这与第 5 章工具系统"失败即反馈，而非中断"的哲学一脉相承——压缩是锦上添花的优化，不该成为新的失败点。
+这里最值得琢磨的是**失败处理**。压缩要额外调一次模型来生成摘要，这次调用完全可能失败（网络抖动、摘要模型不可用、缺 Key）。
+
+最初的设计是"失败非致命"：保留原始上下文一字不动，发一个带 `ErrorMessage` 的 `CompactionEvent`，`TokensAfter` 等于 `TokensBefore`，本轮 run 照常收尾。这读起来很稳妥，但它其实不是一个能待住的状态——上下文**仍然**超预算，所以下一个回合会再次越过阈值、再发一次同样的失败，余下整个会话都在发送一个模型装不下的请求。一次瞬时抖动（一个 429、一条断掉的连接）就这样降级了后面每一轮。
+
+所以现在压缩是**粘性**的：一旦越过阈值，重试到成功为止，`internal/runtime/compaction_retry.go` 把这个策略单独成文件。三处细节值得记住：
+
+- **失败仍然可观测。** 每次失败的尝试都照常发 `CompactionEvent`（带 `ErrorMessage`、`TokensAfter == TokensBefore` 明示上下文没动），只是多带 `Retrying: true` 与从 1 起算的 `Attempt`。可观测性没有因为重试而打折，消费方也从"每次都当定论"变成"能认出中间报告"。
+- **退避，而不是热循环。** 首次重试几乎立即（250ms），随后翻倍、上限 8s：一次偶发失败几乎不花钱，而真正宕掉的摘要服务不会被每毫秒敲一次。等待绑定 run 的 context，所以中断 run 能立刻结束重试，并补发一条 `Retrying: false` 的最终失败——否则只在前端看到中间报告的情况下，中断之后"正在压缩"的指示永远清不掉。
+- **panic 也是一次可重试的失败。** `attemptCompaction` 用 `defer recover()` 把摘要调用里的 panic（某个 provider 适配器解引用了不存在的字段）转成一个普通错误。压缩现在是强制路径，一次适配器 bug 不该连带吞掉整个 run 和会话。
+
+`nothing to compact` 是这条规则的边界：切点左边没有可折叠的前缀时，重试改变不了什么，那就不是失败，直接收束。`internal/runtime/compaction_test.go` 的 `TestAutoCompactionRetriesUntilItSucceeds` 钉住了整条契约：前两次尝试失败仍各发一条 `Retrying=true` 的事件，第三次成功才安装检查点，且 `Attempt == 3`。至于"失败不拖垮对话"的原始意图并没有丢——它被更准确地表述成"失败不结束对话，但也不假装没发生"。
+
+TUI 里的手动 `/compact` 同样是粘性的，但重试的主动权在人手上：失败后界面停在压缩态，spinner 槽位换成一行 `compaction failed (attempt N): … (context left unchanged · Enter retries · Esc quits)`，回车就从头再来一遍（失败的那次什么都没写，所以是重新摘要原始历史，而不是接着半截结果往下写）。这期间输入框只收少数只读命令，普通提问在击键层就被挡下——上下文装不下它，收进输入框再拒绝只是骗人。逃生口一直在：`/exit`、`Ctrl+D` 随时可用，`Ctrl+C`／`Esc` 在有尝试在飞时先中止这次尝试、没有尝试在飞时退出程序。
 
 <!--
 生图prompt：
@@ -480,16 +500,16 @@ Pure white background. Minimalist editorial doodle with black hand-drawn pen lin
 Recurring IP character required:
 小土拨鼠 (Little Gopher), an original IP: a round, chubby, warm brown-yellow gopher inspired by the Go language Gopher, but cuter, cleaner and more soothing. Round head with a pair of small round ears; two small round curious eyes; a tiny nose and two small signature front teeth; short little limbs and soft paws; warm brown-yellow fur with a lighter belly; plump rounded proportions, earnest yet gently funny. 小土拨鼠 must perform the core conceptual action, not decorate the scene. Keep it a clean round soothing cartoon gopher, not a realistic rat/hamster, not the stiff original Go Gopher, not anime, not a mascot.
 
-Theme: 压缩失败也绝不拖垮整轮对话
+Theme: 压缩失败就重试，直到成功才放行
 Structure type: 概念隐喻
-Core idea: 压缩是主路旁的一条可选支线，支线塌了主路照样通行，原始上下文一字不动
-Composition: 画面横向一条宽阔的主路，上面几节对话车厢平稳向右行驶，主路完好无损；主路上方岔出一条细细的支线通往一台写着"压缩"的小机器，机器冒着一缕小烟、亮着红色故障灯，显然出故障了；小土拨鼠站在岔路口，一只手指着仍在正常通行的主路（旁边写"照常收尾"），对支线上的小故障只是轻松耸肩，没有惊慌；主路上没有出现任何新的检查点车厢
-Suggested elements: 完好的主路对话车厢 / 岔出的压缩支线小机器 / 红色故障灯与小烟 / 耸肩的小土拨鼠
-Chinese handwritten labels: 压缩失败 / 上下文不动 / 照常收尾 / 不插检查点
+Core idea: 压缩是一道必须通过的闸门，失败了就在门前退避等待再推一次，绝不带着超预算的上下文悄悄绕过去
+Composition: 画面横向一条通道，通道中段立着一道写着"压缩"的窄闸门，门后是继续向前延伸的路与检查点车厢；闸门前停着一节对话车厢，车厢顶上落着一枚红色小故障牌（旁边写"失败"），小土拨鼠站在闸门边，一只爪按着一个写着"250ms → 8s"的小计时沙漏，另一只爪正把车厢再次推向闸门（旁边写"再试一次"），神态笃定、专注，节奏从容；通道旁边没有绕行的岔路——画面里明确没有一条偷偷绕过闸门的小径
+Suggested elements: 必须通过的闸门 / 门前待推的车厢与红色故障牌 / 沙漏退避计时 / 推门的小土拨鼠 / 门后的检查点车厢
+Chinese handwritten labels: 失败 / 退避重试 / 直到成功 / 不绕行
 Color use: Black for main line art and 小土拨鼠's eyes/nose/teeth/paw outlines. 小土拨鼠 body warm brown-yellow with lighter belly. Orange for main flow/arrows. Red only for key warnings/results. Blue only for secondary notes/system state.
 Constraints: One image explains only one core structure. Main subject 40%-60% of canvas. At least 35% blank white space. At most 5-8 short handwritten Chinese labels. No title in top-left corner. Do not write the structure type on the image. Not a formal diagram/slide. Invent a fresh visual metaphor for this specific content.
 -->
-![图6-6 压缩支线塌了主路照走](images/fig6-6.png){#fig:6-6 width=100%}
+![图6-6 压缩失败就退避重试，直到成功才放行](images/fig6-6.png){#fig:6-6 width=100%}
 
 `runCompaction` 是循环与压缩包之间的适配层。它优先用专门的 `SummaryStream` / `SummaryModel`，未配置时回落到主对话的 `Stream` / `Model`，并且像正常回合一样解析 API Key（动态 Key 优先，静态 Key 兜底），确保摘要请求能对需要鉴权的 Provider 正常认证：
 
@@ -500,11 +520,15 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 		stream = cfg.Stream
 	}
 	// ... 解析 model 与 API key ...
-	return compaction.Compact(ctx, stream, model, msgs, cfg.Compaction, -1, nil, "", scfg)
+	// 上一份检查点就在上下文里：把它的位置、细节与摘要取出来，这次的压缩
+	// 是接续它做滚动更新，而不是从零重新摘要一遍。
+	prior := compaction.PriorCheckpoint(msgs)
+	return compaction.Compact(ctx, stream, model, msgs, cfg.Compaction,
+		prior.Index, prior.Details, prior.Summary, prior.UserInstructions, scfg)
 }
 ```
 
-注意它传的 `prevCompactionIndex` 是 -1、`prevDetails` 与 `previousSummary` 都为空——当前循环里的自动压缩每次都走首次摘要模板，把当前消息列表里从头到切点的那段（若上一轮压过，这段的开头就是那条检查点消息）当作待总结的范围。迭代式压缩所需的那几个参数在包层已经备好，为将来更精细的滚动压缩留了接口。
+`PriorCheckpoint` 在消息列表里回头找最近一条 `CompactionMessage`：找到就把它的下标、覆盖的消息数、摘要正文与用户指令区一并取出来。于是自动压缩是**滚动**的——新一次把"上一份摘要 + 两次压缩之间那批原始消息"当作待总结的范围，多次压缩持续厚化同一份检查点，而不是反复从一段已经变薄的记录里重新编故事。这同时也是手动 `/compact` 与自动压缩能互相接续的原因：两者共用这条路径，谁先压都一样。
 
 除了自动触发，用户也能手动压缩。交互式 REPL 里的 `/compact` 命令（`internal/cli/repl/repl.go` 的 `runManualCompact`）直接调 `compaction.Compact`，用当前 Provider/模型生成摘要，替换共享上下文，并把"压缩前后的 token 数、总结了多少条、保留了多少条"打印出来。它和自动压缩走的是同一套 `Compact` + `RebuildContext`，只是触发时机由人决定、结果打到终端而非事件流。
 
@@ -520,7 +544,7 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 go test ./internal/runtime/ -run 'AutoCompaction|CompactionEventEnvelope' -v 2>&1 | tail -n 20
 ```
 
-你会看到四个用例逐个通过：阈值触发压缩、窗口未知时禁用、事件信封字段正确、压缩失败非致命。
+你会看到这些用例逐个通过：阈值触发压缩、窗口未知时禁用、事件信封字段正确、重试到成功（前两次失败仍各上报一次、第三次才安装检查点）、中断时停止重试。
 
 **步骤 2**：重点读 `internal/runtime/compaction_test.go` 里的 `TestAutoCompactionFiresOnThreshold`。它把窗口设成很小的 2000、预留 500、保留 100，再塞进 12 条各 800 字符的 user 消息——这样 `EstimateContextTokens` 轻松越过 `2000 - 500` 的可用窗口。跑完循环后它断言：
 
@@ -546,7 +570,7 @@ if len(agentCtx.Messages) == 0 || agentCtx.Messages[0].Role() != agentcore.RoleC
 - **切点选择**（`cutpoint.go`）：切点只能落在 user/assistant 消息上，绝不拆开 toolCall 与 toolResult；`FindCutPoint` 从最新消息往回累加，够 `KeepRecentTokens` 后吸附到最近的合法切点，够不到则尽量多留，无合法切点则全保留。
 - **摘要生成**（`summary.go`）：借用 pi 的六段式结构化模板（Goal/Progress/Next Steps 等），首次与迭代两套；`serializeConversation` 把历史摊平成带角色前缀的转录并对工具结果截断到 2000 字符；顺带抽取 `<read-files>`/`<modified-files>` 文件清单；`GenerateSummary` 驱动一次摘要流并按 `StopReason` 判定成败。
 - **组装**（`compact.go`）：`Compact` 定切点、划摘要范围（支持从上一压缩点之后增量）、生成摘要、拼文件元数据，产出 `CompactionResult`；`RebuildContext` 用"检查点 + 保留尾部"重建上下文；检查点经 `AsUserMessage` 以摘要 user 消息形式回放给模型。
-- **嵌入循环**（`loop.go`）：`maybeAutoCompact` 在每回合收尾时算账、判定、按需原地压缩并发 `CompactionEvent`；压缩失败非致命（保留原上下文、只报错、run 照常收尾）；REPL 的 `/compact` 提供手动入口，共用同一套 `Compact`。
+- **嵌入循环**（`loop.go`）：`maybeAutoCompact` 在每回合收尾时算账、判定、按需原地压缩并发 `CompactionEvent`；越过阈值之后压缩是粘性的——失败照常上报（`Retrying: true`）并退避重试，直到成功或 run 被中断，绝不带着超预算的上下文继续跑；REPL／TUI 的 `/compact` 提供手动入口，共用同一套 `Compact`。
 
 压缩让 Agent 能在有限的窗口里跑得更久，但它压掉的历史去了哪里、又怎么被完整保存下来供 `--resume` 复用？这就要看第 7 章的会话持久化——压缩检查点是一条特殊消息，全靠会话存储才能落盘、才能回放。
 

@@ -60,10 +60,17 @@ type ManualCompaction struct {
 // owns the message list, so compacting it from elsewhere is a data race.
 func CompactContext(ctx context.Context, msgs agentcore.MessageList, cfg *RunConfig, reason string) (*ManualCompaction, error) {
 	before := compaction.EstimateContextTokens(msgs).Tokens
-	res, err := runCompaction(ctx, msgs, cfg)
-	if err != nil {
-		return nil, err
+	// One attempt, through the same wrapper auto-compaction uses, so a panic in a
+	// summarizer adapter becomes a retryable error here too instead of taking the
+	// front-end process down with it. A manual /compact has no loop to retry
+	// behind, but the caller does: the TUI keeps the session in its compacting
+	// state and offers another attempt, and the REPL reports the failure to a user
+	// who can re-run the command.
+	att := attemptCompaction(ctx, msgs, cfg)
+	if att.err != nil {
+		return nil, att.err
 	}
+	res := att.res
 	if res == nil {
 		// Nothing to summarize: the cut point left no prefix. Report it as a no-op
 		// so the front-end can say so instead of claiming a compaction happened.

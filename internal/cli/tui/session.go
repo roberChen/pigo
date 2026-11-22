@@ -113,6 +113,12 @@ type runSession struct {
 	// two-stage interrupt (Model.interruptFn → interrupt) calls it. It is nil
 	// before the first run and after a run is cancelled.
 	cancelRun context.CancelFunc
+	// cancelCompact cancels an in-flight manual compaction attempt. Compaction is
+	// sticky in the TUI (the session stays in its compacting state until one
+	// attempt succeeds), so an interrupt must abort the *attempt*, not the state:
+	// the summarization request is dropped and the operator gets a retry. It is
+	// nil when no attempt is running.
+	cancelCompact context.CancelFunc
 
 	// pendingNotice is a note startRun queues onto the run's event channel just
 	// before the first event (currently: the prompt attached an image the model
@@ -508,37 +514,52 @@ func (s *runSession) rebuild() (rebuildResult, error) {
 	}, nil
 }
 
-// compactDoneMsg reports the outcome of a manual /compact to the model: summary
-// is the status line for the transcript, ev is the compaction in the loop's event
+// compactDoneMsg reports the outcome of one manual /compact attempt: summary is
+// the status line for the transcript, ev is the compaction in the loop's event
 // shape (for the card, the context meter and the PreCompact hook), applied says
-// whether the context was actually replaced, and err is set when the
-// summarization failed (the context is then left unchanged).
+// whether the context was actually replaced, noop says the cut point left nothing
+// to summarize, and err is set when the attempt failed — in which case the
+// context is unchanged and the attempt can simply be retried.
 type compactDoneMsg struct {
 	summary string
 	ev      agentcore.CompactionEvent
 	applied bool
+	noop    bool
 	err     error
 }
 
-// compactCmd runs a manual compaction off the tea loop (it is a summarization LLM
-// call, so it must not block the UI goroutine) and yields a compactDoneMsg the
-// model folds into the transcript. It mirrors the REPL's /compact handling.
+// compactCmd runs one manual compaction attempt off the tea loop (it is a
+// summarization LLM call, so it must not block the UI goroutine) and yields a
+// compactDoneMsg the model folds into the transcript. It mirrors the REPL's
+// /compact handling.
+//
+// The attempt runs under a cancellable context recorded on the session, so an
+// interrupt drops the in-flight summarization request instead of leaving a
+// request running that nobody waits for. Cancelling the attempt is not an exit
+// from the compacting state — a failed or aborted attempt is retried.
 func (s *runSession) compactCmd() tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancelCompact = cancel
 	return func() tea.Msg {
-		res, err := s.compact()
+		defer func() {
+			s.cancelCompact = nil
+			cancel()
+		}()
+		res, err := s.compact(ctx)
 		if err != nil {
 			return compactDoneMsg{err: err}
 		}
-		return compactDoneMsg{summary: res.summary, ev: res.ev, applied: res.applied}
+		return compactDoneMsg{summary: res.summary, ev: res.ev, applied: res.applied, noop: res.noop}
 	}
 }
 
-// compactResult is what compact reports back: the transcript line, the event, and
-// whether the context changed.
+// compactResult is what compact reports back: the transcript line, the event,
+// whether the context changed, and whether there was nothing to fold.
 type compactResult struct {
 	summary string
 	ev      agentcore.CompactionEvent
 	applied bool
+	noop    bool
 }
 
 // compact performs one manual compaction of the live context, the same flow the
@@ -549,9 +570,9 @@ type compactResult struct {
 // The compaction event goes through the session's observer chain, so a manual
 // /compact reaches the PreCompact hook (with the manual trigger) and subscribed
 // plugins exactly like an automatic one.
-func (s *runSession) compact() (compactResult, error) {
+func (s *runSession) compact(ctx context.Context) (compactResult, error) {
 	cfg := s.buildConfig()
-	res, err := runtime.CompactContext(context.Background(), s.agentCtx.Messages, &cfg, "manual")
+	res, err := runtime.CompactContext(ctx, s.agentCtx.Messages, &cfg, "manual")
 	if err != nil {
 		return compactResult{}, err
 	}
@@ -562,7 +583,8 @@ func (s *runSession) compact() (compactResult, error) {
 		return compactResult{
 			summary: fmt.Sprintf("nothing to compact (%s tokens, %d messages)",
 				humanizeInt(res.Event.TokensBefore), len(res.Messages)),
-			ev: res.Event,
+			ev:   res.Event,
+			noop: true,
 		}, nil
 	}
 	s.agentCtx.Messages = res.Messages
@@ -634,6 +656,9 @@ func (s *runSession) startRun(prompt string) (chan tea.Msg, tea.Cmd) {
 func (s *runSession) interrupt() {
 	if s.cancelRun != nil {
 		s.cancelRun()
+	}
+	if s.cancelCompact != nil {
+		s.cancelCompact()
 	}
 }
 

@@ -227,6 +227,14 @@ type Model struct {
 	// compaction is not a tool call, so it has no tool-call id to key on; the
 	// counter keeps each card's transcript-entry and map key unique.
 	compactionSeq int
+
+	// compacting is the sticky compacting state (compactstate.go): once a
+	// compaction starts, the session stays in it until one attempt succeeds. It
+	// gates the composer down to allowlisted commands plus Enter-to-retry, and it
+	// is what keeps an aborted or failed attempt from looking like the end of the
+	// compaction. Kept separate from running, which means only "something is in
+	// flight": between two attempts nothing is running yet the state is still on.
+	compacting compactState
 }
 
 // NewModel builds the root model from the assembled Options. It reads the
@@ -713,11 +721,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.pumpNext()
 
 	case compactionStartMsg:
-		m.spinner.pin("Compacting conversation")
+		// The loop is summarizing again. It re-emits this per attempt, so the label
+		// carries the counter rather than restarting at "compacting" each time: a
+		// summarizer that is failing shows a climbing attempt number, which is the
+		// difference between "still working" and "wedged".
+		if msg.attempt > 1 {
+			m.spinner.pin(fmt.Sprintf("Compacting conversation (attempt %d)", msg.attempt))
+		} else {
+			m.spinner.pin("Compacting conversation")
+		}
 		return m, m.pumpNext()
 
 	case compactionMsg:
+		if msg.ev.Retrying {
+			// An intermediate failure: the loop will retry on its own, so the
+			// compacting state stays up and nothing is filed in the transcript. A
+			// card per attempt would bury the conversation under identical failures
+			// for a compaction that has not happened yet.
+			m.spinner.pin("Compacting conversation (retrying)")
+			return m, m.pumpNext()
+		}
 		m.spinner.unpin()
+		if msg.ev.ErrorMessage != "" {
+			// A final failure (the run was interrupted before a retry could land).
+			// The loop is done trying, so the failure is reported once, in the same
+			// warn-card shape a manual attempt uses.
+			m.transcript.addSystem("compaction failed: " + msg.ev.ErrorMessage + " (context left unchanged)")
+			m.addCompactionCard(msg.ev)
+			return m, m.pumpNext()
+		}
 		if m.session != nil {
 			m.session.compacted = true
 		}
@@ -797,32 +829,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, focus
 
 	case compactDoneMsg:
-		// A manual /compact finished: clear the pinned "Compacting conversation…"
-		// spinner (no run is pumping, so stop it and drop out of the running state),
-		// then fold the result into every surface that mirrors the context. The
-		// compaction already replaced the message list in the Cmd goroutine, while
-		// no run was in flight.
+		// One manual /compact attempt reported. Compaction is sticky: a failed or
+		// aborted attempt is NOT an exit from the compacting state — the context is
+		// still over budget, so the next thing the operator could type would go into
+		// a conversation the model cannot fit. The attempt ends (spinner off, no
+		// run in flight) but the state stays on, waiting for Enter to retry or for
+		// one of the exits.
 		m.spinner.unpin()
 		m.spinner.stop()
 		m.running = false
 		if msg.err != nil {
-			m.transcript.addSystem("compaction failed: " + msg.err.Error() + " (context left unchanged)")
-		} else {
-			m.transcript.addSystem(msg.summary)
-			if msg.applied {
-				// Same folding as a live CompactionEvent: the readout collapses to the
-				// loop's post-compaction count, and the checkpoint becomes a card so
-				// the operator can read what replaced the folded turns.
-				m.ctxMeter.observeCompaction(msg.ev)
-				m.statusBar.SetContext(m.ctxMeter.view())
-				m.addCompactionCard(msg.ev)
-				// Persist now rather than waiting for the next turn end: the session
-				// file is what a resume replays, and compacting then quitting is a
-				// normal thing to do.
-				if m.session != nil {
-					if err := m.session.persist(); err != nil {
-						m.transcript.addSystem("Session save failed: " + err.Error())
-					}
+			m.compacting.active = true
+			// An attempt always has a number: a report that arrives without a
+			// preceding beginCompact (a replayed or directly injected message) is
+			// still the first attempt, not "attempt 0".
+			if m.compacting.attempt < 1 {
+				m.compacting.attempt = 1
+			}
+			m.compacting.lastErr = msg.err.Error()
+			m.transcript.addSystem(fmt.Sprintf("compaction failed (attempt %d): %s (context left unchanged; Enter retries, Esc quits)",
+				m.compacting.attempt, msg.err.Error()))
+			m.relayout()
+			return m, nil
+		}
+		// Success ends the state (as does "nothing to fold": either way the reason
+		// it existed is settled).
+		m.endCompact()
+		m.transcript.addSystem(msg.summary)
+		if msg.applied {
+			// Same folding as a live CompactionEvent: the readout collapses to the
+			// loop's post-compaction count, and the checkpoint becomes a card so the
+			// operator can read what replaced the folded turns.
+			m.ctxMeter.observeCompaction(msg.ev)
+			m.statusBar.SetContext(m.ctxMeter.view())
+			m.addCompactionCard(msg.ev)
+			// Persist now rather than waiting for the next turn end: the session file
+			// is what a resume replays, and compacting then quitting is a normal thing
+			// to do.
+			if m.session != nil {
+				if err := m.session.persist(); err != nil {
+					m.transcript.addSystem("Session save failed: " + err.Error())
 				}
 			}
 		}
@@ -930,6 +976,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // newline) to the input editor while idle. Keys are matched via KeyPressMsg
 // .String() so the mapping is terminal-independent.
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The sticky compacting state owns the keyboard (compactstate.go): the context
+	// is over budget until an attempt succeeds, so the only meaningful inputs are
+	// a retry, an allowlisted read-only command, and the exits. It is checked
+	// before every overlay because a failed attempt leaves the operator sitting in
+	// this state rather than idle, and forwarding its keys to the editor is how a
+	// prompt would sneak into a conversation that cannot hold one.
+	if m.compacting.active {
+		return m.handleCompactingKey(msg)
+	}
 	// The /resume picker is modal: while it is open the arrows move the
 	// selection, Enter loads the highlighted session, and Esc / Ctrl+C dismiss it
 	// (without quitting the program, unlike Ctrl+C with no overlay). Every other
@@ -1663,8 +1718,9 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 			m.relayout()
 			return m, nil
 		}
+		m.beginCompact()
 		m.spinner.begin(time.Now(), m.thinkingLabel())
-		m.spinner.pin("Compacting conversation")
+		m.spinner.pin("Compacting conversation (attempt 1)")
 		m.running = true
 		m.relayout()
 		return m, tea.Batch(m.session.compactCmd(), m.tickSpinner())
@@ -2112,6 +2168,13 @@ func (m Model) renderContent() string {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
+	} else if m.compacting.active {
+		// Between attempts nothing is in flight, so the spinner is parked — but the
+		// sticky state is still on, and it has to be visible: the same row keeps
+		// showing what failed and how to get out, instead of the composer silently
+		// refusing every message.
+		b.WriteString(m.compactingStatusLine(width))
+		b.WriteByte('\n')
 	}
 	// The question tool's panel sits directly above the composer, which is the
 	// free-text field while it is up (its rows are reserved by relayout).
@@ -2263,8 +2326,10 @@ func (m *Model) relayout() {
 		m.input.SetFullHeight(m.fullscreenRows())
 	}
 	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.statusPanelHeight() - m.ask.rows(m.theme, m.width, m.height)
-	if m.running {
-		rows-- // the working spinner occupies the row just above the input
+	if m.running || m.compacting.active {
+		// The working spinner — or, between compaction attempts, the row explaining
+		// the stuck compacting state — occupies the row just above the input.
+		rows--
 		// The sub-agent panel reserves one status row per live sub-agent, plus the
 		// wrapped output lines of the expanded row (if any); an empty panel reserves
 		// nothing so the single-run layout is unchanged.

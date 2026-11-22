@@ -239,6 +239,13 @@ func eventEnvelope(ev agentcore.AgentEvent) map[string]any {
 	case agentcore.CompactionStartEvent:
 		env["reason"] = e.Reason
 		env["tokensBefore"] = e.TokensBefore
+		// attempt is the 1-based try number. Auto-compaction re-emits this event per
+		// retry, so a machine consumer needs the counter to tell "compaction is
+		// progressing through attempts" from "a compaction restarted"; 0 means the
+		// producer did not count.
+		if e.Attempt > 0 {
+			env["attempt"] = e.Attempt
+		}
 	case agentcore.CompactionEvent:
 		env["reason"] = e.Reason
 		env["tokensBefore"] = e.TokensBefore
@@ -254,6 +261,18 @@ func eventEnvelope(ev agentcore.AgentEvent) map[string]any {
 		}
 		if e.ErrorMessage != "" {
 			env["error"] = e.ErrorMessage
+		}
+		// attempt/retrying make a failed compaction actionable over the wire: a
+		// failure with retrying=true is an intermediate report (another attempt is
+		// already scheduled), while retrying=false is the last word. Without them a
+		// stream consumer would file every transient summarizer failure as a final
+		// one. Both are omitted when false/zero so the envelope for a plain
+		// successful compaction is unchanged.
+		if e.Attempt > 0 {
+			env["attempt"] = e.Attempt
+		}
+		if e.Retrying {
+			env["retrying"] = true
 		}
 	case agentcore.TelemetryEvent:
 		// The run-end telemetry summary: structured metrics a script can read

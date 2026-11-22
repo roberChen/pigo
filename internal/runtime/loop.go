@@ -22,6 +22,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
@@ -183,6 +184,19 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 		return stream.Emit(c, ev)
 	}
 
+	// emitFinal delivers one event after the run's context is already done, which
+	// is exactly when stream.Emit drops events: a cancelled run still owes its
+	// consumer the closing "compaction gave up" report, or a front-end would hold
+	// a retrying indicator that never resolves. The short independent deadline is
+	// enough for a consumer still draining, and cannot stall shutdown for one that
+	// has walked away.
+	emitFinal := func(ev agentcore.AgentEvent) {
+		tel.observe(ev)
+		c, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), time.Second)
+		defer cancel()
+		_ = stream.Emit(c, ev)
+	}
+
 	// finish emits the telemetry summary then agent_end (unless suppressed by a
 	// prior emit error), records the run result, and closes the stream exactly
 	// once. Telemetry is emitted first so a consumer sees the run's structured
@@ -237,7 +251,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 					finish()
 					return
 				}
-				if afterTurn(ctx, agentCtx, &cfg, true, emit, tel) {
+				if afterTurn(ctx, agentCtx, &cfg, true, emit, emitFinal, tel) {
 					finish()
 					return
 				}
@@ -272,7 +286,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 					finish()
 					return
 				}
-				if afterTurn(ctx, agentCtx, &cfg, false, emit, tel) {
+				if afterTurn(ctx, agentCtx, &cfg, false, emit, emitFinal, tel) {
 					finish()
 					return
 				}
@@ -301,7 +315,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 				finish()
 				return
 			}
-			if afterTurn(ctx, agentCtx, &cfg, true, emit, tel) {
+			if afterTurn(ctx, agentCtx, &cfg, true, emit, emitFinal, tel) {
 				finish()
 				return
 			}
@@ -345,7 +359,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 // (pi per-turn semantics). It then applies prepareNextTurn, runs auto-compaction
 // when the context has outgrown its window, and finally consults
 // shouldStopAfterTurn, returning true when the run should end.
-func afterTurn(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunConfig, hadToolExecution bool, emit func(agentcore.AgentEvent) error, tel *telemetry) (stop bool) {
+func afterTurn(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunConfig, hadToolExecution bool, emit func(agentcore.AgentEvent) error, emitFinal func(agentcore.AgentEvent), tel *telemetry) (stop bool) {
 	if hadToolExecution && cfg.GetSteeringMessages != nil {
 		if steer := cfg.GetSteeringMessages(ctx); len(steer) > 0 {
 			agentCtx.Messages = append(agentCtx.Messages, steer...)
@@ -356,7 +370,7 @@ func afterTurn(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunCo
 			applyTurnUpdate(agentCtx, cfg, upd)
 		}
 	}
-	maybeAutoCompact(ctx, agentCtx, cfg, emit, tel)
+	maybeAutoCompact(ctx, agentCtx, cfg, emit, emitFinal, tel)
 	// Record the latest context-utilization ratio once the turn has settled (after
 	// any compaction), so the telemetry summary reports the current used/window
 	// figure. This runs even when auto-compaction is disabled so utilization is
@@ -388,10 +402,21 @@ func estimateContextTokens(msgs agentcore.MessageList) int {
 // maybeAutoCompact checks whether the context has outgrown its usable window and,
 // if so, compacts it in place and emits a CompactionEvent. Compaction is a no-op
 // when disabled, when the context window is unknown (<= 0), or when usage is
-// under threshold. A compaction failure is non-fatal: the original context is
-// preserved and a CompactionEvent carrying ErrorMessage is emitted so the failure
-// is observable without aborting the run (US-004).
-func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunConfig, emit func(agentcore.AgentEvent) error, tel *telemetry) {
+// under threshold.
+//
+// Once it has decided to compact, it does not give up: a failed attempt is
+// reported (CompactionEvent with ErrorMessage and Retrying=true) and retried
+// after a backoff until it succeeds. Leaving an over-budget context in place is
+// not a stable state — the next turn crosses the same threshold again, so a
+// single transient summarizer failure would degrade every later turn of the run.
+// The loop is bound to ctx, so a user interrupt still ends it; the last failure
+// then carries Retrying=false, which is how a front-end knows the compacting
+// state is over.
+//
+// The rebuilt list installs only on success: a failed attempt leaves the context
+// exactly as it was, so the next attempt summarizes the same history rather than
+// a half-folded one (see compaction.Compact, which is a pure function of msgs).
+func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunConfig, emit func(agentcore.AgentEvent) error, emitFinal func(agentcore.AgentEvent), tel *telemetry) {
 	if !cfg.Compaction.Enabled || cfg.ContextWindow <= 0 {
 		return
 	}
@@ -405,46 +430,73 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 	if !compaction.ShouldCompact(before, cfg.ContextWindow, cfg.Compaction) {
 		return
 	}
-	// Signal the start so a front-end can show an in-progress indicator while the
-	// summarization request (an LLM call that blocks the loop) is in flight.
-	_ = emit(agentcore.CompactionStartEvent{Reason: "threshold", TokensBefore: before})
-	res, err := runCompaction(ctx, agentCtx.Messages, cfg)
-	kept := len(agentCtx.Messages)
-	if err != nil {
+	for attempt := 1; ; attempt++ {
+		// Signal the start of each attempt so a front-end can keep (or adopt) its
+		// in-progress indicator while the summarization request — an LLM call that
+		// blocks the loop — is in flight.
+		_ = emit(agentcore.CompactionStartEvent{Reason: "threshold", TokensBefore: before, Attempt: attempt})
+		att := attemptCompaction(ctx, agentCtx.Messages, cfg)
+		if att.err == nil && att.noop {
+			// Nothing to summarize (the cut point left no prefix). Retrying cannot
+			// change that, so this is not a failure to retry.
+			return
+		}
+		if att.err != nil {
+			// Report the attempt immediately (Retrying=true) so a front-end can show
+			// the failure without waiting out the backoff, then wait and go again.
+			_ = emit(attemptFailure(before, len(agentCtx.Messages), attempt, att.err, true))
+			if !waitCompactionRetry(ctx, compactionRetryDelay(attempt)) {
+				// The run was cancelled while waiting. Close the compacting state with
+				// a final attempt carrying Retrying=false — otherwise a front-end that
+				// only clears its indicator on Retrying=false would stay stuck in it
+				// after the interruption it asked for.
+				emitFinal(attemptFailure(before, len(agentCtx.Messages), attempt,
+					fmt.Errorf("%w (run interrupted before the retry)", att.err), false))
+				return
+			}
+			continue
+		}
+		// Persist a checkpoint of the collapsed prefix before rewriting the context
+		// so a later run can reload it (infinite context, #480/#481). It reuses the
+		// summary compaction just produced — no extra LLM call — and is
+		// best-effort: a write failure is logged and the run continues on the
+		// compacted context.
+		writeCompactionCheckpoint(ctx, agentCtx.Messages, att.res, cfg)
+		rebuilt := att.res.RebuildContext(agentCtx.Messages, nowMillis())
+		summarized := len(agentCtx.Messages) - (len(rebuilt) - 1)
+		agentCtx.Messages = rebuilt
+		// Measure the rebuilt list rather than preferring its retained usage block:
+		// that block reports the request before the cut, so it would report the
+		// pre-compaction size back (see compaction.EstimatePostCompactionTokens).
+		after := compaction.EstimatePostCompactionTokens(rebuilt)
 		_ = emit(agentcore.CompactionEvent{
-			Reason:       "threshold",
-			TokensBefore: before,
-			TokensAfter:  before,
-			KeptCount:    kept,
-			ErrorMessage: err.Error(),
+			Reason:          "threshold",
+			TokensBefore:    before,
+			TokensAfter:     after,
+			SummarizedCount: summarized,
+			KeptCount:       len(rebuilt) - 1,
+			Summary:         att.res.Text(),
+			Attempt:         attempt,
 		})
 		return
 	}
-	if res == nil {
-		// Nothing to summarize (cut point left no prefix); leave context as-is.
-		return
+}
+
+// attemptFailure builds the CompactionEvent reporting one failed compaction
+// attempt. retrying distinguishes "another attempt follows" from "this is the
+// last word on it", which is the only signal a front-end needs to decide whether
+// to keep its compacting indicator up. The token counts describe the unchanged
+// context: a failed attempt never installs anything.
+func attemptFailure(before, kept, attempt int, err error, retrying bool) agentcore.CompactionEvent {
+	return agentcore.CompactionEvent{
+		Reason:       "threshold",
+		TokensBefore: before,
+		TokensAfter:  before,
+		KeptCount:    kept,
+		Attempt:      attempt,
+		ErrorMessage: err.Error(),
+		Retrying:     retrying,
 	}
-	// Persist a checkpoint of the collapsed prefix before rewriting the context so
-	// a later run can reload it (infinite context, #480/#481). It reuses the
-	// summary compaction just produced — no extra LLM call — and is best-effort:
-	// a write failure is logged and the run continues on the compacted context.
-	writeCompactionCheckpoint(ctx, agentCtx.Messages, res, cfg)
-	now := nowMillis()
-	rebuilt := res.RebuildContext(agentCtx.Messages, now)
-	summarized := len(agentCtx.Messages) - (len(rebuilt) - 1)
-	agentCtx.Messages = rebuilt
-	// Measure the rebuilt list rather than preferring its retained usage block:
-	// that block reports the request before the cut, so it would report the
-	// pre-compaction size back (see compaction.EstimatePostCompactionTokens).
-	after := compaction.EstimatePostCompactionTokens(rebuilt)
-	_ = emit(agentcore.CompactionEvent{
-		Reason:          "threshold",
-		TokensBefore:    before,
-		TokensAfter:     after,
-		SummarizedCount: summarized,
-		KeptCount:       len(rebuilt) - 1,
-		Summary:         res.Text(),
-	})
 }
 
 // runCompaction invokes compaction.Compact with the loop's summarization config,

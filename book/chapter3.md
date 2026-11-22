@@ -278,7 +278,7 @@ func afterTurn(ctx context.Context, agentCtx *agentcore.AgentContext, cfg *RunCo
 
 1. **拉 steering 消息**（仅当这一轮跑了工具，`hadToolExecution` 为真）。`GetSteeringMessages` 是"转向"钩子——在一轮工具执行之后、下一轮之前，允许外部塞入新消息（比如用户在长任务跑到一半时补了一句指令）。拉到就 `append` 进上下文，下一轮自然带上。它与外层的 `getFollowUpMessages` 是两回事：steering 是**turn 之间**的注入，follow-up 是**run 收尾后**的续跑，后面会对比。
 2. **prepareNextTurn**：允许在下一轮之前换掉上下文、系统提示、工具集、模型或思考等级。返回一个 `*TurnUpdate`，非 nil 字段就替换对应状态。
-3. **maybeAutoCompact**：上下文涨过窗口阈值时就地压缩（第6章的主题），压缩失败也不致命，发一个带 `ErrorMessage` 的 `CompactionEvent` 让失败可观测，run 照跑。
+3. **maybeAutoCompact**：上下文涨过窗口阈值时就地压缩（第6章的主题）。越过阈值后压缩是**粘性**的：失败仍发一个带 `ErrorMessage`、`Retrying: true` 的 `CompactionEvent` 让失败可观测，但随后退避重试直到成功——超预算的上下文不会"照跑"下去，因为下一轮只会再撞一次阈值；中断 run 是结束重试的逃生口。
 4. **shouldStopAfterTurn**：最后问一句"该停了吗"，返回 `true` 就让调用方 `finish()`。这是钩子驱动的优雅停止点，区别于 `error`/`aborted` 那种被动终止。
 
 `prepareNextTurn` 能换哪些东西，看 `TurnUpdate` 的定义和 `applyTurnUpdate` 就清楚了——每个字段都是指针，非 nil 才替换，精确表达"只改我给的这几样"：

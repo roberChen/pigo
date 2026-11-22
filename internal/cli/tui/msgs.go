@@ -82,13 +82,22 @@ type telemetryMsg struct{ ev agentcore.TelemetryEvent }
 // compactionStartMsg signals that the loop is about to compact the context
 // window. It pins the spinner to a "Compacting conversation…" label while the
 // summarization request is in flight; compactionMsg clears it.
-type compactionStartMsg struct{}
+//
+// attempt is the loop's 1-based attempt number. The loop retries a failed
+// compaction in place, re-emitting this event each time, so a front-end that
+// only saw attempt 3 would look like it restarted: the model keeps one
+// indicator and reads the counter instead.
+type compactionStartMsg struct{ attempt int }
 
 // compactionMsg signals that the loop compacted the context window. It carries
 // the CompactionEvent as-is (like telemetryMsg) so the model can both shrink the
 // context readout immediately — TokensAfter, instead of waiting for the run-end
 // telemetry — and show the checkpoint the model now carries. TokensAfter is 0
 // when the loop did not report a usable figure.
+//
+// A failed attempt whose Retrying is true is an intermediate report, not a
+// result: the loop will try again on its own, so the model keeps the indicator
+// up instead of filing a card for a compaction that has not happened.
 type compactionMsg struct{ ev agentcore.CompactionEvent }
 
 // runEndMsg is the final message: the run has fully drained. err is non-nil when

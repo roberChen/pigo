@@ -119,6 +119,19 @@ type CompactionEvent struct {
 	// Front-ends show it so an operator can read what replaced their history
 	// instead of only the before/after token counts.
 	Summary string
+	// Attempt is the 1-based number of the attempt this event reports. Compaction
+	// is not allowed to give up on its first failure: the context has already been
+	// declared over budget, so leaving it as it is would just cross the threshold
+	// again on the next turn. Every failed attempt is therefore reported and then
+	// retried, and this counter is how a front-end says "attempt 3" instead of
+	// repeating one identical line. Zero means the producer did not count (older
+	// producers, replayed events) and should be read as the first attempt.
+	Attempt int
+	// Retrying says the failure in ErrorMessage is not the end of it: another
+	// attempt follows automatically. A front-end uses it to keep its
+	// "compacting" state and avoid reporting each attempt as a final failure —
+	// only Retrying=false ends the compacting state. Always false on success.
+	Retrying bool
 }
 
 // CompactionStartEvent is emitted immediately before the loop runs compaction,
@@ -130,6 +143,10 @@ type CompactionStartEvent struct {
 	Reason string
 	// TokensBefore is the estimated context tokens that triggered compaction.
 	TokensBefore int
+	// Attempt is the 1-based attempt number, matching CompactionEvent.Attempt.
+	// An automatic compaction re-emits this event for each retry, so a front-end
+	// can show that it is still on the same compaction rather than restarting one.
+	Attempt int
 }
 
 // SubAgentProgressEvent carries structured progress from a running sub-agent

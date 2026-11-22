@@ -400,10 +400,14 @@ type CompactionEvent struct {
 	SummarizedCount int
 	KeptCount       int
 	ErrorMessage    string
+	Attempt         int  // 1 起算；0 表示生产者没有计数
+	Retrying        bool // 这次失败之后还会再试
 }
 ```
 
-注释点出一个设计细节：压缩失败时这个事件**照样发出**，只是 `ErrorMessage` 非空、token 字段描述未变的上下文——这样消费者能看到失败，会话却不因此中断。这是"错误当数据传"思路在事件层的又一次体现，和 `ToolResultMessage.IsError` 是一脉相承的。
+注释点出一个设计细节：压缩失败时这个事件**照样发出**，只是 `ErrorMessage` 非空、token 字段描述未变的上下文——消费者因此能看到失败，而这仍是"错误当数据传"思路在事件层的又一次体现，和 `ToolResultMessage.IsError` 一脉相承。
+
+`Attempt` 与 `Retrying` 是"压缩失败之后会发生什么"的转折留下的痕迹。早期语义是"失败非致命、事件报一下、run 照跑"，但上下文并没有变小，下一轮只会再撞一次阈值——所以现在越过阈值后压缩是**粘性的**，失败的尝试会退避重试（第 6 章细讲）。于是同一个事件得能表达两种失败：`Retrying: true` 是中间报告（另一次尝试已经在路上），`Retrying: false`（或没有这个字段）才是最终结论。没有这一位，任何按事件计数的消费方都会把每次瞬时失败都当成定论。第 1 章讲的 stream-json 信封把这些字段原样导出（`attempt` / `retrying`，为零/false 时省略，成功压缩的信封与从前完全一致），CI 日志管线因此能做同样的区分。
 
 十一种事件在文件末尾用两组紧凑的方法声明完成"密封"和"判别"，一种类型两行，整整齐齐——`isAgentEvent()` 封住集合，`EventType()` 返回判别字符串。第1章讲到的 stream-json 序列化（`writeEventJSON`/`eventEnvelope`），分派的正是这个 `EventType()`。
 
