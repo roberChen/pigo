@@ -111,9 +111,20 @@ func TestContextMeterCompactionAndTelemetry(t *testing.T) {
 	m.reset(200_000)
 	m.observeTurn(usageAssistant("", 90_000, 1_000), nil)
 
-	m.observeCompaction(12_000)
+	m.observeCompaction(agentcore.CompactionEvent{
+		Reason:       "threshold",
+		TokensBefore: 91_000,
+		TokensAfter:  12_000,
+		Summary:      "the summary",
+	})
 	if got, want := m.tokens(), 12_000; got != want {
 		t.Fatalf("after compaction tokens = %d, want %d", got, want)
+	}
+	if got, want := m.compactions, 1; got != want {
+		t.Fatalf("compactions = %d, want %d", got, want)
+	}
+	if m.last.before != 91_000 || m.last.after != 12_000 || m.last.reason != "threshold" {
+		t.Errorf("last compaction = %+v, want threshold 91000 -> 12000", m.last)
 	}
 
 	m.observeTelemetry(agentcore.TelemetryEvent{ContextTokens: 15_000, ContextWindow: 128_000, ContextUtilization: 15_000.0 / 128_000})
@@ -244,5 +255,83 @@ func TestSeedContextMeterFromResumedHistory(t *testing.T) {
 	}
 	if m.statusBar.contextPct < 0 {
 		t.Error("a resumed conversation should render a measured percentage")
+	}
+}
+
+// TestContextMeterCountsOnlyRealCompactions checks the compaction tally the drawer
+// reports: an event that folded something counts (and records its sizes), while a
+// failed one does not, since the context is unchanged and no checkpoint was made.
+func TestContextMeterCountsOnlyRealCompactions(t *testing.T) {
+	var m contextMeter
+	m.reset(128_000)
+	m.observeTurn(usageAssistant("", 90_000, 1_000), nil)
+
+	m.observeCompaction(agentcore.CompactionEvent{
+		Reason: "threshold", TokensBefore: 91_000, TokensAfter: 91_000,
+		ErrorMessage: "summarizer failed",
+	})
+	if m.compactions != 0 || m.hasLast {
+		t.Fatalf("a failed compaction must not be counted: %d %v", m.compactions, m.hasLast)
+	}
+	if got, want := m.tokens(), 91_000; got != want {
+		t.Errorf("tokens = %d, want %d (the failure reports the unchanged size)", got, want)
+	}
+
+	m.observeCompaction(agentcore.CompactionEvent{
+		Reason: "manual", TokensBefore: 91_000, TokensAfter: 14_000, Summary: "the summary",
+	})
+	if m.compactions != 1 {
+		t.Fatalf("compactions = %d, want 1", m.compactions)
+	}
+	if m.last.reason != "manual" || m.last.before != 91_000 || m.last.after != 14_000 {
+		t.Errorf("last = %+v, want manual 91000 -> 14000", m.last)
+	}
+}
+
+// TestContextMeterSeedCountsExistingCheckpoints checks a resumed conversation
+// reports the compactions it went through before this process started: the count
+// comes from the checkpoints in the context, and a replayed checkpoint knows only
+// the size it folded away.
+func TestContextMeterSeedCountsExistingCheckpoints(t *testing.T) {
+	var m contextMeter
+	msgs := []agentcore.Message{
+		agentcore.CompactionMessage{RoleField: agentcore.RoleCompaction, Summary: "old", TokensBefore: 80_000},
+		usageAssistant("", 5_000, 500),
+		agentcore.CompactionMessage{RoleField: agentcore.RoleCompaction, Summary: "new", TokensBefore: 70_000},
+		usageAssistant("", 6_000, 600),
+	}
+	m.seed(msgs, 128_000)
+	if got, want := m.compactions, 2; got != want {
+		t.Fatalf("compactions = %d, want %d", got, want)
+	}
+	if m.last.before != 70_000 {
+		t.Errorf("last.before = %d, want the most recent checkpoint's 70000", m.last.before)
+	}
+	if m.last.after != 0 {
+		t.Errorf("last.after = %d, want 0 (a replayed checkpoint has no end figure)", m.last.after)
+	}
+	if m.last.reason != "checkpoint" {
+		t.Errorf("last.reason = %q, want checkpoint", m.last.reason)
+	}
+}
+
+// TestContextMeterPartsSumToTotal pins the breakdown the drawer shows to the number
+// the bar shows: provider usage + appended + streaming must be exactly tokens().
+func TestContextMeterPartsSumToTotal(t *testing.T) {
+	var m contextMeter
+	m.reset(128_000)
+	m.observeTurn(usageAssistant("", 10_000, 200), nil)
+	m.addUserPrompt("a prompt")
+	m.addStream(strings.Repeat("x", 400))
+
+	usage, appended, streaming := m.parts()
+	if usage != 10_200 {
+		t.Errorf("usage = %d, want the provider total 10200", usage)
+	}
+	if appended == 0 || streaming != 100 {
+		t.Errorf("appended = %d, streaming = %d; want a nonzero append and 100 streaming", appended, streaming)
+	}
+	if got, want := usage+appended+streaming, m.tokens(); got != want {
+		t.Errorf("breakdown sums to %d, tokens() = %d", got, want)
 	}
 }

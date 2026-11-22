@@ -22,6 +22,19 @@ import (
 // construction; only the idle windows (session load, resume, run end, rebuild)
 // seed from the message list directly.
 
+// compactionStat records one completed compaction: why it ran and the size it took
+// the context from and to. The drawer shows the most recent one, so "why did my
+// history shrink" has an answer with numbers in it instead of just a card.
+//
+// after is 0 when it is not known (a checkpoint replayed from disk carries only
+// the pre-compaction size); the drawer then omits the arrow rather than inventing
+// an end figure.
+type compactionStat struct {
+	reason string
+	before int
+	after  int
+}
+
 // contextMeter accumulates context-token usage the way
 // compaction.EstimateContextTokens does: the last provider-reported usage block
 // wins, and only the messages after it are estimated.
@@ -42,6 +55,15 @@ type contextMeter struct {
 	// measured reports whether any count is known; before the first measurement
 	// the bar shows its placeholder instead of a hard 0%.
 	measured bool
+
+	// compactions counts the checkpoints this conversation carries: seeded from
+	// the message list on bind, incremented by each CompactionEvent that actually
+	// folded something. It matches what /status counts in the history.
+	compactions int
+	// last is the most recent completed compaction, and hasLast says whether there
+	// is one to report (a fresh conversation has none).
+	last    compactionStat
+	hasLast bool
 }
 
 // reset clears the meter for a new conversation with the given context window.
@@ -68,6 +90,20 @@ func (m *contextMeter) seed(msgs []agentcore.Message, window int) {
 	m.trailing = est.TrailingTokens
 	m.streamBytes = 0
 	m.measured = true
+	// Recount the checkpoints the conversation already carries, so a resumed
+	// session reports the compactions it went through before this process started.
+	// A replayed checkpoint knows its before size but not the retained tail it was
+	// rebuilt with, so after stays 0.
+	m.compactions = 0
+	m.last, m.hasLast = compactionStat{}, false
+	for _, msg := range msgs {
+		cm, ok := msg.(agentcore.CompactionMessage)
+		if !ok {
+			continue
+		}
+		m.compactions++
+		m.last, m.hasLast = compactionStat{reason: "checkpoint", before: cm.TokensBefore}, true
+	}
 }
 
 // addUserPrompt accounts for a submitted prompt before the run starts, so the
@@ -112,16 +148,31 @@ func (m *contextMeter) observeTurn(msg agentcore.AssistantMessage, results []age
 	m.measured = true
 }
 
-// observeCompaction collapses the count to the post-compaction size. after <= 0
-// (an unknown result) leaves the meter untouched.
-func (m *contextMeter) observeCompaction(after int) {
-	if after <= 0 {
+// observeCompaction collapses the count to the post-compaction size and records
+// the compaction itself. An event with TokensAfter <= 0 (an unknown result) leaves
+// the count untouched, and one without a summary either failed or had nothing to
+// fold — the context is unchanged then, so counting it would misreport the history.
+func (m *contextMeter) observeCompaction(ev agentcore.CompactionEvent) {
+	if ev.TokensAfter > 0 {
+		m.usageTokens = ev.TokensAfter
+		m.trailing = 0
+		m.streamBytes = 0
+		m.measured = true
+	}
+	if ev.Summary == "" {
 		return
 	}
-	m.usageTokens = after
-	m.trailing = 0
-	m.streamBytes = 0
-	m.measured = true
+	m.compactions++
+	m.last = compactionStat{reason: ev.Reason, before: ev.TokensBefore, after: ev.TokensAfter}
+	m.hasLast = true
+}
+
+// parts returns the meter's breakdown in tokens: the provider's last reported
+// input+output total, what was appended after it, and the assistant text still
+// streaming (estimated). Their sum is tokens(); keeping the three apart is what
+// lets the drawer explain where the number came from.
+func (m *contextMeter) parts() (usage, appended, streaming int) {
+	return m.usageTokens, m.trailing, ceilDiv(m.streamBytes, charsPerToken)
 }
 
 // observeTelemetry adopts the run-end telemetry summary, which is authoritative:
@@ -154,6 +205,23 @@ func (m *contextMeter) view() telemetryEventView {
 		v.util = float64(v.tokens) / float64(m.window)
 	}
 	return v
+}
+
+// ctxPercent rounds a view's utilization to a whole percent clamped to [0,100].
+// The bar's readout and the drawer's explanation both go through it, so the
+// percentage in the drawer can never disagree with the one on the bar.
+func ctxPercent(v telemetryEventView) int {
+	if !v.known || v.window <= 0 {
+		return 0
+	}
+	pct := int(v.util*100 + 0.5)
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
 }
 
 // charsPerToken mirrors compaction's conservative characters-per-token divisor

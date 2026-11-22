@@ -67,8 +67,8 @@ type statusBar struct {
 }
 
 // statusSection names a bar segment that opens a drawer above the bar when
-// clicked. sectionNone marks a display-only segment (app badge, branch, cwd,
-// context usage, task).
+// clicked. sectionNone marks a display-only segment (the app badge, the branch,
+// the cwd and the activity text).
 type statusSection int
 
 const (
@@ -78,6 +78,7 @@ const (
 	sectionSkills
 	sectionMCP
 	sectionFiles
+	sectionContext
 )
 
 // statusZone is one clickable block's column span on the bar, in display columns
@@ -130,14 +131,7 @@ func (s *statusBar) SetContext(ev telemetryEventView) {
 		s.tokens = 0
 		return
 	}
-	pct := int(ev.util*100 + 0.5)
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	s.contextPct = pct
+	s.contextPct = ctxPercent(ev)
 	s.tokens = ev.tokens
 }
 
@@ -398,8 +392,9 @@ func (s statusBar) segments() []segment {
 	}
 	// The context readout is permanent (the highlighted amber block on the
 	// right): before the first measurement it renders glyphCtx + "--" rather than
-	// vanishing, so its position never shifts under the user's eye.
-	segs = append(segs, segment{text: s.ctxText(), fg: sbCtxFg, bg: sbCtxBg, priority: prioToken})
+	// vanishing, so its position never shifts under the user's eye. Clicking it
+	// opens the drawer that explains the number (window, reserve, threshold).
+	segs = append(segs, segment{text: s.ctxText(), fg: sbCtxFg, bg: sbCtxBg, priority: prioToken, section: sectionContext})
 	if s.task != "" {
 		segs = append(segs, segment{text: glyphTask + " " + s.task, fg: sbTaskFg, bg: sbTaskBg, priority: prioTask})
 	}

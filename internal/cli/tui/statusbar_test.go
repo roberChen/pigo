@@ -288,7 +288,7 @@ func TestStatusBarClickZonesMatchRenderedRow(t *testing.T) {
 	}
 	glyphs := map[statusSection]string{
 		sectionModel: glyphModel, sectionThinking: glyphThink, sectionSkills: glyphSkill,
-		sectionMCP: glyphMCP, sectionFiles: glyphFiles,
+		sectionMCP: glyphMCP, sectionFiles: glyphFiles, sectionContext: glyphCtx,
 	}
 	_, zones := s.layout(width, sectionNone)
 	if len(zones) != len(glyphs) {

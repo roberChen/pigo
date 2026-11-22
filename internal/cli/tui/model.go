@@ -723,7 +723,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The context just shrank: reflect the loop's post-compaction count right
 		// away instead of waiting for the run-end telemetry.
-		m.ctxMeter.observeCompaction(msg.ev.TokensAfter)
+		m.ctxMeter.observeCompaction(msg.ev)
 		m.statusBar.SetContext(m.ctxMeter.view())
 		m.addCompactionCard(msg.ev)
 		return m, m.pumpNext()

@@ -1,9 +1,11 @@
 // This file implements the status bar's drawers: clicking the model, thinking,
-// skills, mcp or files block on the bar opens a list that grows upward from the
-// bar, and clicking a row acts on it. It is the mouse counterpart of the keyboard
-// overlays (/model, /think, /skill, /mcp): the model and thinking drawers switch
-// through the very same code paths those commands use, so a click cannot drift
-// from the command.
+// skills, mcp, files or context block on the bar opens a list that grows upward
+// from the bar, and clicking a row acts on it. It is the mouse counterpart of the
+// keyboard overlays (/model, /think, /skill, /mcp): the model and thinking drawers
+// switch through the very same code paths those commands use, so a click cannot
+// drift from the command. The context drawer is the exception: it explains the
+// number the bar shows (budget, reserve, threshold, where the count came from)
+// rather than offering a list to pick from.
 //
 // A drawer holds no copy of the state it shows. Rows are rebuilt from live state
 // every time it is drawn, so a /model switch, an MCP reconnect or a new git probe
@@ -21,6 +23,7 @@ import (
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/cli/prompts"
 	"github.com/roberChen/pigo/internal/cli/ui"
+	"github.com/roberChen/pigo/internal/compaction"
 )
 
 // maxStatusPanelRows caps how many data rows a drawer shows at once. A longer
@@ -83,10 +86,15 @@ const (
 // statusPanelRow is one line of a drawer. detail is the secondary text on the
 // right, current marks the value in effect (the current model, the thinking level
 // in use, a connected server, a skill selected for the next message).
+//
+// warn paints the detail in the warning color: a row whose number has crossed a
+// line the user cares about (the context is over its compaction threshold) says so
+// in color as well as in words.
 type statusPanelRow struct {
 	label   string
 	detail  string
 	current bool
+	warn    bool
 	action  statusRowAction
 	value   string
 }
@@ -132,6 +140,8 @@ func (m Model) statusPanelRows() []statusPanelRow {
 		return m.mcpDrawerRows()
 	case sectionFiles:
 		return m.fileDrawerRows()
+	case sectionContext:
+		return m.contextDrawerRows()
 	default:
 		return nil
 	}
@@ -262,6 +272,191 @@ func fileDeltaText(f gitFile) string {
 	default:
 		return ""
 	}
+}
+
+// contextDrawerRows explains the context readout on the bar. The bar has room for
+// one number and its percentage; everything that makes those numbers actionable —
+// the budget they are measured against, the reserve auto-compaction keeps free,
+// how much room is left before it fires, where the count came from and how many
+// checkpoints the history already carries — only fits in a drawer.
+//
+// The numbers are the loop's, not a second opinion: the window is the budget
+// buildConfig hands the loop (runtime compares against window-reserve in
+// compaction.ShouldCompact), and the count is the same estimate the bar shows.
+func (m Model) contextDrawerRows() []statusPanelRow {
+	v := m.ctxMeter.view()
+	window := m.contextWindow()
+	known := m.contextWindowKnown()
+
+	// used: the headline, and the row the accent marks. It is what the bar's
+	// block shows, spelled out.
+	used := "not measured yet · the bar shows --"
+	if v.known {
+		used = fmt.Sprintf("%s tokens · %d%% of the window", humanizeInt(v.tokens), m.contextPercent())
+	}
+	rows := []statusPanelRow{{label: "used", detail: used, current: true}}
+
+	// window: the denominator. contextWindow() prefers the meter's seeded copy and
+	// falls back to the live config, so this row is right both before the first
+	// seed and after a model switch moved the budget.
+	switch {
+	case window <= 0:
+		rows = append(rows, statusPanelRow{label: "window", detail: "unknown · auto-compaction is off"})
+	case !known:
+		rows = append(rows, statusPanelRow{
+			label:  "window",
+			detail: fmt.Sprintf("%s tokens · fallback (this model reports no window)", humanizeInt(window)),
+		})
+	default:
+		rows = append(rows, statusPanelRow{
+			label:  "window",
+			detail: fmt.Sprintf("%s tokens · the budget auto-compaction measures against", humanizeInt(window)),
+		})
+	}
+
+	// remaining and threshold: where the line is and how far away it is. Both are
+	// meaningless without a window (ShouldCompact returns false then, so no amount
+	// of context would ever trigger it), so they are replaced by one row saying so
+	// rather than by figures describing compaction that cannot happen.
+	if !known || window <= 0 {
+		rows = append(rows, statusPanelRow{
+			label:  "remaining",
+			detail: "auto-compaction is off · the loop has no context window for this model",
+			warn:   true,
+		})
+		return m.appendContextProvenanceRows(rows)
+	}
+
+	reserve := compaction.DefaultCompactionSettings.ReserveTokens
+	threshold := window - reserve
+	switch {
+	case !v.known:
+		rows = append(rows, statusPanelRow{
+			label:  "remaining",
+			detail: fmt.Sprintf("up to %s tokens before auto-compaction", humanizeInt(threshold)),
+		})
+	case v.tokens > threshold:
+		rows = append(rows, statusPanelRow{
+			label:  "remaining",
+			detail: fmt.Sprintf("over the threshold by %s tokens", humanizeInt(v.tokens-threshold)),
+			warn:   true,
+		})
+	case v.tokens == threshold:
+		rows = append(rows, statusPanelRow{label: "remaining", detail: "at the threshold · the next token compacts", warn: true})
+	default:
+		rows = append(rows, statusPanelRow{
+			label:  "remaining",
+			detail: fmt.Sprintf("%s tokens until auto-compaction", humanizeInt(threshold-v.tokens)),
+		})
+	}
+	rows = append(rows, statusPanelRow{
+		label:  "threshold",
+		detail: fmt.Sprintf("%s tokens · the window minus a %s reserve", humanizeInt(threshold), humanizeInt(reserve)),
+	})
+	return m.appendContextProvenanceRows(rows)
+}
+
+// appendContextProvenanceRows adds the two rows that say where the count came from
+// and what the history already lost to compaction. They are appended (rather than
+// written inline) so both exits of contextDrawerRows end with the same tail.
+func (m Model) appendContextProvenanceRows(rows []statusPanelRow) []statusPanelRow {
+	rows = append(rows, statusPanelRow{label: "measured", detail: m.contextMeasuredText()})
+	detail := "none yet · the history is intact"
+	if n := m.ctxMeter.compactions; n > 0 {
+		detail = m.contextCompactionText(n)
+	}
+	return append(rows, statusPanelRow{label: "compactions", detail: detail})
+}
+
+// contextMeasuredText describes the meter's breakdown, so the count is never a
+// bare number: provider usage, what was appended since, what is still streaming.
+func (m Model) contextMeasuredText() string {
+	usage, appended, streaming := m.ctxMeter.parts()
+	if !m.ctxMeter.measured {
+		return "nothing measured yet · counted as text arrives"
+	}
+	var parts []string
+	if usage > 0 {
+		parts = append(parts, fmt.Sprintf("%s from provider usage", humanizeInt(usage)))
+	}
+	if appended > 0 {
+		parts = append(parts, fmt.Sprintf("%s appended since", humanizeInt(appended)))
+	}
+	if streaming > 0 {
+		parts = append(parts, fmt.Sprintf("%s streaming", humanizeInt(streaming)))
+	}
+	if len(parts) == 0 {
+		return "empty context · nothing to send yet"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// contextCompactionText renders the compaction row: how many checkpoints the
+// conversation carries, the size the last one took it from and to (when the end
+// figure is known — a checkpoint replayed from disk only knows the start), and why
+// it ran.
+func (m Model) contextCompactionText(n int) string {
+	last := m.ctxMeter.last
+	text := fmt.Sprintf("%d", n)
+	switch {
+	case m.ctxMeter.hasLast && last.before > 0 && last.after > 0:
+		text = fmt.Sprintf("%d · last %s → %s tokens", n, humanizeInt(last.before), humanizeInt(last.after))
+	case m.ctxMeter.hasLast && last.before > 0:
+		text = fmt.Sprintf("%d · last folded %s tokens away", n, humanizeInt(last.before))
+	}
+	if m.ctxMeter.hasLast && last.reason != "" {
+		text += " (" + last.reason + ")"
+	}
+	return text
+}
+
+// contextSummary is the drawer title's headline: the same readout the bar shows,
+// so the drawer visibly explains its own block.
+func (m Model) contextSummary() string {
+	v := m.ctxMeter.view()
+	window := m.contextWindow()
+	switch {
+	case window <= 0:
+		return "window unknown"
+	case !v.known:
+		return fmt.Sprintf("not measured yet · %s token window", humanizeInt(window))
+	default:
+		return fmt.Sprintf("%s of %s tokens · %d%%", humanizeInt(v.tokens), humanizeInt(window), m.contextPercent())
+	}
+}
+
+// contextWindow is the context-token budget the drawer explains: the meter's copy
+// once it has been seeded, otherwise the live config's value (the same one
+// buildConfig hands the loop). 0 means neither is known.
+func (m Model) contextWindow() int {
+	if w := m.ctxMeter.window; w > 0 {
+		return w
+	}
+	if m.live != nil {
+		return m.live.ContextWindow
+	}
+	return 0
+}
+
+// contextPercent is the utilization to display, computed from the same window the
+// drawer explains so its headline and the bar's block cannot disagree.
+func (m Model) contextPercent() int {
+	window := m.contextWindow()
+	v := m.ctxMeter.view()
+	if window <= 0 || !v.known {
+		return 0
+	}
+	v.window = window
+	v.util = float64(v.tokens) / float64(window)
+	return ctxPercent(v)
+}
+
+// contextWindowKnown reports whether the live config carries a real context
+// window. buildConfig hands the loop this same value, so a false answer means the
+// loop has no budget at all and auto-compaction cannot fire — the drawer must not
+// present the meter's fallback budget as if the loop used it.
+func (m Model) contextWindowKnown() bool {
+	return m.live != nil && m.live.ContextWindow > 0
 }
 
 // statusPanelCapacity is how many data rows the drawer may draw: at most
@@ -418,6 +613,8 @@ func (m Model) statusPanelHeader(width int, rows []statusPanelRow) string {
 		title = "mcp servers · click a row to connect or disconnect · Esc closes"
 	case sectionFiles:
 		title = "changed files · " + m.filesSummary()
+	case sectionContext:
+		title = "context · " + m.contextSummary() + " · Esc closes"
 	}
 	if start, end := m.statusPanelWindow(rows); len(rows) > end-start {
 		title += fmt.Sprintf("  (%d-%d/%d)", start+1, end, len(rows))
@@ -498,6 +695,8 @@ func drawerAccent(section statusSection) string {
 		return sbMcpBg
 	case sectionFiles:
 		return sbFilesBg
+	case sectionContext:
+		return sbCtxBg
 	default:
 		return colorAccent
 	}
@@ -519,6 +718,9 @@ func (m Model) statusPanelRowLine(width, labelWidth int, r statusPanelRow) strin
 	labelStyle := drawerBase().Foreground(lipgloss.Color(colorAssist))
 	detailStyle := drawerBase().Foreground(lipgloss.Color(colorGray))
 	markStyle := drawerBase().Foreground(lipgloss.Color(colorGray))
+	if r.warn {
+		detailStyle = drawerBase().Foreground(lipgloss.Color(colorWarn))
+	}
 	if r.current {
 		labelStyle = drawerBase().Foreground(lipgloss.Color(accent)).Bold(true)
 		detailStyle = drawerBase().Foreground(lipgloss.Color(accent))

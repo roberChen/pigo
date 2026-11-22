@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/mcp"
 )
@@ -646,20 +647,183 @@ func TestStatusBarDrawerHeaderUsesSectionAccent(t *testing.T) {
 	}
 }
 
-// TestStatusBarDrawerRowsAtNarrowWidth verifies a drawer on a narrow terminal still
-// paints full-width rows and drops the detail rather than overflowing.
+// TestStatusBarDrawerRowsAtNarrowWidth verifies every drawer on a narrow terminal
+// still paints full-width rows and drops text rather than overflowing.
 func TestStatusBarDrawerRowsAtNarrowWidth(t *testing.T) {
-	m := statusPanelTestModel(t, "openai/gpt-4o")
-	m = apply(t, m, tea.WindowSizeMsg{Width: 24, Height: 20})
-	m.statusPanel.section = sectionFiles
-	m.relayout()
+	for _, sec := range []statusSection{
+		sectionModel, sectionThinking, sectionSkills, sectionMCP, sectionFiles, sectionContext,
+	} {
+		m := statusPanelTestModel(t, "openai/gpt-4o")
+		m = apply(t, m, tea.WindowSizeMsg{Width: 24, Height: 20})
+		m.statusPanel.section = sec
+		m.relayout()
 
-	for _, line := range strings.Split(stripANSI(m.View().Content), "\n") {
-		if got := ui.Width(line); got != 24 {
-			t.Fatalf("row is %d columns, want 24: %q", got, line)
+		for _, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+			if got := ui.Width(line); got != 24 {
+				t.Fatalf("section %v: row is %d columns, want 24: %q", sec, got, line)
+			}
+		}
+		if m.statusPanelHeight() <= 1 {
+			t.Errorf("section %v: the drawer should still list its rows at width 24", sec)
 		}
 	}
-	if m.statusPanelHeight() <= 1 {
-		t.Error("the drawer should still list its rows at width 24")
+}
+
+// TestContextBlockOpensDrawer verifies the context readout — the amber block that
+// used to be display-only — is a drawer like the others, and that Esc dismisses it.
+func TestContextBlockOpensDrawer(t *testing.T) {
+	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m = clickBar(t, m, sectionContext)
+	if m.statusPanel.section != sectionContext {
+		t.Fatalf("clicking the context block should open its drawer, got %v", m.statusPanel.section)
 	}
+	content := stripANSI(m.View().Content)
+	if !strings.Contains(content, "context · ") {
+		t.Errorf("context drawer header missing:\n%s", content)
+	}
+	// The block is highlighted while its drawer is up, exactly like the others.
+	bar := strings.Split(content, "\n")[m.height-1]
+	if !strings.Contains(bar, glyphCtx) {
+		t.Errorf("bar lost its context block: %q", bar)
+	}
+	m = apply(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.statusPanel.open() {
+		t.Error("Esc should close the context drawer")
+	}
+}
+
+// TestContextDrawerExplainsTheReadout checks the drawer's rows account for the
+// number on the bar: the window it is measured against, the reserve auto-compaction
+// keeps free, the resulting threshold, and the distance to it. These are the loop's
+// own numbers (window - reserve), so the drawer cannot promise headroom the loop
+// does not have.
+func TestContextDrawerExplainsTheReadout(t *testing.T) {
+	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.ctxMeter.reset(128_000)
+	m.ctxMeter.observeTurn(agentcore.AssistantMessage{
+		RoleField: agentcore.RoleAssistant,
+		Usage:     &agentcore.Usage{InputTokens: 40_000, OutputTokens: 1_000},
+	}, nil)
+	m.statusBar.SetContext(m.ctxMeter.view())
+	m.statusPanel.section = sectionContext
+
+	rows := rowByLabel(m.contextDrawerRows())
+	if got, want := rows["used"].detail, "41,000 tokens · 32% of the window"; got != want {
+		t.Errorf("used = %q, want %q", got, want)
+	}
+	if !rows["used"].current {
+		t.Error("the used row should carry the accent: it is the number the bar shows")
+	}
+	if got, want := rows["window"].detail, "128,000 tokens · the budget auto-compaction measures against"; got != want {
+		t.Errorf("window = %q, want %q", got, want)
+	}
+	if got, want := rows["threshold"].detail, "111,616 tokens · the window minus a 16,384 reserve"; got != want {
+		t.Errorf("threshold = %q, want %q", got, want)
+	}
+	if got, want := rows["remaining"].detail, "70,616 tokens until auto-compaction"; got != want {
+		t.Errorf("remaining = %q, want %q", got, want)
+	}
+	if rows["remaining"].warn {
+		t.Error("a context well under the threshold is not a warning")
+	}
+	if got, want := rows["measured"].detail, "41,000 from provider usage"; got != want {
+		t.Errorf("measured = %q, want %q", got, want)
+	}
+	if got, want := rows["compactions"].detail, "none yet · the history is intact"; got != want {
+		t.Errorf("compactions = %q, want %q", got, want)
+	}
+
+	// The percentage must agree with the bar's own readout, since both are shown
+	// at once (block + drawer).
+	if got, want := m.contextPercent(), m.statusBar.contextPct; got != want {
+		t.Errorf("drawer percent = %d, bar percent = %d; they must not disagree", got, want)
+	}
+}
+
+// TestContextDrawerWarnsOverThreshold checks crossing the auto-compaction line is
+// reported as a warning with the overshoot in it, instead of silently showing a
+// percentage that is still under 100.
+func TestContextDrawerWarnsOverThreshold(t *testing.T) {
+	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.ctxMeter.reset(128_000)
+	m.ctxMeter.usageTokens = 120_000
+	m.ctxMeter.measured = true
+	m.statusPanel.section = sectionContext
+
+	remaining := rowByLabel(m.contextDrawerRows())["remaining"]
+	if !remaining.warn {
+		t.Error("a context past the threshold should be flagged")
+	}
+	if got, want := remaining.detail, "over the threshold by 8,384 tokens"; got != want {
+		t.Errorf("remaining = %q, want %q", got, want)
+	}
+	if !strings.Contains(stripANSI(m.View().Content), "over the threshold") {
+		t.Error("the warning is not painted in the drawer")
+	}
+}
+
+// TestContextDrawerWithoutWindowIsHonest checks the drawer never describes
+// auto-compaction that cannot happen: with no context window in the live config
+// (which is what buildConfig hands the loop) the loop refuses to compact at all,
+// so the drawer says so and omits the threshold figures.
+func TestContextDrawerWithoutWindowIsHonest(t *testing.T) {
+	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.live.ContextWindow = 0
+	m.ctxMeter.reset(0)
+	m.ctxMeter.usageTokens = 5_000
+	m.ctxMeter.measured = true
+	m.statusPanel.section = sectionContext
+
+	rows := rowByLabel(m.contextDrawerRows())
+	if _, ok := rows["threshold"]; ok {
+		t.Error("no window means no threshold; the row should be omitted")
+	}
+	if got := rows["window"].detail; !strings.Contains(got, "unknown") {
+		t.Errorf("window = %q, want it to admit the window is unknown", got)
+	}
+	if got := rows["remaining"].detail; !strings.Contains(got, "auto-compaction is off") {
+		t.Errorf("remaining = %q, want it to say auto-compaction is off", got)
+	}
+
+	// A model that reports no window but a meter seeded with the fallback budget is
+	// the same trap one step later: the figure exists, the loop still has no window.
+	m.ctxMeter.setWindow(cli.DefaultContextWindow)
+	rows = rowByLabel(m.contextDrawerRows())
+	if got := rows["window"].detail; !strings.Contains(got, "fallback") {
+		t.Errorf("window = %q, want it to mark the fallback budget", got)
+	}
+	if got := rows["remaining"].detail; !strings.Contains(got, "auto-compaction is off") {
+		t.Errorf("remaining = %q, want it to say auto-compaction is off", got)
+	}
+	if _, ok := rows["threshold"]; ok {
+		t.Error("threshold figures must not be shown for a loop that cannot compact")
+	}
+}
+
+// TestContextDrawerReportsCompactions checks the compaction row explains a history
+// that has already been folded, including the size it was folded from.
+func TestContextDrawerReportsCompactions(t *testing.T) {
+	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.ctxMeter.reset(128_000)
+	m.ctxMeter.observeCompaction(agentcore.CompactionEvent{
+		Reason: "threshold", TokensBefore: 118_000, TokensAfter: 21_000, Summary: "the summary",
+	})
+	m.statusPanel.section = sectionContext
+
+	rows := rowByLabel(m.contextDrawerRows())
+	if got, want := rows["compactions"].detail, "1 · last 118,000 → 21,000 tokens (threshold)"; got != want {
+		t.Errorf("compactions = %q, want %q", got, want)
+	}
+	if got := rows["used"].detail; !strings.Contains(got, "21,000 tokens") {
+		t.Errorf("used = %q, want the post-compaction count", got)
+	}
+}
+
+// rowByLabel indexes drawer rows for assertions that should not depend on order.
+func rowByLabel(rows []statusPanelRow) map[string]statusPanelRow {
+	out := make(map[string]statusPanelRow, len(rows))
+	for _, r := range rows {
+		out[r.label] = r
+	}
+	return out
 }
