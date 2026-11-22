@@ -180,3 +180,60 @@ func TestPromptsDescribeLastTurnDivider(t *testing.T) {
 		t.Errorf("lastTurnDivider %q no longer contains %q", lastTurnDivider, fragment)
 	}
 }
+
+// TestPromptsKeepTheCodeMapHeading pins the heading itself, in both templates.
+// The section is the only place a checkpoint can say what a file CONTAINS as
+// opposed to that it was touched (the harness appends the bare path lists), so a
+// template that loses it silently reverts to a summary that makes the next turn
+// re-read the same files. The update template needs it independently: every
+// re-compaction is rendered from that template, so dropping it there would keep
+// the section on the first checkpoint only and erase it on the second.
+func TestPromptsKeepTheCodeMapHeading(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"first-time": summarizationPrompt,
+		"update":     updateSummarizationPrompt,
+	} {
+		if !strings.Contains(prompt, codeMapHeading) {
+			t.Errorf("%s prompt is missing the %q section", name, codeMapHeading)
+		}
+	}
+}
+
+// TestPromptsKeepSectionOrder verifies the code map sits where a reader (and the
+// Markdown renderer) expects it: after the decisions it explains and before the
+// failures and the handoff sections. The checkpoint is rendered as Markdown in
+// every front-end, so an out-of-order heading is a visible inconsistency, not
+// just a prompt detail.
+func TestPromptsKeepSectionOrder(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"first-time": summarizationPrompt,
+		"update":     updateSummarizationPrompt,
+	} {
+		mapIdx := strings.Index(prompt, codeMapHeading)
+		decisions := strings.Index(prompt, "## Key Decisions")
+		errorsIdx := strings.Index(prompt, "## Errors & Failed Attempts")
+		if mapIdx < 0 || decisions < 0 || errorsIdx < 0 {
+			t.Fatalf("%s prompt is missing a required section", name)
+		}
+		if !(decisions < mapIdx && mapIdx < errorsIdx) {
+			t.Errorf("%s prompt section order is Key Decisions(%d) < Files & Code Map(%d) < Errors(%d)",
+				name, decisions, mapIdx, errorsIdx)
+		}
+	}
+}
+
+// TestPromptsForbidReExploration verifies both templates carry the rule that
+// actually changes behaviour: a discovered fact is the last thing to cut for
+// length. Without it a summarizer treats the code map as optional detail and
+// compresses it away, which is exactly the failure the section exists to prevent
+// — the next turn then re-runs the same reads and greps.
+func TestPromptsForbidReExploration(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"first-time": summarizationPrompt,
+		"update":     updateSummarizationPrompt,
+	} {
+		if !strings.Contains(prompt, "rediscover") {
+			t.Errorf("%s prompt should say the next reader must not have to rediscover facts", name)
+		}
+	}
+}

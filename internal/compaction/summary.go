@@ -51,6 +51,18 @@ const (
 	analysisClose = "</analysis>"
 )
 
+// codeMapHeading is the heading of the section that records what each file
+// CONTAINS rather than that it was touched, and a named constant because it is a
+// contract between the templates, the tests and the checkpoint reader: the
+// harness appends the bare <read-files>/<modified-files> path lists itself, so
+// this section is the only place the summary can say why a file mattered, which
+// symbol lives in it, and which files were checked and ruled out. Both templates
+// must carry it — every re-compaction is rendered from the update template, so a
+// version missing it there would keep the map on the first checkpoint and erase
+// it on the second, which is exactly when the session is longest and re-reading
+// costs most.
+const codeMapHeading = "## Files & Code Map"
+
 // summarizationPrompt is the first-time summary template. It was pi's
 // SUMMARIZATION_PROMPT; the section set and the rules below are pigo's, extended
 // after comparing the prompts of Claude Code, Gemini CLI, OpenHands and Meta's
@@ -77,7 +89,11 @@ const summarizationPrompt = `The messages above are a conversation to summarize.
 First, work through the conversation in a private analysis pass:
 
 <analysis>
-Walk the messages in order. Track what the user asked for, what was actually executed and what its output said, what was tried and did not work (with the reason), what was decided and why, and what is still unresolved. Be precise about what was verified versus what was merely intended. The transcript may contain a line starting with "--- most recent turn below": everything after it is the turn the work is currently on, so give it full resolution and let everything before it be compressed to what it explains about that turn. This block is discarded by the harness — use it to get the summary right; do not write it for a reader.
+Walk the messages in order. Track what the user asked for, what was actually executed and what its output said, what was tried and did not work (with the reason), what was decided and why, and what is still unresolved. Be precise about what was verified versus what was merely intended.
+
+Then, separately, list every fact the work DISCOVERED — each thing that cost a read, a grep, a search or a command to learn: which file actually holds a symbol, what a struct's fields are called, how a function decides its branch, which of two similarly named files is the live one, what a config key really does, which command with which flags was the one that worked, what an error message means in this codebase. For each, note where it was found (path + symbol or line) and how it was verified. This list is the most expensive thing in the conversation to re-derive, so it must survive verbatim.
+
+The transcript may contain a line starting with "--- most recent turn below": everything after it is the turn the work is currently on, so give it full resolution and let everything before it be compressed to what it explains about that turn — except the discoveries above, which never get compressed away. This block is discarded by the harness — use it to get the summary right; do not write it for a reader.
 </analysis>
 
 Then, after the closing </analysis> tag, write the summary itself in this EXACT format:
@@ -102,6 +118,13 @@ Then, after the closing </analysis> tag, write the summary itself in this EXACT 
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
 
+## Files & Code Map
+- [path/to/file.go — what this file is FOR and the symbols that matter: "func TheOne", "type TheOther". Name the region being worked on ("in TheOne, the loop over cfg.Layers"). Mark "(read)" or "(modified: what changed)".]
+- [One line per file that shaped the work, including files read only to rule them out — "checked; the handler is not here" is itself a finding, and the next reader would otherwise look there again.]
+- [Files that are known to need changes next but have not been touched yet, and how you know.]
+- [The harness appends the exact <read-files> / <modified-files> path lists itself, so do not spend lines listing bare paths: what only you can record is what each file CONTAINS and why it matters.]
+- [Or "(none)" if no file was read or changed]
+
 ## Errors & Failed Attempts
 - [What was tried, why it failed, and what not to retry. Include the actual error text for anything a later reader would hit again.]
 - [Or "(none)" if nothing failed]
@@ -122,10 +145,13 @@ RULES:
 - Report evidence, not intention. "Tests pass" only when a run's output said so; otherwise "tests not run" or "tests failing with …". Never list work as Done because it was discussed, planned, or attempted — only because it was performed and checked.
 - Preserve exact literals: file paths, directory restrictions, function and variable names, commands incl. flags, error messages, URLs, API shapes, versions, numbers.
 - Carry the user's prohibitions and explicit "do not" rules word for word into Constraints & Preferences.
+- The next reader must not have to rediscover anything you already know. Every fact that took a read, a grep or a command to establish belongs in this summary: the file a symbol really lives in, the shape of a type, why a branch exists, which of two candidate files is the live one, what an error message means here. Missing it means the next turn redoes the same search, spends the same tokens, and may conclude something different. A discovery is never the line to cut for length; a pleasantry or a restated tool output is.
+- Prefer the map to the narrative. "internal/cli/run/run.go builds the tool set in SetupEnv" is worth more than a paragraph saying tools get built. Give the location, the symbol and the fact, not the story of finding them.
+- Record what was RULED OUT as clearly as what was chosen, including how it was ruled out (the grep that found nothing, the file that does not hold the symbol, the call that panics). A dead end that is not written down gets walked again.
 - The last turn is the one being continued, so summarize it at full resolution even if the rest is compressed to a line each. Its result, its failure, and the exact thing it revealed come first in Critical Context. Older turns earn space by what they explain about it.
-- Make Next Steps start with the single next action, concrete enough to execute without re-reading anything above. Do not restate finished work as pending.
+- Make Next Steps start with the single next action, concrete enough to execute without re-reading anything above — name the file and the symbol it lands in. Do not restate finished work as pending.
 - Be dense and specific. Drop pleasantries, restated tool output, and anything the sections above already imply. If a section is empty, write "(none)" rather than padding it or dropping the heading.
-- Keep each section concise. Preserve exact file paths, function names, and error messages.`
+- Keep each section concise. Preserve exact file paths, function names, and error messages. Concise means no wasted words, never missing facts: when length is a problem, compress the prose, never the discoveries.`
 
 // updateSummarizationPrompt incorporates new messages into an existing summary
 // (pi's UPDATE_SUMMARIZATION_PROMPT, extended with the same rules).
@@ -138,7 +164,7 @@ const updateSummarizationPrompt = `The messages above are NEW conversation messa
 First, work through the new messages in a private analysis pass:
 
 <analysis>
-What did the new messages establish? What changed since the previous summary — which items moved to done, which new work started, what failed and why, what decision was made? Compare against <previous-summary> so nothing already recorded is lost or duplicated. If the transcript contains a line starting with "--- most recent turn below", everything after it is the turn in progress: that is the part the next reader picks up, so it gets the detail. This block is discarded by the harness.
+What did the new messages establish? What changed since the previous summary — which items moved to done, which new work started, what failed and why, what decision was made? Above all: what did they DISCOVER that the previous summary does not already contain — a file that turned out to hold the symbol, the real shape of a type, a config key's actual effect, the command with the flags that worked, what an error means here? Each of those cost a read or a run to learn and would cost the same again. Compare against <previous-summary> so nothing already recorded is lost or duplicated. If the transcript contains a line starting with "--- most recent turn below", everything after it is the turn in progress: that is the part the next reader picks up, so it gets the detail. This block is discarded by the harness.
 </analysis>
 
 Then, after the closing </analysis> tag, output the updated summary in the same EXACT format as the previous one.
@@ -149,8 +175,10 @@ Update the existing structured summary with new information. RULES:
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
 - PRESERVE exact file paths, function names, and error messages
+- PRESERVE every discovered fact in Files & Code Map and Critical Context. These entries are what the next reader would otherwise have to rediscover with the same reads and commands, so they are the LAST thing to drop, not the first — compress the prose around them, never them.
+- ADD each new discovery to Files & Code Map: the file that turned out to hold the symbol, the shape of a type, the region being worked on, the file checked and ruled out (say so — "not here, it is in X" prevents the repeat search).
 - The newest messages are the ones being continued, so they get full resolution even if older sections are compressed to a line each: their result or failure, and the exact thing they revealed, move to the top of Critical Context. Retire an older entry only when a new one explains it, never merely to save space.
-- If something is no longer relevant, you may remove it
+- If something is no longer relevant, you may remove it — but "no longer the current task" is not "no longer relevant": a fact about the code stays useful for the rest of the session.
 
 Ground every claim in the conversation. Never invent a file, command, output or outcome, and never mark work Done because it was discussed rather than performed and checked. Report evidence, not intention. When the new messages contradict the previous summary, the new messages are what actually happened — correct the summary instead of carrying both.
 
@@ -174,6 +202,9 @@ Use this EXACT format:
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Files & Code Map
+- [path/to/file.go — what it is FOR, the symbols that matter, the region being worked on; "(read)" or "(modified: what changed)". Preserve every previous line and add what the new messages discovered or ruled out.]
 
 ## Errors & Failed Attempts
 - [Preserve previous failures so they are not retried; add new ones with their error text]

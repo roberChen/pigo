@@ -94,6 +94,27 @@ interactive REPL/TUI.
   rather than by id string alone, so a future duplicate cannot teleport the view
   either.
 ### Changed
+- **A checkpoint says what each file *contains*, so a resumed turn stops
+  re-reading them.** The summary could say a file was touched but not what it
+  held; the bare `<read-files>` / `<modified-files>` lists the harness appends
+  give paths, not meaning. A resumed session therefore re-ran the same reads and
+  greps to relearn where a symbol lives, what a type looks like, or which region
+  was being edited — the most expensive thing in the conversation to re-derive.
+  Both templates (first-time and update, since every re-compaction renders from
+  the latter) gained a `## Files & Code Map` section, and the rules now say the
+  next reader must not have to rediscover anything: every fact that cost a read,
+  a grep or a command belongs in the checkpoint, and **when length is the problem
+  the prose gets compressed, never the discoveries**. The rules also ask for the
+  map rather than the narrative (the file and symbol that hold the fact, not the
+  story of finding it), and for ruled-out approaches to be recorded with *how*
+  they were ruled out — the grep that found nothing, the file that does not hold
+  the symbol — because a dead end that is not written down gets walked again. The
+  update template additionally marks the code map and Critical Context entries as
+  the *last* thing to drop, and distinguishes "no longer the current task" from
+  "no longer relevant": a fact about the code stays useful for the rest of the
+  session. `codeMapHeading` is a shared constant and three tests pin the heading,
+  its position, and the anti-re-exploration rule in both templates, so one
+  template cannot silently lose what the other keeps.
 - **A checkpoint now captures what the last turn *discovered*, not just what it
   did.** Compaction loses the one thing no file contains: why an approach failed,
   the real error text, which function to resume in, which exact invocation worked.
