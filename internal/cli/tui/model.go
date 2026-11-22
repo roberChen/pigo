@@ -796,6 +796,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, focus
 
+	case compactDoneMsg:
+		// A manual /compact finished: clear the pinned "Compacting conversation…"
+		// spinner (no run is pumping, so stop it and drop out of the running state),
+		// then fold the result into every surface that mirrors the context. The
+		// compaction already replaced the message list in the Cmd goroutine, while
+		// no run was in flight.
+		m.spinner.unpin()
+		m.spinner.stop()
+		m.running = false
+		if msg.err != nil {
+			m.transcript.addSystem("compaction failed: " + msg.err.Error() + " (context left unchanged)")
+		} else {
+			m.transcript.addSystem(msg.summary)
+			if msg.applied {
+				// Same folding as a live CompactionEvent: the readout collapses to the
+				// loop's post-compaction count, and the checkpoint becomes a card so
+				// the operator can read what replaced the folded turns.
+				m.ctxMeter.observeCompaction(msg.ev)
+				m.statusBar.SetContext(m.ctxMeter.view())
+				m.addCompactionCard(msg.ev)
+				// Persist now rather than waiting for the next turn end: the session
+				// file is what a resume replays, and compacting then quitting is a
+				// normal thing to do.
+				if m.session != nil {
+					if err := m.session.persist(); err != nil {
+						m.transcript.addSystem("Session save failed: " + err.Error())
+					}
+				}
+			}
+		}
+		m.relayout()
+		return m, nil
+
 	case rebuildDoneMsg:
 		// A manual /rebuild finished: clear the pinned "Preparing conversation
 		// context…" spinner (no run is pumping, so stop it and drop out of the
@@ -1598,6 +1631,43 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		m.transcript.addSystem(strings.TrimRight(buf.String(), "\n"))
 		m.relayout()
 		return m, nil
+	}
+	// /compact is intercepted before registry resolution (like /rebuild): it runs
+	// the summarizer as an agent stream and replaces the message list in place,
+	// neither of which a string→string slash Action can do. Its registry entry
+	// exists only so /help lists it.
+	//
+	// A mid-run request is refused rather than queued: during a run the pump
+	// goroutine owns agentCtx.Messages, so compacting it from here would race the
+	// loop. The check cannot be reached by typing (the composer is blurred while
+	// running) but a drawer click or a remote-control line can, so it is not
+	// decorative.
+	if line == "/compact" || strings.HasPrefix(line, "/compact ") {
+		m.transcript.addUser(line)
+		m.input.Clear()
+		m.menu.close()
+		// A stray argument is rejected rather than ignored: the command takes none,
+		// and silently compacting anyway would look like the word was a directive.
+		if arg := trimSlashArg(line, "/compact"); arg != "" {
+			m.transcript.addSystem("usage: /compact (takes no arguments)")
+			m.relayout()
+			return m, nil
+		}
+		if m.running {
+			m.transcript.addSystem("(compact unavailable while a run is in progress)")
+			m.relayout()
+			return m, nil
+		}
+		if m.session == nil {
+			m.transcript.addSystem("(compact unavailable: no active session)")
+			m.relayout()
+			return m, nil
+		}
+		m.spinner.begin(time.Now(), m.thinkingLabel())
+		m.spinner.pin("Compacting conversation")
+		m.running = true
+		m.relayout()
+		return m, tea.Batch(m.session.compactCmd(), m.tickSpinner())
 	}
 	// /rebuild is intercepted before registry resolution (like /exit): it
 	// reconstructs the shared context from a persisted checkpoint (or falls back

@@ -508,6 +508,74 @@ func (s *runSession) rebuild() (rebuildResult, error) {
 	}, nil
 }
 
+// compactDoneMsg reports the outcome of a manual /compact to the model: summary
+// is the status line for the transcript, ev is the compaction in the loop's event
+// shape (for the card, the context meter and the PreCompact hook), applied says
+// whether the context was actually replaced, and err is set when the
+// summarization failed (the context is then left unchanged).
+type compactDoneMsg struct {
+	summary string
+	ev      agentcore.CompactionEvent
+	applied bool
+	err     error
+}
+
+// compactCmd runs a manual compaction off the tea loop (it is a summarization LLM
+// call, so it must not block the UI goroutine) and yields a compactDoneMsg the
+// model folds into the transcript. It mirrors the REPL's /compact handling.
+func (s *runSession) compactCmd() tea.Cmd {
+	return func() tea.Msg {
+		res, err := s.compact()
+		if err != nil {
+			return compactDoneMsg{err: err}
+		}
+		return compactDoneMsg{summary: res.summary, ev: res.ev, applied: res.applied}
+	}
+}
+
+// compactResult is what compact reports back: the transcript line, the event, and
+// whether the context changed.
+type compactResult struct {
+	summary string
+	ev      agentcore.CompactionEvent
+	applied bool
+}
+
+// compact performs one manual compaction of the live context, the same flow the
+// loop runs when it crosses the threshold (runtime.CompactContext), and installs
+// the rebuilt list in place. It must only run while no run is in flight: the pump
+// goroutine owns agentCtx.Messages during a run.
+//
+// The compaction event goes through the session's observer chain, so a manual
+// /compact reaches the PreCompact hook (with the manual trigger) and subscribed
+// plugins exactly like an automatic one.
+func (s *runSession) compact() (compactResult, error) {
+	cfg := s.buildConfig()
+	res, err := runtime.CompactContext(context.Background(), s.agentCtx.Messages, &cfg, "manual")
+	if err != nil {
+		return compactResult{}, err
+	}
+	if s.onEvent != nil {
+		s.onEvent(res.Event)
+	}
+	if res.NoOp {
+		return compactResult{
+			summary: fmt.Sprintf("nothing to compact (%s tokens, %d messages)",
+				humanizeInt(res.Event.TokensBefore), len(res.Messages)),
+			ev: res.Event,
+		}, nil
+	}
+	s.agentCtx.Messages = res.Messages
+	s.compacted = true
+	return compactResult{
+		summary: fmt.Sprintf("context compacted: %s → %s tokens, summarized %d messages, kept %d",
+			humanizeInt(res.Event.TokensBefore), humanizeInt(res.Event.TokensAfter),
+			res.Event.SummarizedCount, res.Event.KeptCount),
+		ev:      res.Event,
+		applied: true,
+	}, nil
+}
+
 // prompt to the growing context as a user message, then hands the context and a
 // freshly-built config to the event bridge (bridge.startRun → runtime.StartRun +
 // DrainStream on a goroutine), returning the bridge channel and the first

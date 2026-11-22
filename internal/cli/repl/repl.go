@@ -1209,43 +1209,53 @@ func runSession(out io.Writer, deps *replDeps) {
 // retained tail, and prints the before/after token counts and retained message
 // count. A failure is reported but non-fatal — the original context is kept
 // unchanged (US-004). It uses the same provider/model as the live run.
+//
+// The flow itself lives in runtime.CompactContext, shared with the TUI: it also
+// persists the summary as the session checkpoint (so a later /rebuild or resume
+// reloads it instead of re-summarizing) and reports a CompactionEvent, which the
+// PreCompact hook observes exactly as it does for an automatic compaction.
 func runManualCompact(out io.Writer, deps replDeps) {
-	msgs := deps.agentCtx.Messages
-	settings := compaction.DefaultCompactionSettings
-	before := compaction.EstimateContextTokens(msgs).Tokens
-
-	stream := provider.StreamFnFromProvider(deps.live.Provider)
-	model := provider.Model{Provider: deps.live.ProviderName, ID: deps.live.Model, ContextWindow: deps.live.ContextWindow}
-
-	// Resolve the API key like a normal turn so summarization authenticates
-	// against auth-requiring providers (otherwise Compact fails with
-	// "missing API key" and /compact would always report a non-fatal failure).
-	scfg := provider.StreamConfig{}
+	// Build a RunConfig matching a normal turn, as runManualRebuild does, so the
+	// shared path resolves the stream, the model and the API key the same way.
+	cfg := runtime.RunConfig{
+		LoopConfig: runtime.LoopConfig{
+			Model:         deps.live.Model,
+			Provider:      deps.live.ProviderName,
+			ThinkingLevel: deps.live.ThinkingLevel,
+			Stream:        provider.StreamFnFromProvider(deps.live.Provider),
+			ContextWindow: deps.live.ContextWindow,
+			Compaction:    compaction.DefaultCompactionSettings,
+		},
+		SessionID:  deps.header.ID,
+		MemoryRoot: deps.memoryRoot,
+	}
 	if deps.creds != nil {
-		scfg.APIKey = deps.creds.GetAPIKey(context.Background(), deps.live.ProviderName)
+		cfg.GetAPIKey = deps.creds.GetAPIKey
 	}
 	fmt.Fprintln(out, ui.Colorize(ui.Enabled(), ui.Dim, "Compacting conversation…"))
-	// Continue from any checkpoint already in the context, so a manual /compact
-	// after an auto-compaction consolidates the existing summary and keeps the
-	// user-instruction ledger instead of restarting both.
-	prior := compaction.PriorCheckpoint(msgs)
-	res, err := compaction.Compact(context.Background(), stream, model, msgs, settings, prior.Index, prior.Details, prior.Summary, prior.UserInstructions, scfg)
+	res, err := runtime.CompactContext(context.Background(), deps.agentCtx.Messages, &cfg, "manual")
 	if err != nil {
 		fmt.Fprintf(out, "compaction failed: %v (context left unchanged)\n", err)
 		return
 	}
-	if res == nil {
-		fmt.Fprintf(out, "nothing to compact (%d tokens, %d messages)\n", before, len(msgs))
+	if res.NoOp {
+		fmt.Fprintf(out, "nothing to compact (%d tokens, %d messages)\n", res.Event.TokensBefore, len(res.Messages))
 		return
 	}
-	now := time.Now().UnixMilli()
-	rebuilt := res.RebuildContext(msgs, now)
-	deps.agentCtx.Messages = rebuilt
-	after := compaction.EstimateContextTokens(rebuilt).Tokens
-	summarized := len(msgs) - (len(rebuilt) - 1)
+	deps.agentCtx.Messages = res.Messages
+	// A manual compaction is reported like an automatic one: subscribed plugins
+	// see the compaction event, and the PreCompact hook fires with the "manual"
+	// trigger — both of which the loop does through its run's observer chain, and
+	// /compact has no run.
+	if notifier := deps.notifierHandle(); notifier != nil {
+		notifier(res.Event)
+	}
+	if deps.dispatcher != nil {
+		hooks.NewHookNotifier(deps.dispatcher, deps.hookDeps.SessionID, deps.hookDeps.ProjectDir).Handle(res.Event)
+	}
 	ui.RenderCompactionSummary(out,
-		ui.CompactionNote(before, after, summarized, len(rebuilt)-1),
-		res.Text())
+		ui.CompactionNote(res.Event.TokensBefore, res.Event.TokensAfter, res.Event.SummarizedCount, res.Event.KeptCount),
+		res.Event.Summary)
 }
 
 // runManualRebuild reconstructs the shared context on an explicit /rebuild

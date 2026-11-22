@@ -81,6 +81,7 @@ const (
 	rowSwitchModel                        // value is a model id
 	rowSetThinking                        // value is a thinking level
 	rowToggleMCP                          // value is a server name
+	rowCompactNow                         // no value: runs /compact
 )
 
 // statusPanelRow is one line of a drawer. detail is the secondary text on the
@@ -365,7 +366,15 @@ func (m Model) appendContextProvenanceRows(rows []statusPanelRow) []statusPanelR
 	if n := m.ctxMeter.compactions; n > 0 {
 		detail = m.contextCompactionText(n)
 	}
-	return append(rows, statusPanelRow{label: "compactions", detail: detail})
+	rows = append(rows, statusPanelRow{label: "compactions", detail: detail})
+	// The drawer is otherwise read-only, but the number it explains is also the
+	// number a /compact lowers, so the action belongs where the user noticed the
+	// problem: waiting for the threshold is not the only way to fold the history.
+	return append(rows, statusPanelRow{
+		label:  "compact",
+		detail: "summarize the history into a checkpoint now (click)",
+		action: rowCompactNow,
+	})
 }
 
 // contextMeasuredText describes the meter's breakdown, so the count is never a
@@ -614,7 +623,7 @@ func (m Model) statusPanelHeader(width int, rows []statusPanelRow) string {
 	case sectionFiles:
 		title = "changed files · " + m.filesSummary()
 	case sectionContext:
-		title = "context · " + m.contextSummary() + " · Esc closes"
+		title = "context · " + m.contextSummary() + " · click compact to fold the history · Esc closes"
 	}
 	if start, end := m.statusPanelWindow(rows); len(rows) > end-start {
 		title += fmt.Sprintf("  (%d-%d/%d)", start+1, end, len(rows))
@@ -865,6 +874,13 @@ func (m Model) activateStatusRow(row statusPanelRow) (tea.Model, tea.Cmd) {
 		return m.runSlash("/think " + row.value)
 	case rowToggleMCP:
 		return m.toggleMCPFromDrawer(row.value, !row.current)
+	case rowCompactNow:
+		// Run the command, not a copy of it: /compact owns the spinner, the
+		// transcript report and the persistence, so a click and a typed "/compact"
+		// cannot drift apart.
+		m.statusPanel.close()
+		m.relayout()
+		return m.runSlash("/compact")
 	default:
 		return m, nil
 	}
