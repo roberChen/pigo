@@ -99,6 +99,12 @@ type Model struct {
 	// result; View renders it just above the input line.
 	statusBar statusBar
 
+	// statusPanel is the drawer the status bar opens on click (statuspanel.go):
+	// the model/thinking/skills/mcp/files list, hinged to the bar and growing
+	// upward. It holds only which section is open — rows are rebuilt from live
+	// state whenever the drawer is drawn — so nothing here can go stale.
+	statusPanel statusPanel
+
 	// ctxMeter tracks context-token usage continuously from the bridged run
 	// events (contextmeter.go), so the status bar's context segment updates while
 	// a run is still streaming instead of only at run end. It never reads the
@@ -298,10 +304,32 @@ func (m Model) withSession(s *runSession, history []agentcore.Message) Model {
 	// Seed the context readout from the resumed (or empty) conversation so the
 	// status bar shows its usage before the first turn.
 	m.seedContextMeter()
+	// Show what this session actually loaded: the skill count and MCP servers the
+	// bar summarizes come from the session's assembly, not the launch options.
+	m.refreshStatusCounts()
 	// Put the resumed conversation's prompts back under ↑/↓: resuming at startup
 	// replays the transcript, and recall must cover the same turns.
 	m = m.seedInputHistory(history)
 	return m
+}
+
+// refreshStatusCounts re-reads the inventory the status bar summarizes — how many
+// skills the session loaded and how many MCP servers are active of how many
+// configured — and pushes it into the bar. Both can change after assembly (a
+// reload rebinds the session's skills and MCP manager; an MCP switch reconnects
+// servers), so this is called wherever that could have happened. It reads the same
+// sources the /skill and /mcp drawers list, so the bar's counts and their drawers
+// cannot disagree.
+func (m *Model) refreshStatusCounts() {
+	m.statusBar.SetSkills(len(m.availableSkills()))
+	statuses := m.mcpStatuses()
+	active := 0
+	for _, st := range statuses {
+		if st.Active {
+			active++
+		}
+	}
+	m.statusBar.SetMCP(active, len(statuses))
 }
 
 // Init implements tea.Model. It kicks off the async git probe so the status bar
@@ -339,6 +367,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case gitInfoMsg:
 		m.statusBar.SetGit(msg)
+		// The files drawer lists the probe's paths, so its height can change with
+		// the probe; re-reserve rows while it is the open drawer.
+		if m.statusPanel.section == sectionFiles {
+			m.relayout()
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -364,6 +397,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// With a drawer open, the wheel over the drawer or the bar scrolls the
+		// drawer's own window: the pointer says which list the user means.
+		if m.statusPanel.open() && m.pointerOverStatusPanel(msg.X, msg.Y) {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.scrollStatusPanel(-1)
+			case tea.MouseWheelDown:
+				m.scrollStatusPanel(1)
+			}
+			return m, nil
+		}
 		// Mouse-wheel scrolling reaches the transcript viewport whether idle or
 		// running, so history stays scrollable with the wheel — not just PgUp/PgDn.
 		// The viewport (MouseWheelEnabled by default) turns the wheel event into a
@@ -379,6 +423,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// prior one; a bare click (no drag) leaves it empty so it clears the old
 		// highlight without starting a copyable range.
 		if msg.Button == tea.MouseLeft {
+			if m.onStatusBar(msg.X, msg.Y) {
+				// A click on a clickable block toggles its drawer; a click on a
+				// display-only block leaves the bar alone. Either way the bar owns the
+				// press, so no text selection starts (a stale highlight is dropped).
+				m.sel = selection{}
+				if section, ok := m.statusBar.sectionAt(msg.X, m.contentWidth(), m.statusPanel.section); ok {
+					m.statusPanel.toggle(section)
+					m.relayout()
+				}
+				return m, nil
+			}
+			if row, ok := m.statusPanelRowAt(msg.Y); ok {
+				m.sel = selection{}
+				return m.activateStatusRow(row)
+			}
 			if m.onScrollbar(msg.X, msg.Y) {
 				m.draggingScrollbar = true
 				m.transcript.scrollToRow(msg.Y)
@@ -700,6 +759,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, line := range msg.res.Summary {
 				m.transcript.addSystem(line)
 			}
+			// The reload swapped skills and the MCP manager: refresh what the bar
+			// summarizes and the drawers list.
+			m.refreshStatusCounts()
 		}
 		m.relayout()
 		if msg.startPrompt != "" {
@@ -722,6 +784,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil {
 			m.session.syncMCPTools()
 		}
+		// The active count on the bar and the mcp drawer both follow the manager.
+		m.refreshStatusCounts()
 		if m.mcpPicker.active {
 			m.mcpPicker.setStatuses(m.mcpStatuses())
 		}
@@ -1058,6 +1122,36 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// An open status-bar drawer owns the navigation keys: ↑/↓ walk its window one
+	// row, PgUp/PgDn a screen, Home/End jump to its first/last row. They are taken
+	// ahead of composer history and transcript paging because the drawer sits on
+	// top of both; typing still edits the composer, and Esc (below) closes the
+	// drawer, so it is never a keyboard trap. Rows are rebuilt from live state, so
+	// a drawer whose list shrinks while it is open clamps rather than mis-scrolls.
+	if m.statusPanel.open() {
+		step := m.statusPanelCapacity()
+		switch msg.String() {
+		case "up":
+			m.scrollStatusPanel(-1)
+			return m, nil
+		case "down":
+			m.scrollStatusPanel(1)
+			return m, nil
+		case "pgup":
+			m.scrollStatusPanel(-step)
+			return m, nil
+		case "pgdown":
+			m.scrollStatusPanel(step)
+			return m, nil
+		case "home":
+			m.scrollStatusPanelTo(false)
+			return m, nil
+		case "end":
+			m.scrollStatusPanelTo(true)
+			return m, nil
+		}
+	}
+
 	// While a sub-agent run is streaming, the composer is disabled (no typing until
 	// the run ends), so ↑/↓ drive a selection cursor over the live sub-agent status
 	// rows and Enter expands the selected row to show its accumulated output inline.
@@ -1127,6 +1221,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "esc":
+		// An open status-bar drawer is the innermost Esc target: close it before
+		// any editor/quit handling, so Esc always dismisses what is on top.
+		if m.statusPanel.open() {
+			m.statusPanel.close()
+			m.relayout()
+			return m, nil
+		}
 		// In the full-screen composer Esc belongs to the editor: insert → normal,
 		// and in normal mode it cancels a pending count/operator. It must not
 		// quit, or a vim user's habitual Esc would kill the program. While a run
@@ -1293,6 +1394,9 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	if prompt == "" {
 		return m, nil
 	}
+	// Submitting anything dismisses an open status-bar drawer: what the user wants
+	// next is the response, and every path below re-runs relayout.
+	m.statusPanel.close()
 	// Record the input (as typed) into the browse history, then exit browse mode.
 	m.recordHistory(raw)
 	// The placeholders have been expanded into the prompt, so the stored paste
@@ -1650,8 +1754,12 @@ func (m Model) historyNext(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // tests) it records the pre-#392 system note and stays idle. It is shared by a
 // plain submit and by a slash prompt/skill command.
 func (m Model) startPrompt(prompt string) (tea.Model, tea.Cmd) {
+	// A run takes the screen back: any open status-bar drawer is dismissed so the
+	// answer streams into a full-height transcript.
+	m.statusPanel.close()
 	if m.startRunFn == nil {
 		m.transcript.addSystem("(run not wired up: see session assembly in #392)")
+		m.relayout()
 		return m, nil
 	}
 	// A config file changed since the last reload: apply it before this turn (a
@@ -1885,12 +1993,20 @@ func (m Model) renderContent() string {
 		height = 24
 	}
 
-	status := m.statusBar.Render(width)
+	status := m.statusBar.Render(width, m.statusPanel.section)
+
+	// The open status-bar drawer is hinged to the bar: it sits between the
+	// composer (and its overlays) and the bar, so a click on a block opens a list
+	// that reads upward from that block. relayout reserves exactly its rows.
+	drawer := m.statusPanelView(width)
 
 	// In the full-screen layout the composer owns every row above the status bar;
 	// the transcript, spinner, sub-agents and overlays step aside so the draft has
 	// the whole terminal and the hint bar is always visible.
 	if m.input.Fullscreen() {
+		if drawer != "" {
+			return m.input.View() + "\n" + drawer + "\n" + status
+		}
 		return m.input.View() + "\n" + status
 	}
 
@@ -1969,6 +2085,11 @@ func (m Model) renderContent() string {
 	}
 	b.WriteString(input)
 	b.WriteByte('\n')
+	// The status-bar drawer, when open, sits directly above the bar.
+	if drawer != "" {
+		b.WriteString(drawer)
+		b.WriteByte('\n')
+	}
 	// The status bar is the final line, pinned to the very bottom of the shell
 	// below the input editor.
 	b.WriteString(status)
@@ -2042,13 +2163,13 @@ func (m *Model) refreshMenu() {
 }
 
 // fullscreenRows is the number of terminal rows the full-screen composer may
-// occupy: everything above the status bar, which stays visible so the model,
-// context usage and cwd never disappear while editing.
+// occupy: everything above the status bar and its drawer, which stay visible so
+// the model, context usage and cwd never disappear while editing.
 func (m Model) fullscreenRows() int {
 	if m.height <= 0 {
 		return 0
 	}
-	return max(m.height-1, fullscreenMinRows)
+	return max(m.height-1-m.statusPanelHeight(), fullscreenMinRows)
 }
 
 // relayout re-sizes the transcript to the rows left after reserving the status
@@ -2063,7 +2184,15 @@ func (m *Model) relayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.ask.rows(m.theme, m.width, m.height)
+	// The full-screen composer is sized from the rows left above the bar, so it has
+	// to shrink when the status-bar drawer opens and grow back when it closes. Width
+	// goes first: the hint bar's row count (and therefore the text area's) depends
+	// on it.
+	if m.input.Fullscreen() {
+		m.input.SetWidth(m.width)
+		m.input.SetFullHeight(m.fullscreenRows())
+	}
+	rows := m.height - 1 - m.input.Height() - m.menu.rows() - m.picker.rows() - m.modelPicker.rows() - m.skillPicker.rows() - m.skillArgForm.rows() - m.mcpPicker.rows() - m.skillChipsRows() - m.statusPanelHeight() - m.ask.rows(m.theme, m.width, m.height)
 	if m.running {
 		rows-- // the working spinner occupies the row just above the input
 		// The sub-agent panel reserves one status row per live sub-agent, plus the
@@ -2076,6 +2205,37 @@ func (m *Model) relayout() {
 	}
 	m.transcript.setSize(m.width, rows)
 	m.input.SetWidth(m.width)
+}
+
+// contentWidth is the width the shell is painted at: the terminal width, or the
+// 80-column fallback renderContent uses before the first size message.
+func (m Model) contentWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return 80
+}
+
+// onStatusBar reports whether (x, y) is the status bar's own row — the last row of
+// the shell. A press there belongs to the bar's drawers, not to text selection.
+func (m Model) onStatusBar(x, y int) bool {
+	if m.height <= 0 || y != m.height-1 {
+		return false
+	}
+	return x >= 0 && x < m.contentWidth()
+}
+
+// pointerOverStatusPanel reports whether the terminal cell (x, y) belongs to the
+// open status-bar drawer or to the bar under it. The wheel uses it to decide
+// between scrolling the drawer's window and scrolling the transcript behind it.
+func (m Model) pointerOverStatusPanel(x, y int) bool {
+	if !m.statusPanel.open() || m.height <= 0 {
+		return false
+	}
+	if x < 0 || x >= m.contentWidth() {
+		return false
+	}
+	return y >= m.height-1-m.statusPanelHeight() && y <= m.height-1
 }
 
 // onScrollbar reports whether the terminal cell (x, y) is the transcript's

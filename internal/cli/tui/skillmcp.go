@@ -772,6 +772,26 @@ func (m Model) toggleMCPAtCursor() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.toggleMCPCmd(st.Name, !st.Active), m.tickSpinner())
 }
 
+// toggleMCPFromDrawer switches one server from the status bar's mcp drawer. It
+// shares toggleMCPAtCursor's off-loop path — spinner pinned, model marked running
+// for the duration so a prompt cannot race the switch, mcpToggleDoneMsg applies the
+// result — but none of the picker bookkeeping, since the drawer is not a picker and
+// stays open to show the new state.
+func (m Model) toggleMCPFromDrawer(name string, active bool) (tea.Model, tea.Cmd) {
+	if name == "" || m.running {
+		return m, nil
+	}
+	if m.session == nil || m.session.mcp == nil {
+		m.transcript.addSystem("(MCP switching unavailable: no active session)")
+		return m, nil
+	}
+	m.spinner.begin(time.Now(), m.thinkingLabel())
+	m.spinner.pin("Switching MCP server")
+	m.running = true
+	m.relayout()
+	return m, tea.Batch(m.toggleMCPCmd(name, active), m.tickSpinner())
+}
+
 // toggleMCPCmd switches one server off the tea loop and reports the result.
 func (m Model) toggleMCPCmd(name string, active bool) tea.Cmd {
 	mgr := m.session.mcp

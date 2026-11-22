@@ -152,7 +152,7 @@ func TestStatusBarUpdatesOnTurnEnd(t *testing.T) {
 	m = apply(t, m, tea.WindowSizeMsg{Width: 200, Height: 40})
 
 	// Before any turn the permanent segment shows its placeholder.
-	bar := stripANSI(m.statusBar.Render(200))
+	bar := stripANSI(m.statusBar.Render(200, m.statusPanel.section))
 	if !strings.Contains(bar, glyphCtx) {
 		t.Fatalf("context segment missing from a fresh bar: %q", bar)
 	}
@@ -161,7 +161,7 @@ func TestStatusBarUpdatesOnTurnEnd(t *testing.T) {
 	m.running = true
 	m.runCh = make(chan tea.Msg)
 	m = apply(t, m, textDeltaMsg{delta: strings.Repeat("a", 400)})
-	if bar := stripANSI(m.statusBar.Render(200)); !strings.Contains(bar, glyphCtx) {
+	if bar := stripANSI(m.statusBar.Render(200, m.statusPanel.section)); !strings.Contains(bar, glyphCtx) {
 		t.Fatalf("context segment vanished while streaming: %q", bar)
 	}
 
