@@ -8,7 +8,9 @@
 // <memoryRoot>/sessions/<id>/checkpoint.md, so an operator could not tell what
 // had been kept, and had no way to notice a summary that lost the thread. The
 // card reuses the tool-card renderer (bounded preview, Ctrl+O / click to expand)
-// because that is where a long, expandable block of text already renders well.
+// because that is where a long, expandable block of text already renders well —
+// but it is drawn as borderless conversation content and its body goes through the
+// Markdown renderer, since the summarizer writes it in a fixed Markdown shape.
 package tui
 
 import (
@@ -59,6 +61,20 @@ func liveCompactionNote(ev agentcore.CompactionEvent) string {
 		return "failed · context left unchanged"
 	}
 	return compactionNote(ev.TokensBefore, ev.TokensAfter, ev.SummarizedCount, ev.KeptCount)
+}
+
+// replayedCompactionID names the card of a checkpoint read back from a session
+// file. It uses its own namespace rather than the live counter's, because a
+// resumed session keeps minting live cards from that counter: the first
+// compaction after a resume is "compaction-1" no matter how many checkpoints the
+// file already carried. A replayed card numbered "compaction-<block index>" (what
+// this used to be) could therefore collide with a later live card, and a card id
+// is the *identity* of the transcript entry — selectCard, toggleSelectedCard and
+// revealCard all resolve through m.toolCards, so a collision made a click on the
+// new checkpoint highlight and expand the map's card while revealing the older
+// block: the view jumped to a different summary than the one that was clicked.
+func replayedCompactionID(seq int) string {
+	return fmt.Sprintf("compaction-replay-%d", seq)
 }
 
 // replayedCompactionCard builds the card for a compaction checkpoint read back

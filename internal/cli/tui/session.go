@@ -698,7 +698,7 @@ func seedTranscript(t *transcript, history []agentcore.Message) *toolCard {
 			// compaction produces, carrying the checkpoint text the model continues
 			// from — so a resumed conversation shows what replaced its history
 			// instead of only that something did.
-			appendCard(replayedCompactionCard(fmt.Sprintf("compaction-%d", len(t.blocks)), msg))
+			appendCard(replayedCompactionCard(replayedCompactionID(len(t.blocks)), msg))
 			t.activeAssistant = -1
 		case agentcore.ToolResultMessage:
 			card, ok := cards[msg.ToolCallID]

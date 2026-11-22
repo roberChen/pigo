@@ -65,6 +65,18 @@ interactive REPL/TUI.
   when `PIGO_PERF` is set) appends that report as one JSON line for soak and
   benchmark diffs.
 
+### Fixed
+- **Clicking a checkpoint's expand marker no longer jumps to a different
+  checkpoint.** A card id is the identity of a transcript entry — selecting,
+  toggling and revealing all resolve through the card index — and a resumed
+  session minted replayed checkpoints as `compaction-<block index>` while the live
+  counter restarted at 1, so the first compaction after a resume could reuse an id
+  the replayed block already held. `revealCard` then found the *older* block and
+  scrolled the transcript to it, while the click had expanded the newer one: the
+  view jumped to another summary. Replayed checkpoints now use their own
+  `compaction-replay-<n>` namespace, and `revealCard` matches the card by identity
+  rather than by id string alone, so a future duplicate cannot teleport the view
+  either.
 ### Changed
 - **A checkpoint now captures what the last turn *discovered*, not just what it
   did.** Compaction loses the one thing no file contains: why an approach failed,

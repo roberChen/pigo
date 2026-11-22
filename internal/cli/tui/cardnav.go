@@ -123,12 +123,25 @@ func (m *Model) toggleThinking(id string) {
 }
 
 // revealCard scrolls the transcript the least amount needed to show the card.
+//
+// The block is matched by card identity, not by id string alone: ids are supposed
+// to be unique, but a duplicate would otherwise reveal the *first* block carrying
+// that id while selectCard/toggleSelectedCard acted on the map's card — a click on
+// one checkpoint would expand another and scroll to it. Preferring the exact card
+// keeps the viewport on the block the user actually clicked, whichever producer
+// minted the id.
 func (m *Model) revealCard(id string) {
+	target := m.toolCards[id]
 	for i := range m.transcript.blocks {
-		if blk := m.transcript.blocks[i]; blk.role == roleTool && blk.card != nil && blk.card.id == id {
-			m.transcript.revealBlock(i)
-			return
+		blk := m.transcript.blocks[i]
+		if blk.role != roleTool || blk.card == nil || blk.card.id != id {
+			continue
 		}
+		if target != nil && blk.card != target {
+			continue
+		}
+		m.transcript.revealBlock(i)
+		return
 	}
 }
 
