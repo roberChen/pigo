@@ -382,3 +382,43 @@ func TestConfigReportSkillsOnlyDisk(t *testing.T) {
 		t.Errorf("no built-in skills means no built-in mention:\n%s", out)
 	}
 }
+
+// TestConfigReportIgnoredSkillCopies verifies the skills section names on-disk
+// copies that lost to a built-in skill and tells the reader how to opt in. Those
+// copies are what an older pigo installed into the skills directory; without this
+// line, editing one looks like it does nothing.
+func TestConfigReportIgnoredSkillCopies(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PIGO_SKILLS_DIR", dir)
+	report := &ConfigReport{
+		Cwd:    t.TempDir(),
+		Skills: []*runtime.Skill{{Frontmatter: runtime.SkillFrontmatter{Name: "pigorc", Description: "configure pigo"}, Path: "pigo://skills/pigorc/SKILL.md"}},
+		IgnoredSkills: []*runtime.Skill{{
+			Frontmatter: runtime.SkillFrontmatter{Name: "pigorc", Description: "stale copy"},
+			Path:        filepath.Join(dir, "pigorc", "SKILL.md"),
+		}},
+	}
+	out := report.Render("skills")
+	for _, want := range []string{
+		"ignored (1)",
+		"[skills] override_builtin",
+		filepath.Join(dir, "pigorc", "SKILL.md"),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestConfigReportIgnoredSkillCopiesOnly verifies the section still renders when an
+// ignored copy is all there is (a report assembled without a loaded set).
+func TestConfigReportIgnoredSkillCopiesOnly(t *testing.T) {
+	report := &ConfigReport{
+		Cwd:           t.TempDir(),
+		IgnoredSkills: []*runtime.Skill{{Frontmatter: runtime.SkillFrontmatter{Name: "pigorc"}, Path: "/tmp/pigorc/SKILL.md"}},
+	}
+	out := report.Render("skills")
+	if !strings.Contains(out, "ignored (1)") {
+		t.Errorf("the ignored copy should still be listed:\n%s", out)
+	}
+}

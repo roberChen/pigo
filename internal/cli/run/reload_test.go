@@ -31,6 +31,7 @@ func newTestEnv(t *testing.T, systemPrompt string) Env {
 	t.Setenv("PIGO_SKILLS_DIR", t.TempDir())
 	config.SetCurrentMCP(nil)
 	config.SetCurrentAgents(nil)
+	config.SetCurrentSkillOverrides(nil)
 	env, err := SetupEnv("openrouter/free", "", "", "", "", false, true, systemPrompt, nil, false, ToolPolicy{})
 	if err != nil {
 		t.Fatalf("SetupEnv: %v", err)

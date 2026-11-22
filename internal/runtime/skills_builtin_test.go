@@ -58,8 +58,9 @@ func TestLoadBuiltinSkillsIncludesPigorc(t *testing.T) {
 }
 
 // TestMergeSkillsDiskWins verifies a disk skill shadows a built-in one of the same
-// name, and that the result contains exactly one entry per name — a duplicate
-// would show up twice in /skill and in the model's skill list.
+// name when the name is listed as an override, and that the result contains exactly
+// one entry per name — a duplicate would show up twice in /skill and in the model's
+// skill list.
 func TestMergeSkillsDiskWins(t *testing.T) {
 	builtin, err := LoadBuiltinSkills()
 	if err != nil {
@@ -76,7 +77,10 @@ func TestMergeSkillsDiskWins(t *testing.T) {
 		t.Fatalf("LoadSkillsDir: %v", err)
 	}
 
-	merged := MergeSkills(builtin, disk)
+	merged, ignored := MergeSkills(builtin, disk, []string{"pigorc"})
+	if len(ignored) != 0 {
+		t.Fatalf("an authorized override must not be reported as ignored: %v", ignored)
+	}
 	var pigorc int
 	for _, s := range merged {
 		if s.Frontmatter.Name != "pigorc" {
@@ -99,6 +103,79 @@ func TestMergeSkillsDiskWins(t *testing.T) {
 	}
 }
 
+// TestMergeSkillsUnlistedDiskCopyIgnored verifies the default: a disk skill that
+// collides with a built-in is NOT used unless its name is listed under
+// [skills] override_builtin. Older pigo versions installed their built-ins into the
+// skills directory, so this default is what lets a shipped skill be fixed by an
+// upgrade instead of being pinned to the stale copy.
+func TestMergeSkillsUnlistedDiskCopyIgnored(t *testing.T) {
+	builtin, err := LoadBuiltinSkills()
+	if err != nil {
+		t.Fatalf("LoadBuiltinSkills: %v", err)
+	}
+	dir := t.TempDir()
+	own := "---\nname: pigorc\ndescription: stale copy\n---\n\n# stale body\n"
+	if err := os.WriteFile(filepath.Join(dir, "pigorc.md"), []byte(own), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	disk, err := LoadSkillsDir(dir)
+	if err != nil {
+		t.Fatalf("LoadSkillsDir: %v", err)
+	}
+
+	merged, ignored := MergeSkills(builtin, disk, nil)
+	var found *Skill
+	for _, s := range merged {
+		if s.Frontmatter.Name == "pigorc" {
+			found = s
+		}
+	}
+	if found == nil {
+		t.Fatal("pigorc is missing from the merged set")
+	}
+	if !builtinskills.IsVirtual(found.Path) {
+		t.Errorf("the built-in copy should win by default, got %q", found.Path)
+	}
+	if len(ignored) != 1 || ignored[0].Frontmatter.Name != "pigorc" {
+		t.Fatalf("ignored = %v, want the on-disk pigorc copy", ignored)
+	}
+	if builtinskills.IsVirtual(ignored[0].Path) {
+		t.Errorf("the ignored entry should point at the disk copy, got %q", ignored[0].Path)
+	}
+}
+
+// TestMergeSkillsOverrideNamesAreCaseAndSpaceInsensitive verifies the allow-list is
+// matched the way every other user-facing name match is: forgivingly.
+func TestMergeSkillsOverrideNamesAreCaseAndSpaceInsensitive(t *testing.T) {
+	builtin := []*Skill{{Frontmatter: SkillFrontmatter{Name: "pigorc"}, Path: "pigo://skills/pigorc/SKILL.md"}}
+	disk := []*Skill{{Frontmatter: SkillFrontmatter{Name: "pigorc"}, Path: "/tmp/pigorc.md"}}
+
+	merged, ignored := MergeSkills(builtin, disk, []string{"  PIGORC "})
+	if len(ignored) != 0 {
+		t.Fatalf("ignored = %v, want none", ignored)
+	}
+	if len(merged) != 1 || merged[0].Path != "/tmp/pigorc.md" {
+		t.Fatalf("merged = %v, want the disk copy", merged)
+	}
+}
+
+// TestMergeSkillsDuplicateDiskNamesKeepLast verifies two disk skills with the same
+// name (a stale foo.md next to foo/SKILL.md) do not get reported as built-in
+// collisions: only a real built-in name may shadow, and the disk copy still loads.
+func TestMergeSkillsDuplicateDiskNamesKeepLast(t *testing.T) {
+	disk := []*Skill{
+		{Frontmatter: SkillFrontmatter{Name: "foo"}, Path: "/tmp/foo.md"},
+		{Frontmatter: SkillFrontmatter{Name: "foo"}, Path: "/tmp/foo/SKILL.md"},
+	}
+	merged, ignored := MergeSkills(nil, disk, nil)
+	if len(ignored) != 0 {
+		t.Fatalf("ignored = %v, want none (no built-in collision)", ignored)
+	}
+	if len(merged) != 1 || merged[0].Path != "/tmp/foo/SKILL.md" {
+		t.Fatalf("merged = %v, want the later disk copy", merged)
+	}
+}
+
 // TestMergeSkillsBuiltinOnly verifies merging with no disk skills yields the
 // built-in set unchanged, so a fresh install (no skills dir) still works.
 func TestMergeSkillsBuiltinOnly(t *testing.T) {
@@ -106,7 +183,10 @@ func TestMergeSkillsBuiltinOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBuiltinSkills: %v", err)
 	}
-	merged := MergeSkills(builtin, nil)
+	merged, ignored := MergeSkills(builtin, nil, nil)
+	if len(ignored) != 0 {
+		t.Fatalf("ignored = %v, want none", ignored)
+	}
 	if len(merged) != len(builtin) {
 		t.Fatalf("merged %d skills, want %d", len(merged), len(builtin))
 	}

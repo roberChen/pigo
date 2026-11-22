@@ -15,9 +15,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/mcp"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // statusPanelTestModel builds a sized model with a live config and the git probe
@@ -250,6 +252,41 @@ func TestStatusBarDrawerEmptyListShowsNote(t *testing.T) {
 	}
 	if content := stripANSI(m.View().Content); !strings.Contains(content, "nothing to show") {
 		t.Errorf("empty drawer should say so:\n%s", content)
+	}
+}
+
+// TestStatusBarDrawerMarksBuiltinSkills verifies a built-in skill row says so, in
+// the row's detail and in the drawer title's count. The distinction is the whole
+// point: a built-in lives read-only in the binary, so a same-named disk copy is only
+// used when [skills] override_builtin lists it — a user editing that copy needs to
+// see which kind the loaded skill is.
+func TestStatusBarDrawerMarksBuiltinSkills(t *testing.T) {
+	m := NewModel(Options{Skills: []*runtime.Skill{
+		{Frontmatter: runtime.SkillFrontmatter{Name: "pigorc", Description: "configure pigo"},
+			Path: builtinskills.VirtualPath("pigorc", "SKILL.md")},
+		{Frontmatter: runtime.SkillFrontmatter{Name: "mine", Description: "my own skill"},
+			Path: "/home/u/.agents/skills/mine/SKILL.md"},
+	}})
+	m.statusPanel.section = sectionSkills
+	rows := m.statusPanelRows()
+	if len(rows) != 2 {
+		t.Fatalf("skill rows = %d, want 2", len(rows))
+	}
+	if want := "built-in · configure pigo"; rows[0].detail != want {
+		t.Errorf("built-in row detail = %q, want %q", rows[0].detail, want)
+	}
+	if rows[1].detail != "my own skill" {
+		t.Errorf("disk row detail = %q, want the bare description", rows[1].detail)
+	}
+
+	m = apply(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	m.relayout()
+	content := stripANSI(m.View().Content)
+	if !strings.Contains(content, "1 built-in, 1 from disk") {
+		t.Errorf("skills drawer title should count both kinds:\n%s", content)
+	}
+	if !strings.Contains(content, "built-in · configure pigo") {
+		t.Errorf("the built-in marker is not on screen:\n%s", content)
 	}
 }
 
@@ -693,12 +730,14 @@ func TestContextBlockOpensDrawer(t *testing.T) {
 }
 
 // TestContextDrawerExplainsTheReadout checks the drawer's rows account for the
-// number on the bar: the window it is measured against, the reserve auto-compaction
-// keeps free, the resulting threshold, and the distance to it. These are the loop's
-// own numbers (window - reserve), so the drawer cannot promise headroom the loop
-// does not have.
+// number on the bar: the window it is measured against, the rule that set the
+// threshold, and the distance to it. The threshold is the earliest of the reserve
+// line and the [checkpoint] ladder (80% by default), so the drawer quotes the
+// ladder rather than window-minus-reserve — which is what the loop compares
+// against and what a reader would otherwise compute and get wrong.
 func TestContextDrawerExplainsTheReadout(t *testing.T) {
 	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.live.ContextWindow = 128_000
 	m.ctxMeter.reset(128_000)
 	m.ctxMeter.observeTurn(agentcore.AssistantMessage{
 		RoleField: agentcore.RoleAssistant,
@@ -717,10 +756,10 @@ func TestContextDrawerExplainsTheReadout(t *testing.T) {
 	if got, want := rows["window"].detail, "128,000 tokens · the budget auto-compaction measures against"; got != want {
 		t.Errorf("window = %q, want %q", got, want)
 	}
-	if got, want := rows["threshold"].detail, "111,616 tokens · the window minus a 16,384 reserve"; got != want {
+	if got, want := rows["threshold"].detail, "102,400 tokens · the 80% threshold ladder"; got != want {
 		t.Errorf("threshold = %q, want %q", got, want)
 	}
-	if got, want := rows["remaining"].detail, "70,616 tokens until auto-compaction"; got != want {
+	if got, want := rows["remaining"].detail, "61,400 tokens until auto-compaction"; got != want {
 		t.Errorf("remaining = %q, want %q", got, want)
 	}
 	if rows["remaining"].warn {
@@ -745,7 +784,10 @@ func TestContextDrawerExplainsTheReadout(t *testing.T) {
 // percentage that is still under 100.
 func TestContextDrawerWarnsOverThreshold(t *testing.T) {
 	m := statusPanelTestModel(t, "openai/gpt-4o")
+	m.live.ContextWindow = 128_000
 	m.ctxMeter.reset(128_000)
+	// 120K is past the 80% ladder (102,400) but still under window-minus-reserve,
+	// which is the case the old readout silently reported as "room left".
 	m.ctxMeter.usageTokens = 120_000
 	m.ctxMeter.measured = true
 	m.statusPanel.section = sectionContext
@@ -754,7 +796,7 @@ func TestContextDrawerWarnsOverThreshold(t *testing.T) {
 	if !remaining.warn {
 		t.Error("a context past the threshold should be flagged")
 	}
-	if got, want := remaining.detail, "over the threshold by 8,384 tokens"; got != want {
+	if got, want := remaining.detail, "over the threshold by 17,600 tokens"; got != want {
 		t.Errorf("remaining = %q, want %q", got, want)
 	}
 	if !strings.Contains(stripANSI(m.View().Content), "over the threshold") {

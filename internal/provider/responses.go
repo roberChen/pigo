@@ -107,6 +107,7 @@ func (d *responsesDriver) StreamCompletion(ctx context.Context, req CompletionRe
 		Client:     d.httpClient,
 		NewRequest: newReq,
 		Decoder:    NewResponsesDecoder(d.name),
+		Meta:       req.Config.Meta,
 	})
 }
 

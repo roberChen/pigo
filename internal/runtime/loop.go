@@ -23,6 +23,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
@@ -427,14 +428,33 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 	if tel != nil {
 		tel.recordContext(before, cfg.ContextWindow)
 	}
-	if !compaction.ShouldCompact(before, cfg.ContextWindow, cfg.Compaction) {
+	// The fixed policy and the user's policy are merged here rather than in the
+	// loop body: DecideCompact also enforces the input-budget guard, so a policy
+	// that declines can never let an over-budget request reach the provider.
+	budget := compaction.InputBudget(cfg.ContextWindow, cfg.Compaction)
+	outcome := compaction.DecideCompact(ctx, compaction.TriggerInput{
+		ContextTokens: before,
+		ContextWindow: cfg.ContextWindow,
+		InputBudget:   budget,
+		ReserveTokens: cfg.Compaction.ReserveTokens,
+		TriggerPoint:  compaction.TriggerPoint(cfg.ContextWindow, cfg.Compaction),
+		Messages:      len(agentCtx.Messages),
+		Model:         cfg.Model,
+		Provider:      cfg.Provider,
+		Usage:         lastAssistantUsage(agentCtx.Messages),
+		ResponseMeta:  cfg.ResponseMeta,
+	}, cfg.Compaction, cfg.Trigger)
+	if !outcome.Compact {
 		return
 	}
+	// Name the reason in the events so the TUI/status panel can explain a
+	// compaction the user did not expect ("custom policy", "input budget guard").
+	reason := autoCompactReason(outcome)
 	for attempt := 1; ; attempt++ {
 		// Signal the start of each attempt so a front-end can keep (or adopt) its
 		// in-progress indicator while the summarization request — an LLM call that
 		// blocks the loop — is in flight.
-		_ = emit(agentcore.CompactionStartEvent{Reason: "threshold", TokensBefore: before, Attempt: attempt})
+		_ = emit(agentcore.CompactionStartEvent{Reason: reason, TokensBefore: before, Attempt: attempt})
 		att := attemptCompaction(ctx, agentCtx.Messages, cfg)
 		if att.err == nil && att.noop {
 			// Nothing to summarize (the cut point left no prefix). Retrying cannot
@@ -444,13 +464,13 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 		if att.err != nil {
 			// Report the attempt immediately (Retrying=true) so a front-end can show
 			// the failure without waiting out the backoff, then wait and go again.
-			_ = emit(attemptFailure(before, len(agentCtx.Messages), attempt, att.err, true))
+			_ = emit(attemptFailure(before, reason, len(agentCtx.Messages), attempt, att.err, true))
 			if !waitCompactionRetry(ctx, compactionRetryDelay(attempt)) {
 				// The run was cancelled while waiting. Close the compacting state with
 				// a final attempt carrying Retrying=false — otherwise a front-end that
 				// only clears its indicator on Retrying=false would stay stuck in it
 				// after the interruption it asked for.
-				emitFinal(attemptFailure(before, len(agentCtx.Messages), attempt,
+				emitFinal(attemptFailure(before, reason, len(agentCtx.Messages), attempt,
 					fmt.Errorf("%w (run interrupted before the retry)", att.err), false))
 				return
 			}
@@ -470,7 +490,7 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 		// pre-compaction size back (see compaction.EstimatePostCompactionTokens).
 		after := compaction.EstimatePostCompactionTokens(rebuilt)
 		_ = emit(agentcore.CompactionEvent{
-			Reason:          "threshold",
+			Reason:          reason,
 			TokensBefore:    before,
 			TokensAfter:     after,
 			SummarizedCount: summarized,
@@ -487,9 +507,9 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 // last word on it", which is the only signal a front-end needs to decide whether
 // to keep its compacting indicator up. The token counts describe the unchanged
 // context: a failed attempt never installs anything.
-func attemptFailure(before, kept, attempt int, err error, retrying bool) agentcore.CompactionEvent {
+func attemptFailure(before int, reason string, kept, attempt int, err error, retrying bool) agentcore.CompactionEvent {
 	return agentcore.CompactionEvent{
-		Reason:       "threshold",
+		Reason:       reason,
 		TokensBefore: before,
 		TokensAfter:  before,
 		KeptCount:    kept,
@@ -497,6 +517,42 @@ func attemptFailure(before, kept, attempt int, err error, retrying bool) agentco
 		ErrorMessage: err.Error(),
 		Retrying:     retrying,
 	}
+}
+
+// autoCompactReason renders a compaction trigger outcome as the short label the
+// compaction events carry, so the status panel and the transcript can say why a
+// compaction the user did not ask for happened.
+func autoCompactReason(outcome compaction.TriggerOutcome) string {
+	switch outcome.Reason {
+	case compaction.TriggerPolicy:
+		if d := strings.TrimSpace(outcome.Detail); d != "" {
+			return "policy: " + d
+		}
+		return "policy"
+	case compaction.TriggerBudgetGuard:
+		return "input budget guard"
+	case compaction.TriggerPolicyError:
+		return "policy failed; threshold"
+	default:
+		return "threshold"
+	}
+}
+
+// lastAssistantUsage returns the usage block of the most recent assistant message
+// that carries one, or nil. It is what TriggerInput.Usage reports: the trigger
+// policy sees the provider's own accounting for the turn that just finished,
+// rather than a second estimate pigo made up.
+func lastAssistantUsage(msgs agentcore.MessageList) *agentcore.Usage {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		am, ok := msgs[i].(agentcore.AssistantMessage)
+		if !ok {
+			continue
+		}
+		if am.Usage != nil {
+			return am.Usage
+		}
+	}
+	return nil
 }
 
 // runCompaction invokes compaction.Compact with the loop's summarization config,

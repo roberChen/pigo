@@ -243,7 +243,27 @@ func (m *Model) seedContextMeter() {
 	if m.session != nil {
 		m.ctxMeter.seed(m.session.agentCtx.Messages, window)
 	}
-	m.statusBar.SetContext(m.ctxMeter.view())
+	m.statusBar.SetContext(m.contextView())
+}
+
+// contextView is the meter's readout normalized to the window the loop actually
+// runs with (the live config's), so the bar's percentage and the drawer's
+// explanation are computed from one denominator.
+//
+// The meter keeps its own window copy because it can be seeded while no session is
+// bound (telemetry, a replayed transcript). That copy is a display cache and can go
+// stale relative to a /model switch, so it is never the denominator when the live
+// config has one: two surfaces showing two percentages of two windows is precisely
+// the confusion the drawer exists to prevent.
+func (m Model) contextView() telemetryEventView {
+	v := m.ctxMeter.view()
+	if w := m.contextWindow(); w > 0 {
+		v.window = w
+		if v.known {
+			v.util = float64(v.tokens) / float64(w)
+		}
+	}
+	return v
 }
 
 // syncContextWindow adopts a changed context-window budget (a /model switch can
@@ -254,7 +274,7 @@ func (m *Model) syncContextWindow() {
 		return
 	}
 	m.ctxMeter.setWindow(m.live.ContextWindow)
-	m.statusBar.SetContext(m.ctxMeter.view())
+	m.statusBar.SetContext(m.contextView())
 }
 
 // ceilDiv returns ceil(a/b) for non-negative a and positive b.

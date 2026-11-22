@@ -35,7 +35,6 @@ import (
 	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/ui"
-	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
@@ -217,8 +216,6 @@ func AskSide(setCancel func(context.CancelFunc), out io.Writer, host cli.Host, s
 			ThinkingLevel: settings.ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(settings.Provider),
 			GetAPIKey:     host.Creds().GetAPIKey,
-			ContextWindow: host.Live().ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{
@@ -228,6 +225,9 @@ func AskSide(setCancel func(context.CancelFunc), out io.Writer, host cli.Host, s
 		},
 		Reminders: host.Reminders(),
 	}
+	// The side run compacts against the same plan as the main conversation, so
+	// /btw cannot overflow a budget the main turn would have compacted.
+	run.AttachCompaction(&cfg, host.Live().Compaction)
 	// Wire the per-turn hook seams onto the side run's cfg; nil dispatcher is a
 	// no-op (FR-18).
 	if d := host.Dispatcher(); d != nil {

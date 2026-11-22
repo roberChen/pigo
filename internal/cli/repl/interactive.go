@@ -178,8 +178,12 @@ func Run(opts Options) error {
 		BaseURL:       opts.BaseURL,
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
-		ContextWindow: cli.DefaultContextWindow,
 	}
+	// The compaction plan (window, input ceiling, trigger ladder, reserve and any
+	// policy command) is resolved from the provider registry plus config.toml, so
+	// the loop and /memory read the same budget the session will run with.
+	live.Compaction = run.PlanCompaction(live.ProviderName, live.Model)
+	live.ContextWindow = live.Compaction.ContextWindow
 	// Bind the tools' image gate to the live model rather than a snapshot, so a
 	// /model switch to a text-only model stops read/view_image handing it a
 	// picture (which the wire would reject) without rebuilding the tool set.

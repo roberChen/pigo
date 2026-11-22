@@ -159,12 +159,23 @@ func ParseThresholdFraction(s string) (float64, bool) {
 	return f, true
 }
 
-// CompactionConfig is the [compaction] TOML table. Only max_context is wired
-// here; it lowers the auto-compaction trigger point and is always clamped by
-// the provider window by the consumer.
+// CompactionConfig is the [compaction] TOML table.
+//
+//   - max_context lowers the auto-compaction trigger point; the consumer always
+//     clamps it by the model's real input budget.
+//   - trigger is a user-defined policy command (see internal/compaction's
+//     CommandTrigger): it receives one JSON document on stdin and prints
+//     {"compact":true|false,"reason":"..."} on stdout. A policy that prints
+//     {"decide":false}, fails, or times out contributes no opinion, so the fixed
+//     threshold policy still decides.
 type CompactionConfig struct {
 	MaxContext string `toml:"max_context"`
+	Trigger    string `toml:"trigger"`
 }
+
+// TriggerCommand returns the configured policy command, trimmed. Empty means no
+// user policy.
+func (c CompactionConfig) TriggerCommand() string { return strings.TrimSpace(c.Trigger) }
 
 // ResolveMaxContext parses the max_context string form. An empty value yields
 // an unset MaxContext (no error).
@@ -184,6 +195,21 @@ type MaxContext struct {
 
 // IsSet reports whether max_context was configured.
 func (m MaxContext) IsSet() bool { return m.set }
+
+// Fraction returns the value as a proportion of a budget when the configured form
+// was a percentage, and 0 otherwise. It is what a consumer that resolves against
+// a budget other than the provider window (a per-model compact_at resolves against
+// the input budget) needs; Resolve keeps working against any budget passed in.
+func (m MaxContext) Fraction() float64 { return m.fraction }
+
+// Tokens returns the absolute token count when the configured form was a count
+// (not a percentage), and 0 otherwise.
+func (m MaxContext) Tokens() int {
+	if m.fraction > 0 {
+		return 0
+	}
+	return m.tokens
+}
 
 // Resolve returns the token budget for the given provider window: window*
 // fraction (rounded) for a percentage form, or the absolute token count
@@ -205,6 +231,12 @@ func (m MaxContext) Resolve(window int) int {
 // empty string is unset (no error); other malformed or non-positive values are
 // errors.
 func ParseMaxContext(s string) (MaxContext, error) {
+	return parseMaxContextField("max_context", s)
+}
+
+// parseMaxContextField is ParseMaxContext with the field's own name in the error
+// text, so a per-model compact_at reports apart from the global max_context.
+func parseMaxContextField(name, s string) (MaxContext, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return MaxContext{}, nil
@@ -212,11 +244,11 @@ func ParseMaxContext(s string) (MaxContext, error) {
 	if strings.HasSuffix(s, "%") {
 		n, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(s, "%")), 64)
 		if err != nil {
-			return MaxContext{}, fmt.Errorf("max_context: invalid percent %q: %w", s, err)
+			return MaxContext{}, fmt.Errorf("%s: invalid percent %q: %w", name, s, err)
 		}
 		f := n / 100
 		if f <= 0 || f > 1 {
-			return MaxContext{}, fmt.Errorf("max_context: percent out of range %q (want (0%%,100%%])", s)
+			return MaxContext{}, fmt.Errorf("%s: percent out of range %q (want (0%%,100%%])", name, s)
 		}
 		return MaxContext{set: true, fraction: f}, nil
 	}
@@ -230,10 +262,10 @@ func ParseMaxContext(s string) (MaxContext, error) {
 	}
 	n, err := strconv.ParseFloat(strings.TrimSpace(body), 64)
 	if err != nil {
-		return MaxContext{}, fmt.Errorf("max_context: invalid token count %q: %w", s, err)
+		return MaxContext{}, fmt.Errorf("%s: invalid token count %q: %w", name, s, err)
 	}
 	if n <= 0 {
-		return MaxContext{}, fmt.Errorf("max_context: must be positive %q", s)
+		return MaxContext{}, fmt.Errorf("%s: must be positive %q", name, s)
 	}
 	return MaxContext{set: true, tokens: int(n*mult + 0.5)}, nil
 }
@@ -248,6 +280,10 @@ type MemorySettings struct {
 	CheckpointReserved   IntOrString
 	CheckpointPushCaps   map[string]int
 	MaxContext           MaxContext
+	// CompactionTrigger is the user-defined policy command from
+	// [compaction] trigger, empty when none is configured. It is a shell command
+	// run by internal/compaction's CommandTrigger.
+	CompactionTrigger string
 }
 
 // ResolveMemorySettings resolves the three nested tables into MemorySettings,
@@ -261,5 +297,6 @@ func (c FileConfig) ResolveMemorySettings() MemorySettings {
 		CheckpointReserved:   c.Checkpoint.Reserved,
 		CheckpointPushCaps:   c.Checkpoint.PushCaps,
 		MaxContext:           mc,
+		CompactionTrigger:    c.Compaction.TriggerCommand(),
 	}
 }

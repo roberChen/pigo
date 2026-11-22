@@ -520,7 +520,7 @@ func runREPL(in io.Reader, out io.Writer, deps replDeps) error {
 			// session id, and messages) that a string→string Action closure
 			// cannot reach, so it is intercepted here.
 			memstatus.RunMemory(out, deps.memstore, deps.memoryRoot, deps.header.ID,
-				deps.agentCtx.Messages, deps.live.ContextWindow)
+				deps.agentCtx.Messages, deps.live.CompactionDetail())
 			continue
 		}
 		if line == "/dream" || strings.HasPrefix(line, "/dream ") {
@@ -677,8 +677,6 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 			ThinkingLevel: deps.live.ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(deps.live.Provider),
 			GetAPIKey:     deps.creds.GetAPIKey,
-			ContextWindow: deps.live.ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{
@@ -690,6 +688,11 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 		SessionID:  deps.header.ID,
 		MemoryRoot: deps.memoryRoot,
 	}
+	// The turn runs with the session's resolved compaction plan: the model's own
+	// window and input ceiling, the configured trigger ladder/reserve, and the
+	// user's policy command. Resolving it live (rather than copying a window at
+	// assembly) is what makes a /model switch land on the next turn.
+	run.AttachCompaction(&cfg, deps.live.Compaction)
 	// Per-turn wiring of the tool-execution + Stop seams (PreToolUse/PostToolUse/
 	// Stop) onto this turn's freshly-built cfg; a nil dispatcher is a no-op so the
 	// hot path pays nothing when no hooks are configured (FR-18).
@@ -1223,8 +1226,6 @@ func runManualCompact(out io.Writer, deps replDeps) {
 			Provider:      deps.live.ProviderName,
 			ThinkingLevel: deps.live.ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(deps.live.Provider),
-			ContextWindow: deps.live.ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 		SessionID:  deps.header.ID,
 		MemoryRoot: deps.memoryRoot,
@@ -1232,6 +1233,9 @@ func runManualCompact(out io.Writer, deps replDeps) {
 	if deps.creds != nil {
 		cfg.GetAPIKey = deps.creds.GetAPIKey
 	}
+	// Manual compaction summarizes to the model's window too: the summary prompt
+	// and the reserve math are the same ones the automatic path uses.
+	run.AttachCompaction(&cfg, deps.live.Compaction)
 	fmt.Fprintln(out, ui.Colorize(ui.Enabled(), ui.Dim, "Compacting conversation…"))
 	res, err := runtime.CompactContext(context.Background(), deps.agentCtx.Messages, &cfg, "manual")
 	if err != nil {
@@ -1278,13 +1282,12 @@ func runManualRebuild(out io.Writer, deps replDeps) {
 			Provider:      deps.live.ProviderName,
 			ThinkingLevel: deps.live.ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(deps.live.Provider),
-			ContextWindow: deps.live.ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 	}
 	if deps.creds != nil {
 		cfg.GetAPIKey = deps.creds.GetAPIKey
 	}
+	run.AttachCompaction(&cfg, deps.live.Compaction)
 
 	// Checkpoints live at <memoryRoot>/sessions/<id>/checkpoint.md; recover from
 	// the same root streamRun writes to. Empty when memory is disabled — then

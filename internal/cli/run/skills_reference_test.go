@@ -13,6 +13,7 @@ import (
 
 	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/config"
+	"github.com/roberChen/pigo/internal/runtime"
 )
 
 // TestLoadSkillsPublishesConfigReference verifies the built-in pigorc skill is
@@ -83,13 +84,16 @@ func TestLoadSkillsPublishesConfigReference(t *testing.T) {
 	}
 }
 
-// TestUserSkillShadowsBuiltin verifies a hand-written skill of the same name on
-// disk wins over the built-in one, so a user can override a shipped skill — and
-// that overriding is how they customise it, since the built-in copy is read-only.
-func TestUserSkillShadowsBuiltin(t *testing.T) {
+// TestUserSkillShadowsBuiltinOnlyWhenConfigured verifies the two halves of the
+// override rule: a hand-written skill of the same name on disk is IGNORED by
+// default (so an upgrade's built-in fix is not pinned to a stale copy left behind by
+// an older pigo), and it wins once its name is listed under [skills]
+// override_builtin.
+func TestUserSkillShadowsBuiltinOnlyWhenConfigured(t *testing.T) {
 	skillsDir := t.TempDir()
 	t.Setenv("PIGO_HOME", t.TempDir())
 	t.Setenv("PIGO_SKILLS_DIR", skillsDir)
+	t.Cleanup(func() { config.SetCurrentSkillOverrides(nil) })
 
 	skillDir := filepath.Join(skillsDir, "pigorc")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -100,24 +104,50 @@ func TestUserSkillShadowsBuiltin(t *testing.T) {
 		t.Fatalf("write SKILL.md: %v", err)
 	}
 
-	skills, err := LoadSkills(false)
+	// Default: the built-in wins, and the unlisted copy is reported as ignored.
+	config.SetCurrentSkillOverrides(nil)
+	skills, ignored, err := LoadSkillsDetail(false)
 	if err != nil {
-		t.Fatalf("LoadSkills: %v", err)
+		t.Fatalf("LoadSkillsDetail: %v", err)
 	}
+	assertSinglePigorc(t, skills, true, false)
+	if len(ignored) != 1 || ignored[0].Frontmatter.Name != "pigorc" {
+		t.Fatalf("ignored = %v, want the on-disk pigorc copy", ignored)
+	}
+	if builtinskills.IsVirtual(ignored[0].Path) {
+		t.Errorf("the ignored entry should be the disk copy, got %q", ignored[0].Path)
+	}
+
+	// Opted in: the user's copy shadows the built-in, and nothing is ignored.
+	config.SetCurrentSkillOverrides([]string{"pigorc"})
+	skills, ignored, err = LoadSkillsDetail(false)
+	if err != nil {
+		t.Fatalf("LoadSkillsDetail: %v", err)
+	}
+	assertSinglePigorc(t, skills, false, true)
+	if len(ignored) != 0 {
+		t.Fatalf("ignored = %v, want none once the override is configured", ignored)
+	}
+}
+
+// assertSinglePigorc asserts the loaded set holds exactly one pigorc skill, with a
+// built-in (or disk) source, and — for the disk case — the user's body.
+func assertSinglePigorc(t *testing.T, skills []*runtime.Skill, wantBuiltin, wantUserBody bool) {
+	t.Helper()
 	var matches int
 	for _, s := range skills {
 		if s.Frontmatter.Name != "pigorc" {
 			continue
 		}
 		matches++
-		if builtinskills.IsVirtual(s.Path) {
-			t.Errorf("the user's pigorc must shadow the built-in, got %q", s.Path)
+		if got := builtinskills.IsVirtual(s.Path); got != wantBuiltin {
+			t.Errorf("pigorc built-in = %v, want %v (path %q)", got, wantBuiltin, s.Path)
 		}
-		if !strings.Contains(s.Body, "# mine") {
+		if wantUserBody && !strings.Contains(s.Body, "# mine") {
 			t.Errorf("the user's body should win, got %q", s.Body)
 		}
 	}
 	if matches != 1 {
-		t.Fatalf("pigorc appears %d times, want exactly 1 (the user's)", matches)
+		t.Fatalf("pigorc appears %d times, want exactly 1", matches)
 	}
 }

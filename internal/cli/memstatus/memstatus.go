@@ -33,13 +33,17 @@ var scopeOrder = []memory.Scope{
 // infinite context to out. store may be nil (persistent memory disabled), in
 // which case the memory-store section reports that state and the checkpoint /
 // context sections still render from msgs and the checkpoint file.
-func RunMemory(out io.Writer, store *memory.Store, memoryRoot, sessionID string, msgs agentcore.MessageList, contextWindow int) {
+//
+// trigger is the session's resolved compaction trigger (LiveConfig.CompactionDetail):
+// it carries the budget the loop measures against and the rule that set the point,
+// so this report cannot promise a threshold the run would not use.
+func RunMemory(out io.Writer, store *memory.Store, memoryRoot, sessionID string, msgs agentcore.MessageList, trigger compaction.TriggerDetail) {
 	color := ui.Enabled()
 
 	fmt.Fprintln(out)
 	printStoreSection(out, color, store, memoryRoot)
 	fmt.Fprintln(out)
-	printContextSection(out, color, msgs, contextWindow)
+	printContextSection(out, color, msgs, trigger)
 	fmt.Fprintln(out)
 	printCheckpointSection(out, color, memoryRoot, sessionID)
 }
@@ -109,16 +113,25 @@ func orderedScopes(counts map[memory.Scope]int) []memory.Scope {
 }
 
 // printContextSection prints the current context usage and the auto-compaction
-// trigger point (window minus reserve), mirroring /status's context block so
-// /memory is self-contained for infinite-context inspection.
-func printContextSection(out io.Writer, color bool, msgs agentcore.MessageList, contextWindow int) {
+// trigger point, mirroring /status's context block so /memory is self-contained for
+// infinite-context inspection.
+//
+// The trigger is reported from the resolved detail rather than recomputed as
+// window-minus-reserve: the loop compacts at the earliest of the reserve line, the
+// [checkpoint] ladder and any compact_at/max_context cap, measured against the
+// model's input budget. Recomputing would describe a threshold that never fires.
+func printContextSection(out io.Writer, color bool, msgs agentcore.MessageList, trigger compaction.TriggerDetail) {
 	tokens := compaction.EstimateContextTokens(msgs).Tokens
 
 	fmt.Fprintf(out, "%s\n", ui.Colorize(color, ui.Bold, "context:"))
-	if contextWindow > 0 {
+	if trigger.Window > 0 {
 		fmt.Fprintf(out, "  %s %d / %d tokens\n",
-			ui.Colorize(color, ui.Dim, "current:"), tokens, contextWindow)
-		util := int(float64(tokens) / float64(contextWindow) * 100)
+			ui.Colorize(color, ui.Dim, "current:"), tokens, trigger.Window)
+		if trigger.Budget > 0 && trigger.Budget != trigger.Window {
+			fmt.Fprintf(out, "  %s %d tokens\n",
+				ui.Colorize(color, ui.Dim, "input budget:"), trigger.Budget)
+		}
+		util := int(float64(tokens) / float64(trigger.Window) * 100)
 		utilColor := ui.Green
 		if util >= 90 {
 			utilColor = ui.Red
@@ -128,26 +141,48 @@ func printContextSection(out io.Writer, color bool, msgs agentcore.MessageList, 
 		fmt.Fprintf(out, "  %s %s\n",
 			ui.Colorize(color, ui.Dim, "utilization:"),
 			ui.Colorize(color, utilColor, fmt.Sprintf("%d%%", util)))
-
-		reserve := compaction.DefaultCompactionSettings.ReserveTokens
-		threshold := contextWindow - reserve
-		remaining := threshold - tokens
-		if remaining < 0 {
-			fmt.Fprintf(out, "  %s %s (window: %d, reserve: %d)\n",
-				ui.Colorize(color, ui.Dim, "compaction trigger:"),
-				ui.Colorize(color, ui.Red, fmt.Sprintf("%d tokens over trigger (%d)", -remaining, threshold)),
-				contextWindow, reserve)
-		} else {
-			fmt.Fprintf(out, "  %s %s (window: %d, reserve: %d)\n",
-				ui.Colorize(color, ui.Dim, "compaction trigger:"),
-				ui.Colorize(color, ui.Green, fmt.Sprintf("%d tokens until trigger (%d)", remaining, threshold)),
-				contextWindow, reserve)
-		}
 	} else {
 		fmt.Fprintf(out, "  %s %d tokens\n", ui.Colorize(color, ui.Dim, "current:"), tokens)
+	}
+
+	switch {
+	case trigger.Point <= 0 && trigger.Window <= 0:
 		fmt.Fprintf(out, "  %s %s\n",
 			ui.Colorize(color, ui.Dim, "compaction trigger:"),
 			ui.Colorize(color, ui.Yellow, "auto-compaction disabled (unknown window)"))
+	case trigger.Point <= 0:
+		fmt.Fprintf(out, "  %s %s\n",
+			ui.Colorize(color, ui.Dim, "compaction trigger:"),
+			ui.Colorize(color, ui.Yellow, "auto-compaction disabled (compaction.enabled is off)"))
+	default:
+		explain := fmt.Sprintf("at %d, reserve %d, by %s", trigger.Point, trigger.Reserve, triggerSourceLabel(trigger.Source))
+		remaining := trigger.Point - tokens
+		if remaining < 0 {
+			fmt.Fprintf(out, "  %s %s (%s)\n",
+				ui.Colorize(color, ui.Dim, "compaction trigger:"),
+				ui.Colorize(color, ui.Red, fmt.Sprintf("%d tokens over trigger", -remaining)),
+				explain)
+		} else {
+			fmt.Fprintf(out, "  %s %s (%s)\n",
+				ui.Colorize(color, ui.Dim, "compaction trigger:"),
+				ui.Colorize(color, ui.Green, fmt.Sprintf("%d tokens until trigger", remaining)),
+				explain)
+		}
+	}
+}
+
+// triggerSourceLabel names the rule that set the trigger point, so a number the
+// user did not configure is not presented as if they had.
+func triggerSourceLabel(source compaction.TriggerSource) string {
+	switch source {
+	case compaction.TriggerSourceLadder:
+		return "the threshold ladder"
+	case compaction.TriggerSourceConfigured:
+		return "your configured cap"
+	case compaction.TriggerSourceReserve:
+		return "the reserve"
+	default:
+		return "the fixed policy"
 	}
 }
 

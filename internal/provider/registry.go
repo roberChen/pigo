@@ -534,6 +534,14 @@ type DeclaredModel struct {
 	// SupportsImages is nil when the declaration only lists the model and leaves
 	// the capability to the provider's default.
 	SupportsImages *bool
+	// Limits states the model's token budgets. A zero ContextWindow leaves the
+	// window to pigo's built-in table (or the conservative fallback); a non-zero
+	// MaxInputTokens overrides the input ceiling independently, which is what a
+	// "max input + max output" model needs.
+	Limits ModelLimits
+	// Trigger states where auto-compaction fires for this model, overriding the
+	// threshold ladder. A zero value leaves the ladder in force.
+	Trigger ModelTrigger
 }
 
 // declaredPresetIDs records which preset catalog entries were added by a model
@@ -571,10 +579,13 @@ func RegisterDeclaredModels(providerName string, models []DeclaredModel) {
 
 	if len(models) == 0 {
 		delete(modelImageSupport, providerName)
+		delete(modelLimits, providerName)
 		return
 	}
 
 	decls := make(map[string]bool, len(models))
+	limits := make(map[string]ModelLimits, len(models))
+	triggers := make(map[string]ModelTrigger, len(models))
 	var added []string
 	for _, m := range models {
 		id := strings.TrimSpace(m.ID)
@@ -583,6 +594,12 @@ func RegisterDeclaredModels(providerName string, models []DeclaredModel) {
 		}
 		if m.SupportsImages != nil {
 			decls[id] = *m.SupportsImages
+		}
+		if !m.Limits.IsZero() {
+			limits[id] = m.Limits.Normalize()
+		}
+		if !m.Trigger.IsZero() {
+			triggers[id] = m.Trigger
 		}
 		// Make the model selectable: update the label of an entry the provider's
 		// own list already created, or add one.
@@ -601,6 +618,16 @@ func RegisterDeclaredModels(providerName string, models []DeclaredModel) {
 	}
 	if len(added) > 0 {
 		declaredPresetIDs[providerName] = added
+	}
+	if len(limits) > 0 {
+		modelLimits[providerName] = limits
+	} else {
+		delete(modelLimits, providerName)
+	}
+	if len(triggers) > 0 {
+		modelTriggers[providerName] = triggers
+	} else {
+		delete(modelTriggers, providerName)
 	}
 	if len(decls) == 0 {
 		delete(modelImageSupport, providerName)

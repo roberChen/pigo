@@ -87,9 +87,18 @@ func loadConfigLayers(cwd, buildVersion string, trusted bool) configLayers {
 	messages = append(messages, registerConfiguredProviders(file.Providers, file.Models)...)
 	// Custom sub-agents come only from the pigorc scripts; the tool assembly
 	// (run.SetupEnv) registers them. MCP servers come from config.toml `[[mcp]]`
-	// and pigorc `mcp add ...`, and are connected there too.
+	// and pigorc `mcp add ...`, and are connected there too. The skill override
+	// allow-list comes from config.toml `[skills]` / pigorc `option
+	// skills.override-builtin`, and is applied by run.LoadSkills.
 	config.SetCurrentAgents(pigorc.Agents)
 	config.SetCurrentMCP(file.MCP)
+	config.SetCurrentSkillOverrides(file.Skills.OverrideBuiltin)
+	// The [memory]/[checkpoint]/[compaction] tables have no CLI flags, so they are
+	// resolved from the file and published once per read. The run assembly reads
+	// them back through config.CurrentMemory when it resolves a model's
+	// compaction plan, which is what keeps every driver — and a /model switch —
+	// on the same window, ladder, reserve and policy command.
+	config.SetCurrentMemory(file.ResolveMemorySettings())
 	return configLayers{pigorc: pigorc, file: file, messages: messages}
 }
 

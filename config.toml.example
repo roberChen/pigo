@@ -177,3 +177,24 @@ no_skills = false
 # percentage of the provider window ("50%"). It only lowers the trigger point and
 # is always clamped by the provider limit.
 # max_context = "300K"
+#
+# trigger is a user-defined policy for gateways that report their own accounting
+# (a non-standard usage field, a remaining-quota header, a per-request budget in
+# the body). It receives one JSON document on stdin describing the context and
+# the last upstream response (contextTokens, inputBudget, usage, responseMeta)
+# and prints {"compact":true|false,"reason":"..."}. Printing {"decide":false},
+# failing, or timing out means "no opinion": the fixed threshold still decides,
+# so a broken policy can never stop an over-budget context from compacting.
+# trigger = "./.pigo/compaction-policy.sh"
+
+# --- Skills ---
+
+# [skills] tunes skill discovery itself.
+# [skills]
+# override_builtin = ["pigorc"]
+#   A built-in skill lives read-only inside the binary at
+#   pigo://skills/<name>/SKILL.md and normally wins over a same-named file under
+#   ~/.agents/skills (PIGO_SKILLS_DIR). That default exists because older pigo
+#   versions COPIED their built-ins into the skills dir: those stale copies must
+#   not pin an upgraded install to an old skill. List a name here to use YOUR
+#   on-disk copy instead. Ignored copies are listed by the pigo_config tool.

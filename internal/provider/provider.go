@@ -110,6 +110,12 @@ type StreamConfig struct {
 	ThinkingLevel agentcore.ThinkingLevel
 	// Extra holds provider-specific options; opaque to the loop.
 	Extra map[string]any
+	// Meta, when non-nil, receives a bounded secret-free record of the upstream
+	// response (status, sanitized headers, raw SSE payloads). The runtime hands
+	// this to the pluggable compaction trigger so a user policy can read
+	// provider-specific accounting fields pigo does not model. nil disables
+	// capture, which is the default for callers that do not need it.
+	Meta *agentcore.ResponseMeta
 }
 
 // StreamFn produces a provider stream for a model + shaped context. Per the

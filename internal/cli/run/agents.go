@@ -25,18 +25,11 @@ import (
 	"github.com/roberChen/pigo/internal/agentcore"
 	"github.com/roberChen/pigo/internal/agenttool"
 	"github.com/roberChen/pigo/internal/cli/config"
-	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/diag"
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
 )
-
-// defaultAgentContextWindow is the fallback context-token budget for a sub-agent
-// run, mirroring internal/cli.DefaultContextWindow (which run cannot import
-// without an import cycle). Children therefore compact like a top-level run
-// instead of growing until the provider rejects the request.
-const defaultAgentContextWindow = 128000
 
 // agentBuildContext is the parent-side state an agent definition needs to build
 // its tool: the working directory and tool policy for the child set, the parent's
@@ -134,13 +127,14 @@ func buildAgentTool(def config.AgentConfig, name string, bc agentBuildContext) (
 				ThinkingLevel: thinking,
 				Stream:        provider.StreamFnFromProvider(childProv),
 				GetAPIKey:     creds.GetAPIKey,
-				// Children compact like a top-level run: without a window and
-				// thresholds a long delegation would silently overflow.
-				ContextWindow: defaultAgentContextWindow,
-				Compaction:    compaction.DefaultCompactionSettings,
 			},
 			Batch: agenttool.BatchConfig{ToolExecutorConfig: agenttool.ToolExecutorConfig{Registry: ToolRegistry(childTools)}},
 		}
+		// Children compact like a top-level run: the child model's own window and
+		// input ceiling, the configured ladder/reserve, and the user's policy. A
+		// delegation that outlives its budget must compact, not overflow — and it
+		// must use the same numbers the parent would for that model.
+		AttachCompaction(&cfg, PlanCompaction(childProviderName, childModel))
 		if d := hooks.NewDispatcher(hookSet, bc.cwd, diag.Writer()); d != nil {
 			deps := HookDeps{ProjectDir: bc.cwd, WarnLog: diag.Writer()}
 			InstallToolSeams(&cfg, d, deps)

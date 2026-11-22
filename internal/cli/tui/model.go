@@ -17,6 +17,7 @@ import (
 	"github.com/roberChen/pigo/internal/cli/memstatus"
 	"github.com/roberChen/pigo/internal/cli/perfcmd"
 	"github.com/roberChen/pigo/internal/cli/prompts"
+	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/status"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/diag"
@@ -257,8 +258,9 @@ func NewModel(opts Options) Model {
 		BaseURL:       opts.BaseURL,
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
-		ContextWindow: cli.DefaultContextWindow,
 	}
+	live.Compaction = run.PlanCompaction(live.ProviderName, live.Model)
+	live.ContextWindow = live.Compaction.ContextWindow
 	m := Model{
 		opts:         opts,
 		theme:        theme,
@@ -591,7 +593,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Grow the context readout as the answer streams, so the status bar moves
 		// during a long turn rather than only when it ends.
 		m.ctxMeter.addStream(msg.delta)
-		m.statusBar.SetContext(m.ctxMeter.view())
+		m.statusBar.SetContext(m.contextView())
 		return m, m.pumpNext()
 
 	case turnEndMsg:
@@ -601,7 +603,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tool results) is estimated and added. This is the fine-grained update the
 		// bar was missing — it lands once per turn, not once per run.
 		m.ctxMeter.observeTurn(msg.msg, msg.results)
-		m.statusBar.SetContext(m.ctxMeter.view())
+		m.statusBar.SetContext(m.contextView())
 		// Surface a failed or empty turn so a provider/API error is never silent.
 		// The loop delivers request failures (e.g. a 4xx from the endpoint) as a
 		// terminal assistant message with stopReason error/aborted via TurnEndEvent
@@ -714,7 +716,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cumulative + last-run telemetry report (US-002, #292). Then keep the pump
 		// running.
 		m.ctxMeter.observeTelemetry(msg.ev)
-		m.statusBar.SetContext(m.ctxMeter.view())
+		m.statusBar.SetContext(m.contextView())
 		if m.session != nil && m.session.telemetry != nil {
 			m.session.telemetry.Fold(msg.ev)
 		}
@@ -756,7 +758,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The context just shrank: reflect the loop's post-compaction count right
 		// away instead of waiting for the run-end telemetry.
 		m.ctxMeter.observeCompaction(msg.ev)
-		m.statusBar.SetContext(m.ctxMeter.view())
+		m.statusBar.SetContext(m.contextView())
 		m.addCompactionCard(msg.ev)
 		return m, m.pumpNext()
 
@@ -861,7 +863,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// loop's post-compaction count, and the checkpoint becomes a card so the
 			// operator can read what replaced the folded turns.
 			m.ctxMeter.observeCompaction(msg.ev)
-			m.statusBar.SetContext(m.ctxMeter.view())
+			m.statusBar.SetContext(m.contextView())
 			m.addCompactionCard(msg.ev)
 			// Persist now rather than waiting for the next turn end: the session file
 			// is what a resume replays, and compacting then quitting is a normal thing
@@ -1613,14 +1615,15 @@ func (m Model) runSlash(line string) (tea.Model, tea.Cmd) {
 		var store *memory.Store
 		var memoryRoot, sessionID string
 		var msgs agentcore.MessageList
-		window := m.live.ContextWindow
 		if m.session != nil {
 			store = m.session.memstore
 			memoryRoot = m.session.memoryRoot
 			sessionID = m.session.header.ID
 			msgs = m.session.agentCtx.Messages
 		}
-		memstatus.RunMemory(&buf, store, memoryRoot, sessionID, msgs, window)
+		// The trigger figures come from the same resolved plan buildConfig installs
+		// on the loop, so /memory cannot describe a threshold the run would ignore.
+		memstatus.RunMemory(&buf, store, memoryRoot, sessionID, msgs, m.live.CompactionDetail())
 		m.transcript.addSystem(strings.TrimRight(buf.String(), "\n"))
 		m.relayout()
 		return m, nil
@@ -1902,7 +1905,7 @@ func (m Model) startPrompt(prompt string) (tea.Model, tea.Cmd) {
 	// Count the prompt as it enters the conversation so the readout moves on
 	// submit, before the first turn has been generated.
 	m.ctxMeter.addUserPrompt(prompt)
-	m.statusBar.SetContext(m.ctxMeter.view())
+	m.statusBar.SetContext(m.contextView())
 	ch, cmd := m.startRunFn(prompt)
 	m.runCh = ch
 	m.running = true

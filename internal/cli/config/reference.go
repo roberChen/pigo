@@ -91,6 +91,9 @@ var modelFieldDocs = []fieldDoc{
 	{"provider", "string", "Provider that serves it; must exist as a built-in or a [[providers]] entry."},
 	{"display_name", "string", "Label in the /model picker; defaults to id."},
 	{"supports_images", "bool", "Declare this id a vision model (true) or text-only (false). This is the only image-capability setting: a provider has none, because one gateway serves both kinds. Omitted means pigo's default for the provider kind (text-only for a custom endpoint, vision-capable for a built-in one)."},
+	{"context_window", "string", "The model's advertised combined budget (input + output), e.g. \"1M\". Omitted means pigo's built-in table for the provider/family, else the conservative 128K fallback."},
+	{"max_input", "string", "The input-only ceiling when the provider publishes one smaller than context_window (the \"1M combined but 512K input\" shape). Omitted means the window is the input budget. Auto-compaction triggers on this budget, never on the combined window alone."},
+	{"compact_at", "string", "Where auto-compaction fires for this model: a token count (\"300K\") or a percentage of the input budget (\"70%\"). Omitted means the [checkpoint] thresholds ladder. Always capped by the real input ceiling."},
 }
 
 // agentFieldDocs documents every field of AgentConfig.
@@ -176,7 +179,8 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("## pigorc DSL\n\n")
 	b.WriteString("```bash\n")
 	b.WriteString("# set any config option (see the table below); a repeated scalar option wins, a list appends\n")
-	b.WriteString("option model \"zai/glm-4.6\"\n")
+	b.WriteString("option model glm-4.7             # a preset id; its provider is inferred\n")
+	b.WriteString("option model zai                 # or a bare provider name = its default model\n")
 	b.WriteString("option allowed-tools read\n")
 	b.WriteString("option reset allowed-tools          # clear a list\n\n")
 	b.WriteString("# command hook (same wire contract as config.json hooks)\n")
@@ -190,6 +194,8 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("# models (declared separately from the provider; --supports-images marks a vision model)\n")
 	b.WriteString("model add mycorp-large --provider mycorp\n")
 	b.WriteString("model add mycorp-vl --provider mycorp --supports-images --display-name \"MyCorp Vision\"\n")
+	b.WriteString("# pin token limits when the advertised window exceeds the real input ceiling\n")
+	b.WriteString("model add mycorp-long --provider mycorp --context-window 1M --max-input 512K --compact-at 70%\n")
 	b.WriteString("model remove mycorp-vl\n\n")
 	b.WriteString("# custom sub-agent (agents are defined in the pigorc only)\n")
 	b.WriteString("agent add researcher --description \"Read-only researcher\" --prompt-file ./researcher.md \\\n")
@@ -242,6 +248,11 @@ func ReferenceMarkdown(opts ReferenceOptions) string {
 	b.WriteString("or reports it back as text. Omitting the key leaves pigo's default for the provider kind:\n")
 	b.WriteString("`false` for a custom endpoint, `true` for a built-in one. Declare the vision ids of a\n")
 	b.WriteString("custom gateway explicitly, since its default is text-only.\n\n")
+	b.WriteString("A model id is referenced verbatim: a bare provider name means that provider's first\n")
+	b.WriteString("model, but `provider/id` is a routed id sent to the endpoint as-is (OpenRouter by\n")
+	b.WriteString("default), not a way to pick a provider. `/models fetch` asks the live endpoint for its\n")
+	b.WriteString("real catalog at runtime (session only, both wire protocols, nothing written); make the\n")
+	b.WriteString("ids durable with `provider add <name> --model <id>` / `model add <id>`.\n\n")
 	writeFieldTable(&b, "field", modelFieldDocs)
 	b.WriteString("\n")
 

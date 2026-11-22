@@ -124,6 +124,7 @@ provider() {
 }
 
 # model add <id> [--provider NAME] [--display-name T] [--supports-images|--no-supports-images]
+#               [--context-window N] [--max-input N] [--compact-at V]
 # model remove <id>
 #
 # A model is declared separately from the provider that serves it: "provider add"
@@ -131,6 +132,17 @@ provider() {
 # id and its capabilities. --supports-images marks it a vision model; the
 # --no- form marks one text-only id inside an otherwise vision-capable provider.
 # Omitting both inherits the provider's declaration.
+#
+# The token flags describe what the model will actually accept:
+#   --context-window N  the advertised combined budget (input + output), e.g. 1M
+#   --max-input N       the input-only ceiling when the provider publishes one
+#                       that is smaller than the window (the "1M combined but
+#                       only 512K input" shape). Auto-compaction triggers on
+#                       this budget, not on the combined window.
+#   --compact-at V      where auto-compaction fires: a token count ("300K") or a
+#                       percentage of the input budget ("70%%"). Defaults to the
+#                       [checkpoint] threshold ladder.
+# N accepts a plain count or a K/M suffix.
 model() {
   local action="${1:-}"
   shift || true
@@ -142,7 +154,7 @@ model() {
         return 0
       fi
       shift || true
-      local provider="" display_name="" supports=""
+      local provider="" display_name="" supports="" window="" max_input="" compact_at=""
       while [ $# -gt 0 ]; do
         case "$1" in
           --provider)
@@ -153,18 +165,24 @@ model() {
             supports="true"; shift ;;
           --no-supports-images|--no-vision)
             supports="false"; shift ;;
+          --context-window|--window)
+            window="${2:-}"; shift 2 || break ;;
+          --max-input|--input)
+            max_input="${2:-}"; shift 2 || break ;;
+          --compact-at|--trigger-at)
+            compact_at="${2:-}"; shift 2 || break ;;
           *)
             echo "pigorc: model add: unknown argument $1" >&2
             shift ;;
         esac
       done
-      __pigo_emit model add "$id" "$provider" "$display_name" "$supports"
+      __pigo_emit model add "$id" "$provider" "$display_name" "$supports" "$window" "$max_input" "$compact_at"
       ;;
     remove|rm)
       __pigo_emit model remove "${1:-}"
       ;;
     *)
-      echo "pigorc: usage: model add <id> [--provider NAME] [--display-name T] [--supports-images|--no-supports-images]" >&2
+      echo "pigorc: usage: model add <id> [--provider NAME] [--display-name T] [--supports-images|--no-supports-images] [--context-window N] [--max-input N] [--compact-at V]" >&2
       ;;
   esac
 }

@@ -30,7 +30,6 @@ import (
 	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/ui"
-	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/hooks"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
@@ -214,8 +213,6 @@ func runGoalLoop(setCancel func(context.CancelFunc), out io.Writer, host cli.Hos
 			ThinkingLevel: host.Live().ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(host.Live().Provider),
 			GetAPIKey:     host.Creds().GetAPIKey,
-			ContextWindow: host.Live().ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{
@@ -262,6 +259,11 @@ func runGoalLoop(setCancel func(context.CancelFunc), out io.Writer, host cli.Hos
 			}}
 		},
 	}
+
+	// The autonomous run compacts against the same plan as an interactive turn: a
+	// /goal that runs for many turns must not keep writing into a context whose
+	// budget the loop has stopped enforcing.
+	run.AttachCompaction(&cfg, host.Live().Compaction)
 
 	// Wire the per-turn hook seams (PreToolUse/PostToolUse/Stop) onto this goal
 	// run's cfg from the session dispatcher; a nil dispatcher is a no-op (FR-18).

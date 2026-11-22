@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/cli/run"
+	"github.com/roberChen/pigo/internal/compaction"
 	"github.com/roberChen/pigo/internal/provider"
 )
 
@@ -30,7 +32,18 @@ type LiveConfig struct {
 	// automatic compaction. When 0 the window is unknown and auto-compaction is
 	// disabled; the REPL seeds it with a conservative default so long sessions
 	// still compact rather than overflow.
+	//
+	// It is derived from Compaction (which see) rather than set independently: a
+	// model switch re-resolves the plan and copies its window here, so the status
+	// bar, /memory and the loop cannot disagree about the budget.
 	ContextWindow int
+
+	// Compaction is the resolved auto-compaction plan for Model/ProviderName: the
+	// window and input ceiling from the provider registry, the trigger ladder and
+	// reserve from config.toml, and the optional user policy command. Every driver
+	// installs it onto its RunConfig with run.AttachCompaction, so the loop's
+	// decision and the figures the UI shows come from the same numbers.
+	Compaction run.CompactionPlan
 
 	// FetchedModels is the online model catalog pulled from the live provider's
 	// endpoint by an explicit "/models fetch" (issue #566), sorted and
@@ -47,3 +60,33 @@ type LiveConfig struct {
 // on genuinely long sessions (threshold = window - ReserveTokens), never on
 // ordinary short exchanges.
 const DefaultContextWindow = 128000
+
+// CompactionSettings returns the settings the loop runs for the live model: the
+// resolved plan's, when the plan was resolved for this very model, else the
+// built-in defaults (a hand-built LiveConfig, or one whose plan is stale).
+func (l *LiveConfig) CompactionSettings() compaction.CompactionSettings {
+	if l == nil {
+		return compaction.DefaultCompactionSettings
+	}
+	if p := l.Compaction; p.Model == l.Model && p.ProviderName == l.ProviderName {
+		return p.Settings
+	}
+	return compaction.DefaultCompactionSettings
+}
+
+// CompactionDetail reports where auto-compaction will fire for this model and
+// which rule put it there — the numbers /status, /memory and the TUI drawer
+// render.
+//
+// It resolves through the same settings the loop runs and the same window the loop
+// compares against, so a front-end cannot show a threshold the loop would never
+// use: the model's input budget (not its combined window), the configured ladder,
+// the configured reserve and any absolute cap all come from one place. A UI that
+// recomputes window−reserve on its own is wrong whenever the reserve, the input
+// ceiling or the ladder is the tighter rule — which is the common case.
+func (l *LiveConfig) CompactionDetail() compaction.TriggerDetail {
+	if l == nil {
+		return compaction.TriggerDetail{Source: compaction.TriggerSourceOff}
+	}
+	return compaction.ExplainTrigger(l.ContextWindow, l.CompactionSettings())
+}

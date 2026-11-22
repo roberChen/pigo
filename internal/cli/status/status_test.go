@@ -290,3 +290,28 @@ func TestRunStatusShowsImageSupport(t *testing.T) {
 		t.Errorf("output does not say how to declare vision ids:\n%s", out)
 	}
 }
+
+// TestRunStatusSkillSources verifies /status counts built-in skills separately: they
+// are read-only files inside the binary, and a same-named disk copy only wins when
+// [skills] override_builtin lists it, so the split is what tells a user which of the
+// listed skills they can edit.
+func TestRunStatusSkillSources(t *testing.T) {
+	host := newFakeHost()
+	host.skills = []*runtime.Skill{
+		{Frontmatter: runtime.SkillFrontmatter{Name: "pigorc"}, Path: "pigo://skills/pigorc/SKILL.md"},
+		{Frontmatter: runtime.SkillFrontmatter{Name: "mine"}, Path: "/home/u/.agents/skills/mine/SKILL.md"},
+	}
+	var buf bytes.Buffer
+	RunStatus(&buf, host)
+	if out := buf.String(); !strings.Contains(out, "skills: 2 (1 built-in, 1 disk) (mine, pigorc)") {
+		t.Errorf("skills line should split the sources:\n%s", out)
+	}
+
+	// With no built-in loaded the line keeps its old, plain shape.
+	host.skills = []*runtime.Skill{{Frontmatter: runtime.SkillFrontmatter{Name: "mine"}, Path: "/home/u/.agents/skills/mine/SKILL.md"}}
+	buf.Reset()
+	RunStatus(&buf, host)
+	if out := buf.String(); !strings.Contains(out, "skills: 1 (mine)") {
+		t.Errorf("an all-disk skill set should not mention built-ins:\n%s", out)
+	}
+}

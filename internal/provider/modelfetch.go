@@ -3,15 +3,19 @@
 // /models catalog and /model switching can follow a provider's real lineup
 // instead of only the static preset catalog.
 //
-// Both wire formats pigo speaks expose a plain GET for it:
+// The catalog lives next to the wire path both formats speak — GET {base}/models
+// answering {"data":[{"id": ...}]} — so ONE parser serves both, and the protocol
+// selects only the auth convention (Bearer for OpenAI-compatible, x-api-key +
+// anthropic-version for Anthropic). {base} means the same thing here as it does
+// for chat: the value the driver posts to (e.g. ".../v1"), so an Anthropic base
+// of "https://api.anthropic.com/v1" yields GET /v1/models. Appending a version
+// segment here instead would produce /v1/v1/models for every Anthropic endpoint.
 //
-//   - OpenAI-compatible (and Responses) gateways: GET {base}/models
-//   - Anthropic Messages: GET {base}/v1/models
+// Only the standard shape is understood. A gateway whose catalog lives at another
+// path or in another shape is registered from a pigorc instead (`provider add
+// <name> --model <id>`), which is the path that also persists.
 //
-// and both answer {"data":[{"id": ...}]}, so one parser serves both. Auth
-// follows each protocol's request convention (Bearer for OpenAI-compatible,
-// x-api-key + anthropic-version for Anthropic). A local endpoint that needs no
-// key is fine: the key is sent only when non-empty.
+// A local endpoint that needs no key is fine: the key is sent only when non-empty.
 package provider
 
 import (
@@ -55,12 +59,14 @@ func FetchRemoteModels(ctx context.Context, baseURL, protocol, apiKey string) ([
 		return nil, err
 	}
 	base := strings.TrimRight(baseURL, "/")
-	path, auth := "/models", func(req *http.Request, key string) {
+	// The catalog path is "/models" on both protocols: it sits beside the path the
+	// driver posts to, and base already carries whatever version segment the
+	// endpoint uses. Only the credential convention differs.
+	path := "/models"
+	auth := func(req *http.Request, key string) {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	switch canonical {
-	case ProtocolAnthropic:
-		path = "/v1/models"
+	if canonical == ProtocolAnthropic {
 		auth = func(req *http.Request, key string) {
 			req.Header.Set("x-api-key", key)
 			req.Header.Set("anthropic-version", anthropicAPIVersion)
@@ -105,6 +111,17 @@ func FetchRemoteModels(ctx context.Context, baseURL, protocol, apiKey string) ([
 		}
 		seen[m.ID] = struct{}{}
 		ids = append(ids, m.ID)
+	}
+	// An empty catalog is a failure, not an answer. A non-standard catalog API
+	// commonly answers 200 with a different shape ({"result":...}, {"models":[...]},
+	// a paginated envelope), which decodes cleanly into a zero-value Data — and
+	// reporting "fetched 0 models" let that overwrite a good session catalog with
+	// nothing while looking like success. The caller keeps its previous list on
+	// error, so this is the difference between "nothing found" and "nothing there".
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("model discovery: %s %s returned no models; "+
+			"the endpoint may not expose the standard catalog — register its ids with "+
+			"`provider add <name> --model <id>` (or `model add <id>`) in a pigorc", http.MethodGet, path)
 	}
 	sort.Strings(ids)
 	return ids, nil

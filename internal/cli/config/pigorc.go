@@ -284,6 +284,12 @@ func buildPigorcScript(prelude string, paths []string) string {
 	// (crushrc semantics), so a broken helper cannot silently leave half a
 	// configuration applied and look like it succeeded.
 	b.WriteString("set -eu\n")
+	// The environment dump also runs from an EXIT trap, so a script that aborts
+	// (`set -e`) still reports the variables it exported before failing — the same
+	// "what it already did is kept" rule the records follow. parseEnv still treats a
+	// completely absent dump as "no evidence" (a timeout SIGKILLs bash, so the trap
+	// cannot run).
+	b.WriteString("trap '__pigo_env > \"$PIGO_RC_ENV_AFTER\"' EXIT\n")
 	b.WriteString("exec 3>\"$PIGO_RC_RECORDS\"\n")
 	fmt.Fprintf(&b, "source %s\n", shellQuote(prelude))
 	for _, p := range paths {
@@ -480,14 +486,17 @@ func (p *Pigorc) parseModelRecord(fields []string) {
 	}
 	switch fields[1] {
 	case "add":
-		if len(fields) != 6 {
+		if len(fields) != 9 {
 			p.warnf("model add: malformed record %v", fields)
 			return
 		}
 		def := ModelConfig{
-			ID:          strings.TrimSpace(fields[2]),
-			Provider:    strings.TrimSpace(fields[3]),
-			DisplayName: strings.TrimSpace(fields[4]),
+			ID:            strings.TrimSpace(fields[2]),
+			Provider:      strings.TrimSpace(fields[3]),
+			DisplayName:   strings.TrimSpace(fields[4]),
+			ContextWindow: strings.TrimSpace(fields[6]),
+			MaxInput:      strings.TrimSpace(fields[7]),
+			CompactAt:     strings.TrimSpace(fields[8]),
 		}
 		if def.ID == "" {
 			p.warnf("model add: the model id must not be empty")
@@ -504,6 +513,16 @@ func (p *Pigorc) parseModelRecord(fields []string) {
 			def.SupportsImages = &vision
 		default:
 			p.warnf("model add %s: supports-images must be true or false, got %q", def.ID, fields[5])
+			return
+		}
+		// Validate the token fields at parse time so a typo is reported against the
+		// line that wrote it instead of being dropped silently downstream.
+		if _, _, err := def.ResolveLimits(); err != nil {
+			p.warnf("model add %s: %v", def.ID, err)
+			return
+		}
+		if _, err := def.ResolveCompactAt(); err != nil {
+			p.warnf("model add %s: %v", def.ID, err)
 			return
 		}
 		// A repeated declaration replaces the earlier one, but keeps the fields
@@ -553,6 +572,17 @@ func mergeModelConfig(old, next ModelConfig) ModelConfig {
 	}
 	if merged.SupportsImages == nil {
 		merged.SupportsImages = old.SupportsImages
+	}
+	// The token fields are strings where "" means "not declared", so the same
+	// keep-old rule applies to them.
+	if merged.ContextWindow == "" {
+		merged.ContextWindow = old.ContextWindow
+	}
+	if merged.MaxInput == "" {
+		merged.MaxInput = old.MaxInput
+	}
+	if merged.CompactAt == "" {
+		merged.CompactAt = old.CompactAt
 	}
 	return merged
 }
@@ -863,9 +893,22 @@ func (p *Pigorc) warnf(format string, args ...any) {
 // parseEnv diffs the exported environment before and after the scripts ran and
 // records the changes. PIGO_RC_* scaffolding is filtered out so a script cannot
 // corrupt the harness.
+//
+// A missing "after" dump means the second dump never happened — the script aborted
+// (`set -eu`), hit the timeout, or the harness itself failed. That is "no
+// evidence", not "every inherited variable was unset": treating an absent dump as
+// an empty environment would put HOME, PIGO_HOME and every provider key in Unset,
+// which the caller then unsets in the process. One failing line — a `curl` that
+// cannot reach a catalogue, a `pass` that is not unlocked — would silently wipe the
+// credentials and paths the rest of the launch depends on, and the real cause would
+// surface only as an unrelated "missing API key" or "cannot resolve the default
+// store directory" error. Only a dump that was actually written is authoritative.
 func (p *Pigorc) parseEnv(beforePath, afterPath string) {
+	after, ok := readEnvDumpIfPresent(afterPath)
+	if !ok {
+		return
+	}
 	before := readEnvDump(beforePath)
-	after := readEnvDump(afterPath)
 	for k, v := range after {
 		if strings.HasPrefix(k, "PIGO_RC_") {
 			continue
@@ -887,6 +930,15 @@ func (p *Pigorc) parseEnv(beforePath, afterPath string) {
 		}
 	}
 	sort.Strings(p.Unset)
+}
+
+// readEnvDumpIfPresent is readEnvDump plus the "was it written at all" answer that
+// parseEnv needs: an absent dump must not be confused with an empty environment.
+func readEnvDumpIfPresent(path string) (map[string]string, bool) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, false
+	}
+	return readEnvDump(path), true
 }
 
 // readEnvDump parses a NUL-separated NAME/VALUE stream produced by the prelude.
@@ -1102,3 +1154,36 @@ func SetCurrentMCP(servers []mcp.ServerConfig) { currentMCP = servers }
 // CurrentMCP returns the MCP server definitions (nil when none were configured or
 // no config was loaded, e.g. in library use).
 func CurrentMCP() []mcp.ServerConfig { return currentMCP }
+
+// currentSkillOverrides holds the [skills] override_builtin allow-list resolved at
+// startup, so run.LoadSkills can apply it without threading the file config through
+// every driver.
+var currentSkillOverrides []string
+
+// SetCurrentSkillOverrides records the names of disk skills allowed to shadow a
+// built-in skill of the same name.
+func SetCurrentSkillOverrides(names []string) { currentSkillOverrides = names }
+
+// CurrentSkillOverrides returns the allow-list (nil when nothing was configured,
+// which means no disk skill may shadow a built-in one).
+func CurrentSkillOverrides() []string { return currentSkillOverrides }
+
+// currentMemory holds the resolved [memory]/[checkpoint]/[compaction] tables for
+// this process. It is published once per config read (startup and every reload)
+// so the run assembly can resolve a model's compaction settings — window caps,
+// the threshold ladder, the reserve, the policy command — without threading the
+// file config through every driver.
+var currentMemory atomic.Pointer[MemorySettings]
+
+// SetCurrentMemory records the resolved memory/checkpoint/compaction tables for
+// this process.
+func SetCurrentMemory(s MemorySettings) { currentMemory.Store(&s) }
+
+// CurrentMemory returns the resolved tables, falling back to the defaults when no
+// config was loaded (tests, library use) so a caller never has to nil-check.
+func CurrentMemory() MemorySettings {
+	if p := currentMemory.Load(); p != nil {
+		return *p
+	}
+	return FileConfig{}.ResolveMemorySettings()
+}

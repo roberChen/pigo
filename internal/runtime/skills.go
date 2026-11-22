@@ -277,14 +277,26 @@ func LoadBuiltinSkills() ([]*Skill, error) {
 	return skills, errors.Join(errs...)
 }
 
-// MergeSkills combines built-in and on-disk skills, letting a disk skill shadow a
-// built-in one of the same name. That is how a user overrides a shipped skill:
-// drop a directory with the same name into the skills dir and its SKILL.md — and
-// only its SKILL.md — is what /skill and the model see. The result is sorted by
-// name so the prompt listing is stable.
-func MergeSkills(builtin, disk []*Skill) []*Skill {
+// MergeSkills combines built-in and on-disk skills. A disk skill whose name matches
+// a built-in one is only used when the name appears in overrides: an allowed copy
+// shadows the built-in (that is how a shipped skill is customised), while an
+// unlisted copy is dropped and returned in ignored.
+//
+// The allow-list is not friction for its own sake. Older pigo versions copied their
+// built-in skills into the user's skills directory, so on an upgraded install those
+// stale copies would otherwise replace the new built-ins — silently, permanently,
+// and invisibly in /skill. A name in overrides says "yes, use MY copy of this one".
+// Both results are sorted by name so the prompt listing is stable.
+func MergeSkills(builtin, disk []*Skill, overrides []string) (merged, ignored []*Skill) {
+	allowed := make(map[string]bool, len(overrides))
+	for _, name := range overrides {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			allowed[name] = true
+		}
+	}
 	byName := make(map[string]*Skill, len(builtin)+len(disk))
 	order := make([]string, 0, len(builtin)+len(disk))
+	builtinNames := make(map[string]bool, len(builtin))
 	add := func(s *Skill) {
 		if s == nil {
 			return
@@ -296,19 +308,32 @@ func MergeSkills(builtin, disk []*Skill) []*Skill {
 		byName[name] = s
 	}
 	for _, s := range builtin {
+		if s != nil {
+			builtinNames[s.Frontmatter.Name] = true
+		}
 		add(s)
 	}
 	for _, s := range disk {
-		add(s) // disk wins: it is added later
+		if s == nil {
+			continue
+		}
+		if builtinNames[s.Frontmatter.Name] && !allowed[s.Frontmatter.Name] {
+			ignored = append(ignored, s)
+			continue
+		}
+		add(s) // an allowed disk skill wins: it is added later
 	}
-	merged := make([]*Skill, 0, len(order))
+	merged = make([]*Skill, 0, len(order))
 	for _, name := range order {
 		merged = append(merged, byName[name])
 	}
 	sort.Slice(merged, func(i, j int) bool {
 		return merged[i].Frontmatter.Name < merged[j].Frontmatter.Name
 	})
-	return merged
+	sort.Slice(ignored, func(i, j int) bool {
+		return ignored[i].Frontmatter.Name < ignored[j].Frontmatter.Name
+	})
+	return merged, ignored
 }
 
 // SubAgentSpec turns a skill into a sub-agent spec: the skill body becomes the

@@ -228,10 +228,11 @@ func TestPigorcOptionsOverlayFileConfig(t *testing.T) {
 			"dream.recent-sessions":       "5",
 		},
 		Lists: map[string][]string{
-			"allowed-tools":         {"read"},
-			"disallowed-tools":      {"bash"},
-			"prompts":               {"~/prompts"},
-			"checkpoint.thresholds": {"50%", "90%"},
+			"allowed-tools":           {"read"},
+			"disallowed-tools":        {"bash"},
+			"prompts":                 {"~/prompts"},
+			"checkpoint.thresholds":   {"50%", "90%"},
+			"skills.override-builtin": {"pigorc", "weather"},
 		},
 	}
 	var cfg FileConfig
@@ -282,6 +283,9 @@ func TestPigorcOptionsOverlayFileConfig(t *testing.T) {
 	}
 	if len(cfg.Prompts) != 1 || cfg.Prompts[0] != "~/prompts" {
 		t.Errorf("prompts = %v", cfg.Prompts)
+	}
+	if len(cfg.Skills.OverrideBuiltin) != 2 || cfg.Skills.OverrideBuiltin[1] != "weather" {
+		t.Errorf("skills.override_builtin = %v", cfg.Skills.OverrideBuiltin)
 	}
 }
 
@@ -356,6 +360,59 @@ func TestPigorcScriptFailureKeepsEarlierOptions(t *testing.T) {
 	}
 	if len(p.Warnings) == 0 {
 		t.Error("a failing script should be reported as a warning")
+	}
+}
+
+// TestPigorcAbortKeepsInheritedEnvironment: a script that aborts mid-way must not
+// be read as having unset the whole environment. The harness dumps the exported
+// environment a second time at the end of the script; when the script dies first,
+// that dump is absent — which is "no evidence", not "everything was unset". Reading
+// it as the latter put HOME, PIGO_HOME and every provider key into Unset, so one
+// failing line (a curl that cannot reach a model catalogue, a locked `pass`) wiped
+// the credentials the rest of the launch needed, and the symptom appeared as an
+// unrelated "missing API key" / "cannot resolve the default store directory".
+func TestPigorcAbortKeepsInheritedEnvironment(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, "export PIGO_TEST_BEFORE=1\noption model before\nfalse\noption model after\n")
+	t.Setenv("PIGO_TEST_INHERITED", "keep-me")
+	t.Setenv("PIGO_HOME", t.TempDir())
+
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.Unset) != 0 {
+		t.Errorf("unset = %v, want none: an aborted script cannot have unset the inherited environment", p.Unset)
+	}
+	if got := p.Env["PIGO_TEST_BEFORE"]; got != "1" {
+		t.Errorf("an export made before the failure was lost: %v", p.Env)
+	}
+	if got := p.Options["model"]; got != "before" {
+		t.Errorf("model = %q, want the option emitted before the failure", got)
+	}
+	if len(p.Warnings) == 0 {
+		t.Error("the abort should still be reported")
+	}
+}
+
+// TestPigorcUnsetStillRecorded guards the other half: a script that really removes
+// a variable, and finishes, is still reported — the abort fix must not disable the
+// feature.
+func TestPigorcUnsetStillRecorded(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, "unset PIGO_TEST_GONE\noption model kept\n")
+	t.Setenv("PIGO_TEST_GONE", "1")
+
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if len(p.Unset) != 1 || p.Unset[0] != "PIGO_TEST_GONE" {
+		t.Errorf("unset = %v, want [PIGO_TEST_GONE]", p.Unset)
 	}
 }
 
@@ -694,6 +751,75 @@ model remove legacy-model
 	}
 }
 
+// TestPigorcModelTokenLimits covers the token flags on `model add`: the combined
+// window, the smaller input ceiling, and this model's compaction trigger. They
+// exist so a gateway whose advertised budget exceeds what it will actually accept
+// can be corrected without waiting for a preset update, so a typo must be reported
+// against the declaring line rather than dropped.
+func TestPigorcModelTokenLimits(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	rc := filepath.Join(dir, ".pigorc")
+	writeFile(t, rc, `
+provider add mycorp --type openai --base-url "https://llm.mycorp.test/v1"
+model add mycorp-long --provider mycorp --context-window 1M --max-input 512K --compact-at 70%
+model add mycorp-plain --provider mycorp
+model add mycorp-bad --provider mycorp --max-input "not-a-size"
+`)
+	p, err := EvaluatePigorc(dir, []string{rc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	byID := map[string]ModelConfig{}
+	for _, m := range p.Models {
+		byID[m.ID] = m
+	}
+
+	long, ok := byID["mycorp-long"]
+	if !ok {
+		t.Fatalf("mycorp-long missing; models = %+v", p.Models)
+	}
+	window, maxInput, err := long.ResolveLimits()
+	if err != nil {
+		t.Fatalf("ResolveLimits: %v", err)
+	}
+	if window != 1_000_000 {
+		t.Errorf("context window = %d, want 1000000", window)
+	}
+	if maxInput != 512_000 {
+		t.Errorf("max input = %d, want 512000", maxInput)
+	}
+	compactAt, err := long.ResolveCompactAt()
+	if err != nil {
+		t.Fatalf("ResolveCompactAt: %v", err)
+	}
+	if !compactAt.IsSet() || compactAt.Fraction() != 0.7 {
+		t.Errorf("compact_at = set:%v fraction:%v, want set:true fraction:0.7",
+			compactAt.IsSet(), compactAt.Fraction())
+	}
+
+	// Declaring no token limits leaves them unset, so the built-in table decides.
+	plain := byID["mycorp-plain"]
+	if plain.ContextWindow != "" || plain.MaxInput != "" || plain.CompactAt != "" {
+		t.Errorf("mycorp-plain limits = %+v, want all unset", plain)
+	}
+
+	// A malformed size is rejected at parse time with a warning naming the model.
+	if _, ok := byID["mycorp-bad"]; ok {
+		t.Error("a model with an unparseable token limit must not be registered")
+	}
+	found := false
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "mycorp-bad") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one naming mycorp-bad", p.Warnings)
+	}
+}
+
 // TestPigorcModelOverlay verifies the script's model declarations merge into a
 // config.toml [[models]] set by id: the script wins, a partial re-declaration
 // keeps the fields it did not set, and `model remove` drops a lower-layer entry.
@@ -740,4 +866,93 @@ model remove stale-model
 	if _, ok := byID["keep-me"]; !ok {
 		t.Error("unrelated file declarations must survive")
 	}
+}
+
+// TestPigorcCatalogueDiscoveryFallback pins the failure contract of the shell-based
+// model discovery recipe documented in the pigorc skill and the README: a fetch that
+// fails must not leave a provider with zero models, and must not destroy the cache.
+//
+// curl and jq are stubbed as Bash functions, which keeps the test hermetic (no
+// network, no external binaries) while preserving the one behavior the recipe
+// depends on: `jq -e` fails on empty input, so the pipeline carries curl's failure
+// instead of reporting jq's success.
+func TestPigorcCatalogueDiscoveryFallback(t *testing.T) {
+	requireBash(t)
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "mycorp-models.txt")
+	pigorc := filepath.Join(dir, ".pigorc")
+	// `cache` and `FAKE_DOWN` come from the environment; the script runs under
+	// `set -u`, so both are defaulted here rather than assumed.
+	t.Setenv("FAKE_DOWN", filepath.Join(dir, "down"))
+	writeFile(t, pigorc, `
+cache="`+cache+`"
+curl() { [ -f "$FAKE_DOWN" ] && return 7; printf 'stub-large\nstub-vl\n'; }
+jq() { local in; in=$(cat); [ -n "$in" ] || return 4; printf '%s\n' "$in"; }
+
+provider add mycorp --type openai --base-url "https://llm.example/v1"
+if ids=$(curl -fsS "https://llm.example/v1/models" | jq -er '.data[].id'); then
+  printf '%s\n' "$ids" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+elif [ -s "$cache" ]; then
+  ids=$(cat "$cache")
+else
+  ids="fallback-large"
+fi
+for m in $ids; do provider add mycorp --model "$m"; done
+option model mycorp
+`)
+	down := filepath.Join(dir, "down")
+
+	// Cold start with an unreachable catalogue: the static fallback keeps the
+	// provider usable, so the run has a model instead of dying on an unresolvable
+	// provider name.
+	writeFile(t, down, "")
+	p, err := EvaluatePigorc(dir, []string{pigorc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if got := providerModels(p, "mycorp"); len(got) != 1 || got[0] != "fallback-large" {
+		t.Fatalf("cold start models = %v, want [fallback-large]", got)
+	}
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none: the fallback is not a failure", p.Warnings)
+	}
+
+	// Healthy catalogue: the ids are registered and the cache is written.
+	if err := os.Remove(down); err != nil {
+		t.Fatal(err)
+	}
+	p, err = EvaluatePigorc(dir, []string{pigorc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if got := providerModels(p, "mycorp"); len(got) != 2 || got[0] != "stub-large" || got[1] != "stub-vl" {
+		t.Fatalf("models = %v, want the fetched ids", got)
+	}
+	if data, err := os.ReadFile(cache); err != nil || string(data) != "stub-large\nstub-vl\n" {
+		t.Fatalf("cache = %q (%v), want the fetched ids", data, err)
+	}
+
+	// The catalogue goes down again: the cached list survives (a `> "$cache"`
+	// redirect would have truncated it before curl failed) and is used.
+	writeFile(t, down, "")
+	p, err = EvaluatePigorc(dir, []string{pigorc}, "test")
+	if err != nil {
+		t.Fatalf("EvaluatePigorc: %v", err)
+	}
+	if got := providerModels(p, "mycorp"); len(got) != 2 || got[0] != "stub-large" {
+		t.Fatalf("models = %v, want the cached ids", got)
+	}
+	if data, err := os.ReadFile(cache); err != nil || !strings.Contains(string(data), "stub-vl") {
+		t.Fatalf("cache = %q (%v), want the previous list intact", data, err)
+	}
+}
+
+// providerModels returns the model ids registered for a provider by the script.
+func providerModels(p *Pigorc, name string) []string {
+	for _, def := range p.Providers {
+		if def.Name == name {
+			return def.Models
+		}
+	}
+	return nil
 }

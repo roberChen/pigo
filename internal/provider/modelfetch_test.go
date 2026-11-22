@@ -35,8 +35,14 @@ func TestFetchRemoteModelsOpenAICompatible(t *testing.T) {
 	}
 }
 
-// TestFetchRemoteModelsAnthropic verifies the Anthropic path: GET {base}/v1/models
-// with x-api-key + anthropic-version headers.
+// TestFetchRemoteModelsAnthropic verifies the Anthropic path: the catalog sits at
+// {base}/models with x-api-key + anthropic-version headers, where {base} is the
+// same value the driver posts to.
+//
+// The regression this pins: base already carries the version segment (the built-in
+// anthropic provider's base is "https://api.anthropic.com/v1", and the Messages
+// driver posts to {base}/messages), so appending "/v1/models" produced
+// GET /v1/v1/models — a 404 on every Anthropic endpoint, built-in and custom.
 func TestFetchRemoteModelsAnthropic(t *testing.T) {
 	var gotPath, gotKey, gotVersion string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,12 +54,13 @@ func TestFetchRemoteModelsAnthropic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ids, err := FetchRemoteModels(context.Background(), srv.URL, "anthropic", "test-key")
+	// A base with the version segment, exactly as the driver receives it.
+	ids, err := FetchRemoteModels(context.Background(), srv.URL+"/v1", "anthropic", "test-key")
 	if err != nil {
 		t.Fatalf("FetchRemoteModels: %v", err)
 	}
 	if gotPath != "/v1/models" {
-		t.Errorf("path = %q, want /v1/models", gotPath)
+		t.Errorf("path = %q, want /v1/models (a version segment must not be appended again)", gotPath)
 	}
 	if gotKey != "test-key" || gotVersion != anthropicAPIVersion {
 		t.Errorf("headers = (%q, %q), want x-api-key + version", gotKey, gotVersion)
@@ -97,5 +104,37 @@ func TestFetchRemoteModelsFailures(t *testing.T) {
 	defer srv2.Close()
 	if _, err := FetchRemoteModels(context.Background(), srv2.URL, "openai", "k"); err == nil || !strings.Contains(err.Error(), "response shape") {
 		t.Errorf("malformed body error = %v, want response-shape failure", err)
+	}
+}
+
+// TestFetchRemoteModelsEmptyCatalogIsFailure verifies that a 200 with no standard
+// "data" entries is an error, not an empty success.
+//
+// A bespoke catalog API answers 200 in its own shape (here {"result":...}); that
+// decodes cleanly into a zero-value Data, so returning (nil, nil) made the command
+// report "fetched 0 models" and overwrite the session catalog with nothing. The
+// recipe for such a gateway is out of band (a pigorc registers the ids), so the
+// message has to say that much rather than look like a network hiccup.
+func TestFetchRemoteModelsEmptyCatalogIsFailure(t *testing.T) {
+	for name, body := range map[string]string{
+		"bespoke shape": `{"result":{"models":[{"key":"corp-a"}]}}`,
+		"empty data":    `{"data":[]}`,
+		"blank ids":     `{"data":[{"id":""}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			ids, err := FetchRemoteModels(context.Background(), srv.URL+"/v1", "openai", "k")
+			if err == nil {
+				t.Fatalf("ids = %v, want a failure: an empty catalog must not read as success", ids)
+			}
+			if !strings.Contains(err.Error(), "no models") || !strings.Contains(err.Error(), "pigorc") {
+				t.Errorf("error = %v, want it to name the empty catalog and the pigorc fallback", err)
+			}
+		})
 	}
 }

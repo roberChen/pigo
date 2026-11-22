@@ -86,6 +86,12 @@ type TransportConfig struct {
 	Decoder Decoder
 	// MaxConnectRetries bounds connect-only retries (default 2).
 	MaxConnectRetries int
+	// Meta, when non-nil, receives a bounded secret-free record of the response:
+	// its status, sanitized headers and the raw SSE payloads. The caller allocates
+	// it and reads it after the stream closes; it is how a custom compaction
+	// trigger sees provider-specific accounting fields pigo does not model. nil
+	// disables capture.
+	Meta *agentcore.ResponseMeta
 }
 
 // StreamRequest runs cfg as a transport stream. Per the dual failure model it
@@ -116,7 +122,7 @@ func StreamRequest(ctx context.Context, cfg TransportConfig) (*AssistantMessageE
 	}
 
 	stream := NewAssistantMessageEventStream(0)
-	go pump(ctx, stream, resp, cfg.Decoder)
+	go pump(ctx, stream, resp, cfg.Decoder, cfg.Meta)
 	return stream, nil
 }
 
@@ -168,9 +174,19 @@ func connect(ctx context.Context, client *http.Client, newReq func(context.Conte
 // pump drives the SSE read loop with dual watchdogs, decoding payloads and
 // forwarding events onto the stream. All runtime failures become a terminal
 // error event; pump always closes the stream.
-func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.Response, dec Decoder) {
+//
+// meta, when non-nil, receives a bounded secret-free record of the response
+// (status, sanitized headers, raw payloads) so a custom compaction trigger can
+// read provider-specific accounting fields that pigo does not model.
+func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.Response, dec Decoder, meta *agentcore.ResponseMeta) {
 	defer stream.Close()
 	defer resp.Body.Close()
+
+	if meta != nil {
+		meta.SetStatus(resp.StatusCode)
+		meta.SetHeaders(resp.Header)
+		meta.CountBody()
+	}
 
 	idle := idleTimeout()
 	// content-stall watchdog is slightly slacker than idle (idle × stallFactor)
@@ -232,6 +248,7 @@ func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.R
 		if payload == "[DONE]" {
 			return true
 		}
+		meta.AddPayload(payload)
 		events, err := dec.Decode([]byte(payload))
 		if err != nil {
 			fail("decode error: "+err.Error(), err)

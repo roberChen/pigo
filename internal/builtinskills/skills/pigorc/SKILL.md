@@ -20,8 +20,18 @@ answering detailed questions; use this file for the workflow and the recipes.
 
 This skill is built into the binary at `pigo://skills/pigorc/` and is read-only:
 `read` works, `write`/`edit` are refused. To customise it, put your own
-`pigorc/SKILL.md` under the skills directory — a disk skill shadows the built-in
-one of the same name.
+`pigorc/SKILL.md` under the skills directory AND list the name so it may shadow the
+built-in:
+
+```toml
+# ~/.config/pigo/config.toml
+[skills]
+override_builtin = ["pigorc"]
+```
+
+or in a pigorc: `option skills.override-builtin pigorc`. Without that line a disk
+copy of a built-in skill is ignored (the built-in wins) — the default that keeps a
+stale copy installed by an older pigo from pinning the skill forever.
 
 ## Where configuration lives
 
@@ -45,7 +55,8 @@ across every layer, and the script's hooks run last.
 
 ```bash
 # 1) options — any config.toml key (see reference.md for the full table)
-option model "zai/glm-4.6"
+option model glm-4.7               # a preset id; its provider is inferred
+option model zai                   # or a bare provider name = its default model
 option thinking-level high
 option allowed-tools read          # list keys append
 option allowed-tools grep
@@ -98,56 +109,122 @@ provider-discovery recipe below possible without a bespoke config format.
 
 ## Recipes
 
-**Switch the default model.** `option model "zai/glm-4.6"` (or a bare provider name
-like `zai` to use that provider's default). `option thinking-level high` for
-reasoning effort.
+**Switch the default model.** Two spellings, both real: a model id whose provider
+pigo can infer (`option model glm-4.7` → zai), or a bare provider name, which means
+"that provider's first model" (`option model zai`). Do **not** write
+`provider/id` (`zai/glm-4.7`): an id containing a slash is a routed id that is sent
+to the endpoint verbatim — OpenRouter by default — not a way to name a provider.
+Setting only `option provider <name>` does not select that provider's model either:
+the default model stays in effect, so pair it with `option model <name>` (the bare
+provider name) or an explicit id. `option thinking-level high` for reasoning
+effort.
 
-**Auto-configure a provider's model list from its own API.** A pigorc is real
-Bash, so a discovery script is just shell: fetch the catalogue, parse it, and call
-`provider add ... --model` once per id. This works with any OpenAI-compatible
-`/v1/models` endpoint (and any other API you can parse with `jq`):
+**Ask the live endpoint what it serves.** `/models fetch` makes the discovery
+request for you: `GET {base}/models` on either wire protocol — `{base}` is the
+same value chat posts to, so an Anthropic base that already ends in `/v1` yields
+`GET /v1/models` — with that protocol's auth header (Bearer, or `x-api-key` +
+`anthropic-version`) and the key resolved exactly as the run's own requests do.
+`{base}` is resolved the way chat resolves it too (flag/config `base_url`, the
+provider's base-URL env vars, `{PROVIDER}_BASE_URL`, then the registry default),
+so a provider retargeted with `OPENAI_BASE_URL` is discovered at that gateway
+rather than probed at the vendor's public host with the gateway's key. It reports
+how many ids it found plus the first few, puts them at the top of the `/models`
+picker marked `(fetched)`, and `/model <id>` then switches to one and stays on the
+gateway that served it. This is session state — nothing is written to any config
+file — so it answers "what can this endpoint serve right now" without committing
+to it. A failed fetch reports the reason (unknown provider, non-200, unexpected
+response shape, **or a 200 whose body contains no ids** — a catalogue in another
+shape must not read as "this endpoint serves nothing") and leaves both the static
+presets and any previously fetched catalogue intact. The request is capped at 10s.
+
+It is also strictly standard-shape: one path, `{"data":[{"id":...}]}`, no
+extension point and no pigorc execution. A gateway whose catalogue lives elsewhere
+or answers differently is registered with the loop below — that is the only path
+for such a gateway, and the only one that persists.
+
+**Persist the catalogue: a discovery loop in the pigorc.** A pigorc is real Bash,
+so discovery is just shell — fetch the catalogue, parse it, and call
+`provider add ... --model` once per id, which is what makes the ids part of the
+configuration (surviving a restart, usable by `--model`, inference, sub-agents and
+the picker). This works with any OpenAI-compatible `/v1/models` endpoint (and any
+other API you can parse with `jq`):
 
 ```bash
 provider add mycorp --type openai --base-url "$MYCORP_BASE_URL" --env-var MYCORP_API_KEY
-ids=$(curl -fsS -H "Authorization: Bearer $MYCORP_API_KEY" \
-        "$MYCORP_BASE_URL/models" | jq -r '.data[].id')
+
+cache="${PIGO_HOME:-$HOME/.pigo}/mycorp-models.txt"
+mkdir -p "$(dirname "$cache")"
+# `jq -e` (or `set -o pipefail`) is what makes a failed fetch abort the script:
+# a pipeline reports the *last* command's status, and jq reading empty input
+# exits 0, so a bare `curl -f ... | jq -r` hides the failure.
+if ids=$(curl -fsS --max-time 5 \
+           -H "Authorization: Bearer $MYCORP_API_KEY" \
+           "$MYCORP_BASE_URL/models" | jq -er '.data[].id'); then
+  # Fetch into a temp file: `> "$cache"` would truncate the good list below
+  # before curl has a chance to fail.
+  printf '%s\n' "$ids" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+elif [ -s "$cache" ]; then
+  ids=$(cat "$cache")                        # last known catalogue
+else
+  ids="${MYCORP_FALLBACK_IDS:-mycorp-large}" # cold start: still launchable
+fi
+
 for m in $ids; do
   case "$m" in
     *-vl) model add "$m" --provider mycorp --supports-images ;;  # a vision id
     *)    provider add mycorp --model "$m" ;;                    # a plain id
   esac
 done
-option provider mycorp
-option model mycorp/<first-id>      # or omit to use the provider's first model
+option model mycorp                 # bare provider name = its first registered id
+# or: option model mycorp-large      # a specific id from the loop
 ```
+
+An Anthropic-protocol gateway takes the same catalogue path (`{base}/models`,
+where `{base}` already carries `/v1` — do not append the version twice) but a
+different header (`x-api-key` plus `anthropic-version`). `/models fetch` already
+speaks both, so use it for a one-off and the loop above only for the catalogue you
+want persisted — including when the catalogue is not in the standard shape, which
+is the case `/models fetch` deliberately cannot serve.
 
 Because `provider add` **refines** an existing definition rather than replacing
 it, the per-id calls keep the `--base-url`/`--env-var` declared above; an explicit
 flag still overrides, so a project `.pigorc` can retarget a global definition. The
-first registered id is the provider's default.
+first registered id is the provider's default — which is exactly what
+`option model <provider-name>` resolves to.
 
 Network work needs more than the 15s evaluation budget on a slow API: export
-`PIGO_PIGORC_TIMEOUT=45s` (any Go duration). Keep the loop tolerant — `curl -f`
-plus `set -e` means a failed fetch aborts the load with a warning naming the
-error, rather than silently registering zero models; add `|| true` if a degraded
-catalogue is acceptable. To avoid a network round-trip on every launch, cache the
-result and fall back to a static list:
+`PIGO_PIGORC_TIMEOUT=45s` (any Go duration).
 
-```bash
-cache="$PIGO_HOME/mycorp-models.txt"
-if [ ! -s "$cache" ] || [ $(( $(date +%s) - $(date -r "$cache" +%s) )) -gt 86400 ]; then
-  curl -fsS "https://llm.mycorp.com/v1/models" | jq -r '.data[].id' > "$cache" || rm -f "$cache"
-fi
-[ -s "$cache" ] && while read -r m; do [ -n "$m" ] && provider add mycorp --model "$m"; done < "$cache"
-```
+**The failure mode to design against is "provider registered, zero models".** The
+script runs with `set -eu`, so a *statement* that fails aborts the load and keeps
+whatever was already emitted (`provider add`, `option`, `export`) — but a pipeline
+only reports its last command's status, and `jq -r` accepts empty input with exit
+0. Written the obvious way, an unreachable catalogue therefore *succeeds*: the
+provider is defined with no models, `option model mycorp` cannot resolve, and the
+launch dies later with `"mycorp" names a provider, not a model id; pass a model id
+(see /models) or select it with --provider mycorp` — an error that never mentions
+the fetch. Make the pipeline carry the failure (`jq -er`, or `set -o pipefail` at
+the top of the file) and give the script something to fall back to, as above: with
+a cache or a static id the run still starts, and any later error names the real
+problem (an unreachable endpoint) instead of the config.
+
+Diagnose with `PIGO_DEBUG=1 pigo ...`: the script's own stderr and
+`pigorc: exit status N` are diagnostics and silent by default. In the TUI they
+also show as queued lines, and `/status` reports what actually loaded.
 
 **Point at a self-hosted or third-party gateway.** Either
 `provider add <name> --type openai|anthropic --base-url URL [--env-var VAR]
-[--model id]...`, then `option provider <name>` and `option model <id>`; or for a
-one-off, `option base-url …` + `option protocol …`. The key comes from the declared
-env var (default `<NAME>_API_KEY`), a named credential, or an inline `--api-key`
-(the environment still wins). Defined providers behave like built-ins: `/model`
-switching, model-id inference and the preset picker all see them.
+[--model id]...`, then `option model <name>` (bare provider name = its default
+model) or `option model <id>` — `option provider` alone does not pick the model; or
+for a one-off, `option base-url …` + `option protocol …`. The key is the first of
+`--api-key`, or for the run's own provider `option api-key …` / `option credential
+<name>` (a reference into `$PIGO_HOME/.credentials.yaml`, mode 0600) — an explicit
+key from the config, so it outranks the environment; then the declared env var
+(default `<NAME>_API_KEY`); and last, for a `[[providers]]` entry (`provider add` has
+no flag for it) that entry's own `api_key`/`credential`, which ranks below the
+environment so a key can be rotated by exporting a new one. Defined providers
+behave like built-ins: `/model` switching, model-id inference and the preset
+picker all see them.
 
 **Declare a model — and mark it a vision model.** Provider and model are split:
 `provider add` describes the endpoint (protocol, URL, credential), `model add`
@@ -193,15 +270,45 @@ contract as config.json hooks (blocking events: `PreToolUse`, `UserPromptSubmit`
 `option checkpoint.thresholds 50%` (repeatable),
 `option checkpoint.reserved 8192` (or `10%`),
 `option checkpoint.push-caps.memory 800`, `option compaction.max-context 300K`,
-`option dream.enabled false`.
+`option compaction.trigger ./.pigo/compaction-policy.sh`, `option dream.enabled false`.
+
+Where compaction fires is measured against the model's **input budget**, not its
+advertised combined window: a gateway that publishes "input + output = W" (DeepSeek
+and others) rejects a request well before W, so compacting at 80% of W overruns the
+real ceiling and the turn fails hard. A model's numbers can be pinned at the
+declaration when the built-in table or the inference is wrong:
+
+```bash
+model add deepseek-chat --provider deepseek --context-window 1M --max-input 512K
+model add mycorp-long --provider mycorp --compact-at 70%   # or an absolute "300K"
+```
+
+`context_window` is the combined budget, `max_input` the smaller input-only ceiling,
+and `compact_at` this model's trigger point (a percentage of the input budget or an
+absolute count), always clamped by the real ceiling. Omitted means the built-in table
+for the provider/family, else a conservative 128K; `/status`, `/memory` and the TUI
+context drawer all show which source produced the number. The trigger is the earlier
+of the reserve line (`checkpoint.reserved`) and the `checkpoint.thresholds` ladder,
+which is why the default reads `the 80% threshold ladder`.
+
+`compaction.trigger` is for gateways that report their own accounting. The command
+gets one JSON document on stdin — `contextTokens`, `contextWindow`, `inputBudget`,
+`reserveTokens`, `triggerPoint`, `messages`, `model`, `provider`, the last `usage`
+block, and `responseMeta` (upstream status, sanitized headers, raw payload tails) —
+and prints `{"compact":true|false,"reason":"..."}` on stdout. `{"decide":false}`,
+a failure, or a timeout contributes no opinion, so the fixed threshold still
+decides: a broken policy can never stop an over-budget context from compacting
+(which would make the next request fail outright).
 
 **Trust and secrets.** `option approve true` trusts the working directory for this
 run. Keep secrets out of config files: export the provider key or use
 `option credential <name>` with `$PIGO_HOME/.credentials.yaml` (mode 0600).
 
 **Only on the command line.** `-p/--print`, `--cwd`, `--no-tui`, `--version`,
-`--list-sessions`, `--resume`/`--continue`, `--subagent-rpc`, `--dream*`,
-`--github-review*`, `--append-system-prompt`, `--prompt-template`,
+`--list-sessions`, `--resume`/`--continue`, `--image` (repeatable, attaches local
+images to the opening turn — sent with `-p`, pre-filled in the composer
+otherwise), `--subagent-rpc`, `--dream*`, `--github-review`,
+`--github-webhook-*`, `--append-system-prompt`, `--prompt-template`,
 `--no-prompt-templates` describe one invocation, not durable configuration.
 
 ## Verifying and troubleshooting

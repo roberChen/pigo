@@ -313,14 +313,25 @@ supports_images = true                    # 声明为 vision 模型
 id              = "mycorp-text"
 provider        = "mycorp"
 supports_images = false                   # 在支持图像的大 Provider 里钉住一个纯文本模型
+
+# 网关把上下文预算说大了、或只公布"输入+输出"总量时，按模型钉住真实上限
+[[models]]
+id             = "mycorp-long"
+provider       = "mycorp"
+context_window = "1M"                     # 公布的总预算（输入 + 输出）
+max_input      = "512K"                   # 实际能收的输入，比总预算小
+compact_at     = "70%"                    # 何时压缩：输入预算的比例，或 "300K" 这样的绝对数
 ```
 
 ```bash
 # ~/.pigo/pigorc，等价写法
 model add mycorp-vl --provider mycorp --supports-images --display-name "MyCorp Vision"
 model add mycorp-text --provider mycorp --no-supports-images
+model add mycorp-long --provider mycorp --context-window 1M --max-input 512K --compact-at 70%
 model remove mycorp-vl                     # 取消
 ```
+
+`context_window` / `max_input` 解决的是同一件事的两半：不少网关公布的是**输入 + 输出**的总量（DeepSeek 是典型），按它取 80% 去压缩时，实际输入早已越过真正的输入上限，请求被硬拒；`max_input` 把那个更小的输入上限单独钉住，自动压缩从此只看输入预算。都省略时先查 pigo 内置的模型表（按 Provider/模型族），查不到再用保守的 128K。`compact_at` 是**这个模型**的触发点，接受 token 数（`300K`）或输入预算的百分比（`70%`）；它总是被真实输入上限钳住，也就是说再写大也不会超过模型能收的量。三者都可在 `/status`、`/memory` 与 TUI 的上下文抽屉里看到来历（声明值 / 内置表 / 模型族推断 / 保守回退）。
 
 `supports_images` 是**唯一的**图像能力开关，它只存在于模型级：Provider 级没有这个设置，因为一个网关通常同时提供 vision 和纯文本 id，任何"整个端点支持/不支持"的声明都会对其中一半说错。它为 `true` 时把图片交给模型；为 `false` 时不发送图片，而是把"图片存在但未展示"的说明文字返回给模型（避免整轮请求被网关拒绝）。
 
@@ -508,7 +519,7 @@ REPL 中的内置斜杠命令包括 `/model`、`/models`、`/skill`、`/mcp`、`
 ### TUI 显示与工具卡
 
 - **可点击的状态栏**：底栏各块紧贴成一条连续色带（块与块之间没有分隔符、没有空隙，每一列都属于恰好一个块），每一块既是显示也是入口——`✱ 模型`、`✽ 思考等级`、`✧ 技能数`、`⚙ MCP`、`± 改动文件`、`◔ 上下文` 点击后在状态栏正上方展开一个抽屉，再点同一块或按 `Esc` 收起，点另一块直接切换抽屉。抽屉的标题与当前行用**打开它的那一块的颜色**着色（模型抽屉紫、思考抽屉灰蓝、技能青、MCP 钢蓝、文件橄榄、上下文琥珀），标题行给操作提示，行首 `●` 标出当前值，行尾 `↵` 标出可点的行动行；标签与说明分成两列对齐，标题栏与每一行都按显示宽度（CJK 记两列）精确补齐到终端宽度，不会出现参差的右边缘或溢出。抽屉最多 10 行，更长的列表（模型目录有近百个）默认以当前项为中心，**并且可以用键盘和滚轮自己翻**：`↑`/`↓` 逐行、`PgUp`/`PgDn` 翻页、`Home`/`End` 跳到首尾，鼠标滚轮在抽屉或底栏上滚的是抽屉、在别处仍滚转录；手动滚动后窗口就停在用户看的位置（不再被当前项拽回去），标题右侧显示 `(3-12/95)`，关掉抽屉再打开又回到当前项。打开的块在栏上高亮，转录区自动让出这些行，状态栏始终留在最后一行。模型抽屉列出与 `/model` 弹层同一份目录，点一行等价于 `/model <id>`（同一条 `prompts.ApplyModelSwitch` 路径，立即生效并回报结果）；思考等级抽屉列出 `off…max`，点一行等价于 `/think <level>`；MCP 抽屉每行显示 `on · N tools` / `off`（连接失败带错误摘要），点一行立即连接或断开，走的是 `/mcp` 的同一条异步路径，抽屉保持打开方便连续切换；技能抽屉列出已加载技能（描述首行）并标出下一轮要携带的选择，改动文件抽屉列出每个路径与 `+42 −7`（未跟踪显示 `new`，二进制显示 `binary`）。`⎇ 分支` 块同时给 `⇡N` 领先提交数，`±` 块给文件数与所有已计行文件的增删总行数（`git diff --numstat`，二进制/未跟踪不计）。
-- **常驻且实时的上下文用量块**：状态栏右侧的琥珀色 `◔` 块永远在，不会再等到第一次 run 结束才出现——尚无测量时显示 `◔ --`，有了数据后显示 `◔ 12,345 (9%)`。点击它展开**上下文详情抽屉**，把底栏放不下的解释补齐：`used` 当前占用与百分比（标题行同步重复一遍，抽屉永远在自己解释自己那块）、`window` 这一轮判断所依据的预算（模型不上报窗口时明确标注 `fallback`）、`remaining` 距离自动压缩还有多少 token（越过阈值时变黄，写成 `over the threshold by N tokens`，而不是继续显示一个还没到 100% 的百分比）、`threshold` 阈值本身及其来历（窗口减去 16,384 的预留）、`measured` 数字的来源拆解（provider 上报的 usage + 之后追加的部分 + 正在流式输出的部分，三者之和恒等于底栏那个数）、`compactions` 本会话已经折叠出的检查点数量与最近一次的 `95,000 → 18,000 tokens (threshold)`；最后一行是可点的 `compact` 动作（`summarize the history into a checkpoint now (click)`），即用户在抽屉里看见"还剩多少才压缩"时可以直接折叠一次，而不必去翻 `/compact` 这个名字——点击只是转调 `/compact`，不会另有一套实现；若当前配置根本没有上下文窗口（loop 也就不会自动压缩），抽屉直接写 `auto-compaction is off` 并隐去阈值，绝不给一个不会发生的压缩编造数字。它在整轮对话中连续更新：按下回车时就把提问计入，回答流式输出时随之增长，每个 turn 结束按 provider 上报的 usage 校正（无 usage 时按字符估算），压缩完成时立即回落到循环上报的压缩后 token 数（`compaction` 事件现在带有 `tokensAfter`），run 结束时再用遥测汇总对齐，`/rebuild`、`/resume`、`/new` 之后从新会话的上下文重新播种。切换模型会沿用已测量的 token 数、更换窗口预算。所有更新都走桥接事件里的副本值，绝不从 tea goroutine 读 pump goroutine 正在写的上下文，因此没有数据竞争。
+- **常驻且实时的上下文用量块**：状态栏右侧的琥珀色 `◔` 块永远在，不会再等到第一次 run 结束才出现——尚无测量时显示 `◔ --`，有了数据后显示 `◔ 12,345 (9%)`。点击它展开**上下文详情抽屉**，把底栏放不下的解释补齐：`used` 当前占用与百分比（标题行同步重复一遍，抽屉永远在自己解释自己那块）、`window` 这一轮判断所依据的预算（模型不上报窗口时明确标注 `fallback`）、`remaining` 距离自动压缩还有多少 token（越过阈值时变黄，写成 `over the threshold by N tokens`，而不是继续显示一个还没到 100% 的百分比）、`threshold` 阈值本身及其来历（取 `[checkpoint] thresholds` 阶梯与"输入预算减去预留"两条线中较早的那条，默认是 80% 那档，所以写的是 `the 80% threshold ladder` 而不是让你自己去减）、`measured` 数字的来源拆解（provider 上报的 usage + 之后追加的部分 + 正在流式输出的部分，三者之和恒等于底栏那个数）、`compactions` 本会话已经折叠出的检查点数量与最近一次的 `95,000 → 18,000 tokens (threshold)`；最后一行是可点的 `compact` 动作（`summarize the history into a checkpoint now (click)`），即用户在抽屉里看见"还剩多少才压缩"时可以直接折叠一次，而不必去翻 `/compact` 这个名字——点击只是转调 `/compact`，不会另有一套实现；若当前配置根本没有上下文窗口（loop 也就不会自动压缩），抽屉直接写 `auto-compaction is off` 并隐去阈值，绝不给一个不会发生的压缩编造数字。它在整轮对话中连续更新：按下回车时就把提问计入，回答流式输出时随之增长，每个 turn 结束按 provider 上报的 usage 校正（无 usage 时按字符估算），压缩完成时立即回落到循环上报的压缩后 token 数（`compaction` 事件现在带有 `tokensAfter`），run 结束时再用遥测汇总对齐，`/rebuild`、`/resume`、`/new` 之后从新会话的上下文重新播种。切换模型会沿用已测量的 token 数、更换窗口预算。所有更新都走桥接事件里的副本值，绝不从 tea goroutine 读 pump goroutine 正在写的上下文，因此没有数据竞争。
 - **用户输入有标记**：每条人类输入带 `▌ you` 侧栏，换行后每一行都保留侧栏，不会和模型输出混在一起；**超长输入（例如粘贴整个文件）完整展开显示**，不再截断为前若干行、也不再出现 `… N more lines` 提示——人自己刚输入的内容永远整段可见。
 - **思考内容**：推理模型的思考流以暗色 `✻ thinking` 块显示在回答上方（增量重排：每次更新只处理新增的那一段，不重排整条思考），默认只显示**最新的 6 行**（`… N earlier lines · click to expand` 标注上面省略了多少行），流式输出时始终停在模型此刻的思路上，不会挤占回答；点击该块的任意一行即可展开整段思考（展开后最多 400 行，超出提示用 `/export` 取全文），再点一次收起。
 - **工具卡按工具渲染**：`bash` 头部是命令、输出保留**开头与结尾**（中间省略，失败日志的结尾才是有用信息）；`read`/`write`/`edit` 头部是路径、只列 offset/limit 等额外参数、改动以彩色 diff 区块展示；`grep`/`find` 头部是 pattern；`webfetch`/`websearch` 是 url/query；`todo` 渲染成 `[x]/[~]/[ ]` 清单 + `1/3 completed`；**MCP 工具**只显示 `mcp server/tool`、单行参数摘要与结果预览，不再整段打印 JSON 与全文；未知/插件工具同样精简。
@@ -626,6 +637,14 @@ fmt.Println(reply)
 
 **前后数字怎么来的。** 压缩后的 `tokensAfter` 是**重建后那张消息表的实测值**（`compaction.EstimatePostCompactionTokens`：逐条估算求和），而不是沿用保留下来的那条 assistant 消息里的 provider usage。原因是 usage 记录的是"产生这条消息的那次请求"的大小，而被保留的尾部是在切点**之前**产生的，那次请求里还带着刚刚被折叠掉的整段前缀——照搬它就会把压缩前的大小再报一遍，让一次真实的压缩看起来像什么都没做（曾出现 `90,502 → 90,500 tokens`）。逐条估算则是此刻唯一诚实的读数：这些消息就是下一次请求要发出去的全部内容。它也会自我校正——下一轮回来的响应会按"已经带上检查点"的请求重新上报 usage，`EstimateContextTokens` 从此再优先使用那个数字。自动压缩、`/compact`、`/rebuild` 三条路径共用这一个度量。
 
+**阈值落在哪：输入预算，不是公布的总窗口。** 自动压缩比较的是**模型能收多少输入**，而不是它公布的上下文总量。两者经常不是同一个数：不少网关把窗口写成"最大输入 + 最大输出"（DeepSeek 是典型），按总量取 80% 去压缩时，真正的输入早已越过上限，下一轮被硬拒——这不算"压得晚一点"，而是对话直接失败。所以：
+
+- 输入预算 = 模型声明的输入上限（`max_input`）；没声明时，若窗口含义是"输入 + 输出"就按窗口算，否则用 pigo 内置模型表里的输入上限。`/status`、`/memory` 和 TUI 抽屉都会在同时存在两个数时把输入预算单列一行，说明它不是那个总窗口。
+- 触发点是**两条线里较早的那条**：`[checkpoint] thresholds` 阶梯（默认 40%/60%/80%，取最后一档并不越过输入预算减预留）与 `[compaction] max_context` 绝对上限；模型级 `compact_at` 覆盖阶梯，但同样被真实输入上限钳住。
+- 所有前端显示的都是**同一个解析结果**（共享的 `run.PlanCompaction`），因此 `/status`、`/memory`、TUI 抽屉和循环里真正比较的数字不可能互相矛盾；切换 `/model` 会重新解析，而不是沿用旧模型的窗口。
+- 默认档位是 80%，所以 TUI 抽屉写成 `the 80% threshold ladder`；只有预留那条线更早时才会写 `窗口减去 N 的预留`。
+- 阶梯之外还能挂一条**用户策略**（`[compaction] trigger` 或 `option compaction.trigger`）：一个 shell 命令，stdin 收到一份 JSON（上下文 token 数、输入预算、触发点、最近一次 usage，以及上游响应的状态码/头/原始负载尾部），stdout 回 `{"compact":true|false,"reason":"..."}`。它用来看懂网关自有口径（非标准 usage 字段、剩余配额头、响应体里的单请求预算）——只有用户知道怎么解释的东西。策略说"没意见"（`{"decide":false}`）、失败或超时，都由固定阈值继续决定：坏策略永远不会让一个已经超预算的上下文放弃压缩，从而把请求送去被拒。
+
 **压缩结果直接看得见。** `compaction` 事件除了 token 与消息计数，还带着这次写出的**检查点正文**（`Summary`），三个前端都据此把"模型现在到底拿的是什么"摊开给你看，不必再去翻 `checkpoint.md`：
 
 - TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个指向它重排出的检查点，手动 `/compact` 完成后也补一个（压缩前是 `Compacting conversation…` 的固定 spinner，结束后同一张块给出摘要正文）。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动；自动压缩的重试中失败（`retrying`）不逐次插卡——它们只是中间报告，前端保持"正在压缩"指示并显示尝试次数，只有最终失败才落一张卡，免得一串相同失败把对话埋掉。
@@ -671,7 +690,8 @@ pigorc 里 `export` 的变量会写回进程环境，因此等价于在 shell �
 
 ```bash
 # 1) option：任意 config.toml 配置项（标量键后写覆盖，列表键追加）
-option model "zai/glm-4.6"
+option model glm-4.7               # 预置 id，Provider 由 id 推断
+option model zai                   # 或裸 Provider 名 = 该 Provider 的默认模型
 option thinking-level high
 option allowed-tools read          # 列表键：重复调用即追加
 option allowed-tools grep
@@ -710,14 +730,58 @@ export PIGO_MAX_SUBAGENTS=4
 
 ### 从 Provider API 自动获取模型列表
 
+有两种，区别是"要不要落盘"：
+
+**① 会话内临时发现：`/models fetch`**（不写任何配置）
+
+```
+/models fetch
+```
+
+pigo 自己去问当前 Provider 的端点——**两种协议都是 `GET {base}/models`**（`{base}` 与聊天
+请求用的完全相同，例如 Anthropic 的 base 已经含 `/v1`，所以实际是 `/v1/models`），协议只
+决定认证头（`Authorization: Bearer`，或 `x-api-key` + `anthropic-version`）。端点按**聊天
+请求同一套优先级**解析：`--base-url`/配置文件 > Provider 专属 base-url 环境变量 >
+`<PROVIDER>_BASE_URL` > 注册表默认值——所以用 `OPENAI_BASE_URL` 把内置 Provider 指到公司网关
+时，抓目录也去那个网关，不会把网关的 Key 发去公网厂商域名。Key 走这次运行本来就在用的解析
+链（声明了 `--env-var` 就用它，本地无鉴权端点则不带 Key）。结果会报出总数与前几个 id（最多
+8 个），并**排在 `/models` 弹层最前面、标注 `(fetched)`**；之后 `/model <id>` 切换到其中任一
+id 会留在**这个**网关（而不是被启发式规则路由去 OpenRouter）。请求上限 10s。
+
+失败会报出原因并**保留上一次成功抓到的目录**（能刷新的旧目录好过没有），静态预置列表照旧
+可用。除了未知 Provider / 非 200 / 响应结构不符，**"200 但一个模型都没解析出来"也算失败**：
+非标准目录接口（`{"result":...}`、`{"models":[...]}`、分页包一层）会被解码成空列表，若当作
+成功就会报告"fetched 0 models"并清掉可用目录。
+
+**`/models fetch` 只认标准目录接口**——它没有扩展点，也不执行配置里的脚本。目录不在
+`{base}/models`、或响应不是 `{"data":[{"id":...}]}` 的网关，用下面的 pigorc 写法注册；会话
+中途想刷新就 `/reload`（会重跑 pigorc，新增的 id 生效、删掉的 id 随之失效），不必重启。
+
+它是**会话状态**：`/models fetch` 不写任何配置文件，重启即失效。想让抓到的 id 真正进入
+配置，用下面的 pigorc 写法。
+
+**② 落盘：在 pigorc 里抓取并注册**
+
 OpenAI 兼容的 `/v1/models`（以及任何能用 `jq` 解析的接口）都可以在 pigorc 里直接抓取并注册：
 
 ```bash
 provider add mycorp --type openai --base-url "$MYCORP_BASE_URL" --env-var MYCORP_API_KEY
 
-# curl 取目录，jq 提取 id，再逐个注册
-ids=$(curl -fsS -H "Authorization: Bearer $MYCORP_API_KEY" \
-        "$MYCORP_BASE_URL/models" | jq -r '.data[].id')
+cache="${PIGO_HOME:-$HOME/.pigo}/mycorp-models.txt"
+mkdir -p "$(dirname "$cache")"
+# `jq -e`（或开头的 `set -o pipefail`）才让抓取失败真正中止脚本：管道的退出码
+# 是最后一个命令的，jq 读空输入也会成功退出，裸 `curl -f ... | jq -r` 会掩盖失败
+if ids=$(curl -fsS --max-time 5 \
+           -H "Authorization: Bearer $MYCORP_API_KEY" \
+           "$MYCORP_BASE_URL/models" | jq -er '.data[].id'); then
+  # 先写临时文件：直接 `> "$cache"` 会在 curl 失败之前就把好用的旧列表清空
+  printf '%s\n' "$ids" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+elif [ -s "$cache" ]; then
+  ids=$(cat "$cache")                        # 回退到上次抓到的目录
+else
+  ids="${MYCORP_FALLBACK_IDS:-mycorp-large}" # 冷启动兜底：保证还能启动
+fi
+
 for m in $ids; do
   case "$m" in
     *-vl) model add "$m" --provider mycorp --supports-images ;;  # 多模态 id
@@ -725,24 +789,20 @@ for m in $ids; do
   esac
 done
 
-option provider mycorp
-option model mycorp/<第一个 id>        # 省略则用该 Provider 的第一个模型
+option model mycorp               # 裸 Provider 名 = 它第一个注册的 id
+# 或 option model mycorp-large     # 指定循环里的某个 id
 ```
 
 要点：
 
+- **必须让 `model` 落到该 Provider 的某个真实模型上**：裸 Provider 名（`option model mycorp`，取该 Provider 第一个模型）或循环里抓到的某个 id。`provider/id` 这类写法不是引用——含斜杠的 id 会原样发给端点（默认 OpenRouter），而 `option provider mycorp` 只换端点、不会帮你选模型（默认模型仍生效）。
+- **目录接口不是标准形状时，只有这条路可行**：`/models fetch` 固定探测 `{base}/models` 且只认 `{"data":[{"id":...}]}`，非标准路径/形状一律注册不上；上面的脚本想打哪个 URL、用哪个 `jq` 表达式都行。一次性的标准目录查询用 `/models fetch`，要落盘或非标准的用脚本。
+- Anthropic 协议的认证头不同（`x-api-key` + `anthropic-version`），但**目录路径同样是 `{base}/models`**（`{base}` 已含 `/v1`）——自己写 `curl` 时按端点实际形状填，不要机械照抄 `{base}/v1/models`（会变成 `/v1/v1/models`）。
 - `provider add` 对同名 Provider 是**细化合并**，所以循环里只写 `--model` 的调用不会抹掉前面声明的 `--base-url`/`--env-var`；第一个注册的 id 就是该 Provider 的默认模型。
 - 网络请求可能超过默认 15s 预算：在 pigorc 里 `export PIGO_PIGORC_TIMEOUT=45s`（任意 Go duration）。
-- `curl -f` 配合 `set -e` 会让抓取失败**中止加载并报出原因**，而不是悄悄注册 0 个模型；若可以接受降级，加 `|| true`。
-- 想避免每次启动都发网络请求，可以缓存并回退到静态列表：
-
-```bash
-cache="$PIGO_HOME/mycorp-models.txt"
-if [ ! -s "$cache" ] || [ $(( $(date +%s) - $(date -r "$cache" +%s) )) -gt 86400 ]; then
-  curl -fsS "https://llm.mycorp.com/v1/models" | jq -r '.data[].id' > "$cache" || rm -f "$cache"
-fi
-[ -s "$cache" ] && while read -r m; do [ -n "$m" ] && provider add mycorp --model "$m"; done < "$cache"
-```
+- **要防的失败形态是"Provider 注册上了，但一个模型都没有"**。脚本以 `set -eu` 运行，某条**语句**失败会中止加载并保留已生效的部分（`provider add`、`option`、`export`）；但管道只反映最后一个命令的退出码，而 `jq -r` 读到空输入照样成功退出。所以"显而易见"的写法在目录不可达时其实**成功**了：Provider 有名字没模型，`option model mycorp` 解析不了，启动最后死在 `"mycorp" names a provider, not a model id; pass a model id (see /models) or select it with --provider mycorp` 上——这个报错完全没提抓取。让管道带上失败（`jq -er`，或在文件开头 `set -o pipefail`），并给脚本留退路（上面的缓存/兜底）：这样进程仍能启动，后续报错指向真正的问题（端点不可达）而不是配置。
+- 排查用 `PIGO_DEBUG=1 pigo ...`：脚本自己的 stderr 和 `pigorc: exit status N` 都属于诊断信息，默认静默；TUI 里它们会以排队行的形式出现，`/status` 显示实际加载到的内容。
+- 想避免每次启动都发网络请求就缓存（抓取成功才覆盖，失败回退旧列表，见上面的示例）——不要写成 `curl ... | jq -r ... > "$cache"`：重定向先执行，抓取失败会把缓存清空，`|| rm -f "$cache"` 又因为 jq 成功而不触发。
 
 ### 逐个配置项的 pigorc 写法
 
@@ -750,7 +810,7 @@ fi
 
 | 配置项 | config.toml | pigorc |
 |--------|-------------|--------|
-| 模型 | `model` | `option model "zai/glm-4.6"` |
+| 模型 | `model` | `option model glm-4.7`（或裸名 `option model zai`） |
 | Provider | `provider` | `option provider zai` |
 | 端点 | `base_url` | `option base-url "https://api.z.ai/api"` |
 | 协议 | `protocol` | `option protocol anthropic` |
@@ -781,6 +841,7 @@ fi
 | dream 开关 | `[dream] enabled` | `option dream.enabled false` |
 | dream 间隔 | `[dream] interval_days` | `option dream.interval-days 7` |
 | dream 会话数 | `[dream] recent_sessions` | `option dream.recent-sessions 20` |
+| 允许覆盖的内置技能 | `[skills] override_builtin` | `option skills.override-builtin pigorc`（可重复） |
 
 **Hook（9 个事件）**
 
@@ -1075,8 +1136,16 @@ pigo://skills/<name>/SKILL.md
 
 - `read` 直接解析 `pigo://` 地址（含 `assets/`、`scripts/`、`examples/` 等子文件），带行号与分页，与读磁盘文件一致；系统提示的 `<available_skills>` 里内置技能的 location 就是该地址。
 - **严格只读**：`write`/`edit` 对 `pigo://` 地址会明确报错 `built-in skills are read-only`，目录遍历也无法越出虚拟根。
-- **同名遮蔽**：在 `~/.agents/skills` 放一份同名技能（如 `pigorc/SKILL.md`）即覆盖内置版本，磁盘优先——这是定制的正确方式。
-- 因此 `~/.agents/skills` 只存放你自己的技能；`/status` 会把内置（`[built-in]`）与磁盘（`[disk]`）分别标出并给出计数。
+- **同名遮蔽需显式授权**：内置技能优先。旧版本 pigo 会把内置技能**拷贝**到 `~/.agents/skills`，这些过期副本若仍然自动覆盖新版内置技能，升级就永远送不到修复。因此磁盘上的同名技能默认**被忽略**（内置版本生效）；确实要用自己的副本，请在配置里列出名字：
+
+```toml
+# ~/.config/pigo/config.toml
+[skills]
+override_builtin = ["pigorc"]
+```
+
+  pigorc 里等价写法：`option skills.override-builtin pigorc`（可重复）。被忽略的副本不会被静默吞掉：`pigo_config` 的 skills 段会列出它们、路径和这条开关，`PIGO_DEBUG=1` 还会输出一行诊断。因此 `~/.agents/skills` 只存放你自己的技能。
+- 凡列出技能的地方都标出内置：状态栏的 `✧` 块点开的详情里每个内置技能都带 `built-in`（标题给出 `N built-in, M from disk` 计数），`/status` 的 skills 行给出 `(N built-in, M disk)` 计数，`/skill` 弹层给内置技能加 `[built-in]`——它们只读，改不了；`pigo_config` 的 skills 段则连被忽略的副本一起列出。
 
 ### 模型自动调用（渐进式披露）
 

@@ -63,6 +63,7 @@ func TestReferenceCoversEveryFileConfigField(t *testing.T) {
 	checkStruct("checkpoint", CheckpointConfig{})
 	checkStruct("compaction", CompactionConfig{})
 	checkStruct("dream", DreamConfig{})
+	checkStruct("skills", SkillsConfig{})
 
 	// The push-caps map is documented as a dotted key.
 	if !covered["checkpoint.push_caps.<section>"] {

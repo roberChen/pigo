@@ -59,8 +59,8 @@ var optionSpecs = []optionSpec{
 		Kind:    optString,
 		TOML:    "model",
 		Type:    "string",
-		Summary: "Default model id. A bare provider name resolves to that provider's default model.",
-		Example: "zai/glm-4.6",
+		Summary: "Default model id; a bare provider name resolves to that provider's default model, while provider/id is a routed id (not a provider reference).",
+		Example: "glm-4.7",
 		set:     stringSetter(func(c *FileConfig) *string { return &c.Model }),
 	},
 	{
@@ -68,7 +68,7 @@ var optionSpecs = []optionSpec{
 		Kind:    optString,
 		TOML:    "provider",
 		Type:    "string",
-		Summary: "Provider name to run against (a built-in, a custom provider, or a bare-model inference override).",
+		Summary: "Provider name to run against (a built-in, a custom provider, or a bare-model inference override). It does not select that provider's model by itself; pair it with model.",
 		Example: "zai",
 		set:     stringSetter(func(c *FileConfig) *string { return &c.Provider }),
 	},
@@ -261,6 +261,15 @@ var optionSpecs = []optionSpec{
 		set:     stringSetter(func(c *FileConfig) *string { return &c.Compaction.MaxContext }),
 	},
 	{
+		Key:     "compaction.trigger",
+		Kind:    optString,
+		TOML:    "compaction.trigger",
+		Type:    "string (shell command)",
+		Summary: "User-defined compaction policy: reads one JSON document on stdin (contextTokens, inputBudget, usage, response metadata) and prints {\"compact\":true|false,\"reason\":\"...\"}. No decision, failure or timeout falls back to the fixed threshold.",
+		Example: `'jq -r "[.contextTokens, .inputBudget]" | ./my-policy.sh'`,
+		set:     stringSetter(func(c *FileConfig) *string { return &c.Compaction.Trigger }),
+	},
+	{
 		Key:     "dream.enabled",
 		Kind:    optBoolPtr,
 		TOML:    "dream.enabled",
@@ -286,6 +295,15 @@ var optionSpecs = []optionSpec{
 		Summary: "How many recent sessions a dream pass distills.",
 		Example: "20",
 		set:     intSetter(func(c *FileConfig) *int { return &c.Dream.RecentSessions }),
+	},
+	{
+		Key:     "skills.override-builtin",
+		Kind:    optList,
+		TOML:    "skills.override_builtin",
+		Type:    "list (repeatable)",
+		Summary: "On-disk skills allowed to shadow a built-in skill of the same name (unlisted copies are ignored).",
+		Example: "weather",
+		setList: func(c *FileConfig, values []string) { c.Skills.OverrideBuiltin = values },
 	},
 }
 

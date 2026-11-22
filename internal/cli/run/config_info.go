@@ -51,6 +51,10 @@ type ConfigReport struct {
 	MCP *mcp.Manager
 	// Skills is the discovered skill set (nil under --no-skills).
 	Skills []*runtime.Skill
+	// IgnoredSkills are on-disk skills that lost to a built-in skill of the same
+	// name because they are not listed under [skills] override_builtin — in
+	// practice the stale copies an older pigo installed into the skills dir.
+	IgnoredSkills []*runtime.Skill
 	// Plugins is the loaded plugin manager, or nil when none were discovered.
 	Plugins *plugin.Manager
 	// Policy is the tool boundary in force (--allowed-tools/--disallowed-tools).
@@ -272,11 +276,16 @@ func (r *ConfigReport) renderTools() string {
 // Built-in skills are listed separately from the skills directory because they are
 // not installed there: they live in the binary at a read-only `pigo://` address.
 // Saying so is the point — a user looking for the file on disk would not find it.
+//
+// On-disk copies that lost to a built-in of the same name are listed too, with the
+// path and the switch that would let them win. They are the stale copies an older
+// pigo installed into the skills directory, so naming them is what turns "why is my
+// edit not taking effect" into a one-line answer.
 func (r *ConfigReport) renderSkills() string {
 	if r.NoSkills {
 		return "skills  disabled (--no-skills)"
 	}
-	if len(r.Skills) == 0 {
+	if len(r.Skills) == 0 && len(r.IgnoredSkills) == 0 {
 		return "skills (0)  from " + SkillsDir()
 	}
 	var builtinCount int
@@ -303,6 +312,13 @@ func (r *ConfigReport) renderSkills() string {
 			source = "built-in"
 		}
 		lines = append(lines, fmt.Sprintf("  %-14s [%s] [%s] %s", s.Frontmatter.Name, mark, source, clip(s.Frontmatter.Description, reportDescriptionLimit)))
+	}
+	if len(r.IgnoredSkills) > 0 {
+		lines = append(lines, fmt.Sprintf("  ignored (%d)  on-disk copies that would shadow a built-in skill; add a name to [skills] override_builtin to use your copy:",
+			len(r.IgnoredSkills)))
+		for _, s := range r.IgnoredSkills {
+			lines = append(lines, fmt.Sprintf("  %-14s [ignored] %s", s.Frontmatter.Name, s.Path))
+		}
 	}
 	return strings.Join(lines, "\n")
 }

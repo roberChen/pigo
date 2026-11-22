@@ -50,6 +50,19 @@ type LoopConfig struct {
 	// Compaction holds the thresholds/retention knobs for auto-compaction. Its
 	// Enabled flag gates the feature independently of ContextWindow.
 	Compaction compaction.CompactionSettings
+	// Trigger, when set, is consulted before the fixed threshold policy and may
+	// override its answer for the models it recognizes (see
+	// compaction.DecideCompact). Its input carries the bounded record of the last
+	// upstream response (ResponseMeta), which is how a policy can read
+	// gateway-specific accounting that pigo does not model. nil runs the fixed
+	// policy alone.
+	Trigger compaction.TriggerFunc
+	// ResponseMeta, when non-nil, is filled by each turn's transport with a
+	// bounded secret-free record of the upstream response and handed to Trigger.
+	// The loop resets it before every request, so it always describes the most
+	// recent response. nil disables capture (and leaves TriggerInput.ResponseMeta
+	// nil).
+	ResponseMeta *agentcore.ResponseMeta
 	// SummaryStream produces the provider stream used to generate compaction
 	// summaries. Defaults to Stream when nil.
 	SummaryStream provider.StreamFn
@@ -124,12 +137,18 @@ func streamAssistantResponse(ctx context.Context, agentCtx *agentcore.AgentConte
 	perf.SetGauge("llm.request.tools", int64(len(llm.Tools)))
 	perf.SetGauge("llm.system_bytes", int64(len(llm.SystemPrompt)))
 
-	// 5. build the provider stream.
+	// 5. build the provider stream. The response record is reset here so the
+	// trigger always sees the answer to THIS request: a retried turn's record must
+	// not merge with the attempt that failed.
+	if cfg.ResponseMeta != nil {
+		cfg.ResponseMeta.Reset()
+	}
 	openStart := time.Now()
 	stream, err := cfg.Stream(ctx, cfg.Model, llm, provider.StreamConfig{
 		APIKey:        key,
 		ThinkingLevel: cfg.ThinkingLevel,
 		Extra:         cfg.Extra,
+		Meta:          cfg.ResponseMeta,
 	})
 	perf.Record("llm.open", time.Since(openStart))
 	if err != nil {

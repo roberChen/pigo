@@ -12,6 +12,36 @@ interactive REPL/TUI.
 ## [Unreleased]
 
 ### Added
+- **`/models fetch` asks the running provider what it actually serves.** The preset
+  catalog is static, so an id a gateway added yesterday could not be selected, and
+  the alternative — a pigorc that curls `/v1/models` on every launch — bakes
+  today's answer into tomorrow's configuration. `/models fetch` queries the live
+  endpoint instead (`GET {base}/models` on either wire protocol — `{base}` is the
+  same value chat posts to, so an Anthropic base that already ends in `/v1` yields
+  `/v1/models`; the protocol selects only the auth header, and the key is the one
+  the run already resolves), reports the count plus the first few ids, and
+  caches them on the session: they lead the `/models` picker marked `(fetched)`,
+  and `/model <id>` then switches to one **and stays on the gateway that served
+  it** rather than being routed to OpenRouter by the usual heuristic. Nothing is
+  written to any config file — the catalog lives only for the session — and a
+  failed fetch (unknown provider, non-200, unexpected response shape) explains why
+  and leaves the static presets usable. The request is capped at 10s. The endpoint
+  is resolved the way chat requests resolve it (flag/config base URL, the
+  provider's base-URL env vars, then the registry default), so a provider
+  retargeted with `<PROVIDER>_BASE_URL` is discovered at that gateway instead of
+  probing the vendor's public host with the gateway's key.
+- **A user-supplied compaction policy for gateways that report their own
+  accounting.** `[compaction] trigger` (or `option compaction.trigger`) runs a
+  shell command before each turn with one JSON document on stdin — the context
+  size, the input budget, the trigger point, the last `usage` block, and a bounded
+  record of the upstream response (status, sanitized headers, raw payload tails) —
+  and reads `{"compact":true|false,"reason":"..."}` from stdout. It exists for
+  providers whose accounting pigo cannot interpret: a non-standard usage field, a
+  remaining-quota header, a per-request budget in the response body. The policy is
+  consulted only to *add* a reason to compact: `{"decide":false}`, a non-zero
+  exit, an unparseable reply, or a 10s timeout contributes no opinion, so the
+  fixed threshold still decides and a broken policy can never leave an over-budget
+  context uncompacted.
 - **A compaction checkpoint now remembers what the user actually asked for.**
   Compaction preserved the *work* (a model-written summary) but not the
   *requirements*, so every re-compaction rewrote the summary from a thinner
@@ -66,6 +96,61 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Fixed
+- **Auto-compaction now triggers on the model's input ceiling, not its advertised
+  window.** Many gateways publish "max input + max output = W" (DeepSeek and
+  others), so 80% of W is already past the largest request the model accepts: the
+  trigger fired too late, the next request was rejected, and the run died on a
+  limit the number in `/status` said was still far away. Token limits are now a
+  pair — the combined `context_window` and a separate `max_input` input ceiling —
+  and the trigger is the earlier of the reserve line and the `[checkpoint]
+  thresholds` ladder measured against the **input budget**. Both numbers come from
+  the built-in model table (or the 128K fallback) and can be pinned per model with
+  `[[models]] context_window` / `max_input` / `compact_at` or the matching
+  `model add --context-window / --max-input / --compact-at` pigorc flags.
+- **`/status`, `/memory` and the TUI context drawer now agree with the loop.**
+  Each driver previously assembled its own compaction settings, so the figures on
+  screen could describe a different window than the one the run compared against —
+  and a `/model` switch left the old model's window in place. One shared resolver
+  (`run.PlanCompaction`) produces the plan every driver and every readout uses,
+  re-resolving on a model switch. The drawer's percentage and threshold are
+  computed from that same denominator, so the bar and the drawer can no longer
+  disagree, and the threshold row names the rule that set it ("the 80% threshold
+  ladder") instead of leaving the reader to subtract a reserve by hand.
+- **`/models fetch` no longer reports an empty catalog as success, or loses the
+  one it had.** A gateway that answers 200 in its own catalog shape
+  (`{"result":...}`, `{"models":[...]}`, a paginated envelope) decoded into a
+  zero-value list and produced "fetched 0 models" — overwriting a working session
+  catalog with nothing while looking like a clean refresh. An empty result is now
+  a failure that names the standard shape and points at registering the ids in a
+  pigorc, and a failed fetch leaves the previously fetched catalog (and its
+  timestamp) untouched.
+- **`/models fetch` on an Anthropic endpoint asked for `/v1/v1/models`.** The
+  version segment was appended to a base that already carried it, so discovery
+  404'd on every Anthropic endpoint, built-in and custom alike. Both protocols now
+  append `/models` to the base the driver posts to.
+- **An aborted pigorc no longer unsets the launcher's environment.** The script
+  runs with `set -eu`, and the harness dumps the exported environment a second time
+  at the end to learn what the script exported or removed. When a statement failed
+  (`set -e`) or the evaluation timed out, that second dump never happened, and the
+  empty result was read as "the script unset everything": `HOME`, `PIGO_HOME` and
+  every provider key went into the unset list and were removed from the process.
+  One failing line — a `curl` to an unreachable model catalogue, a locked `pass` —
+  therefore wiped the credentials and paths the rest of the launch needed, and the
+  symptom appeared as an unrelated `openrouter: missing API key` or `session:
+  cannot resolve the default store directory`. A missing dump is now "no evidence";
+  the dump also runs from an `EXIT` trap so a script that aborts still reports the
+  variables it exported before failing, matching the rule that options and records
+  emitted before the failure are kept.
+- **The documented shell-based model-discovery recipe can no longer fall into
+  "provider registered, zero models".** Both the pigorc skill and the README showed
+  `ids=$(curl -f ... | jq -r '.data[].id')`: a pipeline reports its *last* command's
+  status and `jq -r` accepts empty input with exit 0, so an unreachable catalogue
+  *succeeded*, registered no models, and left the launch to die on `"<name>" names a
+  provider, not a model id`. The cache variant was worse — `> "$cache"` truncated
+  the previous list before `curl` had a chance to fail, and the `|| rm -f` cleanup
+  never ran. The recipes now use `jq -er`, write the cache through a temp file, and
+  fall back to the cached or a static id, so a failed fetch degrades instead of
+  destroying the configuration.
 - **A failed compaction no longer walks away from an over-budget context.** The
   old contract was "non-fatal": emit a `CompactionEvent` with an `ErrorMessage`,
   leave the context untouched, carry on. But that is not a state the run can stay
@@ -132,6 +217,23 @@ interactive REPL/TUI.
   rather than by id string alone, so a future duplicate cannot teleport the view
   either.
 ### Changed
+- **Overriding a built-in skill now takes an explicit line of configuration.**
+  Built-in skills live read-only inside the binary (`pigo://skills/<name>/SKILL.md`),
+  but an on-disk skill of the same name used to win automatically. That made a
+  harmless-looking design into an upgrade trap: older pigo versions *copied* their
+  built-in skills into `~/.agents/skills`, so on an upgraded install those stale
+  copies silently shadowed the new built-ins and a shipped fix could never reach
+  anyone who had launched the old binary. The default is now inverted — the built-in
+  wins unless the name is listed under `[skills] override_builtin` in `config.toml`
+  (or `option skills.override-builtin <name>` in a pigorc). Deliberate customisation
+  still works; accidental shadowing cannot. Rejected copies are not dropped
+  silently: `pigo_config`'s skills section lists each one with its path and the
+  switch that would let it win, and a `PIGO_DEBUG` diagnostic says the same at load
+  time. Every surface that lists skills labels the source — the status bar's
+  skills drawer puts `built-in` in each row's detail and `N built-in, M from disk`
+  in its title, `/status` counts both kinds on its skills line, and the `/skill`
+  picker appends `[built-in]` — so a user editing a same-named copy can see which
+  one is actually loaded.
 - **A checkpoint says what each file *contains*, so a resumed turn stops
   re-reading them.** The summary could say a file was touched but not what it
   held; the bare `<read-files>` / `<modified-files>` lists the harness appends
@@ -384,9 +486,10 @@ interactive REPL/TUI.
   behave exactly as for disk files) and every skill's `<available_skills>`
   location points at one; `write` and `edit` refuse them with
   `built-in skills are read-only`, and traversal cannot escape the virtual root.
-  A skill of the same name under the skills directory shadows the built-in one,
-  which is now how a built-in is customised. `pigo_config` / `/status` report
-  built-in skills separately from disk skills with a count of each.
+  A skill of the same name under the skills directory shadows the built-in one
+  only when its name is listed under `[skills] override_builtin` (see Changed
+  below), which is now how a built-in is customised. `pigo_config` / `/status`
+  report built-in skills separately from disk skills with a count of each.
 - **The `question` tool asks a whole batch and shows a review before submitting.**
   One call now takes `questions: [{question, options, multi_select}]` and gets one
   structured `{selected, text}` answer per question back, instead of a single

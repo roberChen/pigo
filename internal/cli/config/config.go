@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -85,6 +86,9 @@ type FileConfig struct {
 	// internal/dream (Config). See tasks/spec-dream-memory-consolidation.md
 	// §3.3.
 	Dream DreamConfig `toml:"dream"`
+	// Skills is the [skills] TOML table: options that govern skill discovery
+	// itself, as opposed to individual skills' frontmatter.
+	Skills SkillsConfig `toml:"skills"`
 }
 
 // ProviderConfig defines one third-party provider. Only name is mandatory: the
@@ -153,6 +157,18 @@ type ModelConfig struct {
 	// SupportsImages declares whether the model accepts image input. nil means
 	// "not declared": take pigo's default for the provider kind.
 	SupportsImages *bool `toml:"supports_images"`
+	// ContextWindow overrides the model's advertised combined window (input +
+	// output). Accepts a token count with an optional K/M suffix ("1M", "200K").
+	// Empty means "use pigo's built-in table, or its conservative fallback".
+	ContextWindow string `toml:"context_window"`
+	// MaxInput states the model's input-only ceiling when the provider publishes
+	// one that is smaller than ContextWindow — the "max input + max output = 1M"
+	// shape. Empty means "the window is the input budget".
+	MaxInput string `toml:"max_input"`
+	// CompactAt lowers the auto-compaction trigger for this model. Accepts a token
+	// count ("300K") or a percentage of the input budget ("70%"). Empty means "use
+	// the threshold ladder from [checkpoint] thresholds".
+	CompactAt string `toml:"compact_at"`
 }
 
 // Vision reports the declared vision capability and whether it was declared at
@@ -164,6 +180,68 @@ func (m ModelConfig) Vision() (vision, ok bool) {
 	return *m.SupportsImages, true
 }
 
+// ResolveLimits parses the declared token limits. A zero field means "not
+// declared" for that number, so a model can state only its input ceiling and
+// keep the built-in window.
+func (m ModelConfig) ResolveLimits() (contextWindow, maxInput int, err error) {
+	if contextWindow, _, err = parseTokenField("context_window", m.ContextWindow); err != nil {
+		return 0, 0, err
+	}
+	if maxInput, _, err = parseTokenField("max_input", m.MaxInput); err != nil {
+		return 0, 0, err
+	}
+	return contextWindow, maxInput, nil
+}
+
+// ResolveCompactAt parses compact_at. An empty value yields an unset MaxContext.
+// A percentage form is a fraction of the model's *input budget* (not the combined
+// window), because the trigger must fire before the input ceiling, not after it.
+func (m ModelConfig) ResolveCompactAt() (MaxContext, error) {
+	mc, err := parseMaxContextField("compact_at", m.CompactAt)
+	if err != nil {
+		return MaxContext{}, fmt.Errorf("model %q: %w", m.ID, err)
+	}
+	return mc, nil
+}
+
+// parseTokenField parses a token-count field shared by the per-model limit keys.
+// It returns the token count and whether anything was declared.
+func parseTokenField(name, value string) (int, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, nil
+	}
+	n, ok := parseTokenCount(value)
+	if !ok {
+		return 0, false, fmt.Errorf("%s: invalid token count %q (want e.g. 128000, 128K or 1M)", name, value)
+	}
+	return n, true, nil
+}
+
+// parseTokenCount parses a plain or K/M-suffixed token count ("128000", "128K",
+// "1.5M"). It is the local counterpart of provider.ParseTokenCount: provider
+// imports this package (for base-URL resolution), so this package cannot import
+// provider, and the same units must be understood on both sides.
+func parseTokenCount(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	mult := 1.0
+	body := s
+	switch s[len(s)-1] {
+	case 'k', 'K':
+		mult, body = 1_000, s[:len(s)-1]
+	case 'm', 'M':
+		mult, body = 1_000_000, s[:len(s)-1]
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(body), 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return int(n*mult + 0.5), true
+}
+
 // DreamConfig is the [dream] TOML table for /dream memory consolidation.
 // Enabled is a pointer so an absent key (nil) is distinguishable from an
 // explicit false: nil is treated as true, only enabled = false disables
@@ -173,6 +251,22 @@ type DreamConfig struct {
 	Enabled        *bool `toml:"enabled"`
 	IntervalDays   int   `toml:"interval_days"`
 	RecentSessions int   `toml:"recent_sessions"`
+}
+
+// SkillsConfig is the [skills] TOML table.
+//
+// OverrideBuiltin is the allow-list of on-disk skills that may shadow a built-in
+// skill of the same name. Until a name is listed here, a disk copy with that name
+// is ignored and the built-in one is used.
+//
+// The allow-list exists because older pigo versions COPIED their built-in skills
+// into ~/.agents/skills. Those copies are now stale, and before this option a disk
+// skill silently won over the shipped one — so an upgrade could not deliver a fixed
+// built-in skill to anyone who had ever launched the old binary. Requiring an
+// explicit name keeps deliberate customisation possible while making an accidental
+// shadow impossible.
+type SkillsConfig struct {
+	OverrideBuiltin []string `toml:"override_builtin"`
 }
 
 // FileConfigPath returns the path to the user config file:

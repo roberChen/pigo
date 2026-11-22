@@ -486,6 +486,18 @@ func applyDeclaredModels(declared []config.ModelConfig) []string {
 			messages = append(messages, fmt.Sprintf("model %q: unknown provider %q (define it with [[providers]] first)", id, name))
 			continue
 		}
+		// Validate the token fields here rather than only in declaredModels: a
+		// malformed value must be reported, not silently dropped, so the user sees
+		// which [[models]] entry is wrong and why. The pigorc path already reports
+		// these at parse time; this is the TOML path.
+		if _, _, err := mc.ResolveLimits(); err != nil {
+			messages = append(messages, fmt.Sprintf("model %q: %v", id, err))
+			continue
+		}
+		if _, err := mc.ResolveCompactAt(); err != nil {
+			messages = append(messages, fmt.Sprintf("model %q: %v", id, err))
+			continue
+		}
 		if _, seen := byProvider[name]; !seen {
 			order = append(order, name)
 		}
@@ -510,6 +522,10 @@ func applyDeclaredModels(declared []config.ModelConfig) []string {
 // declaredModels converts config model declarations into the registry form,
 // de-duplicating ids. The last declaration of an id wins, matching the
 // last-wins rule the config layers already use.
+//
+// The token limits and the compaction trigger travel with the declaration: they
+// are per-model facts, and the registry is the one place both the /model picker
+// and the loop's compaction wiring read them from.
 func declaredModels(defs []config.ModelConfig) []provider.DeclaredModel {
 	out := make([]provider.DeclaredModel, 0, len(defs))
 	index := map[string]int{}
@@ -522,6 +538,16 @@ func declaredModels(defs []config.ModelConfig) []provider.DeclaredModel {
 			ID:             id,
 			DisplayName:    strings.TrimSpace(def.DisplayName),
 			SupportsImages: def.SupportsImages,
+		}
+		// A malformed limit or trigger was already reported when the file was
+		// decoded (pigorc validates at parse time, and applyFileConfig reports
+		// TOML values), so here an unparseable value simply contributes nothing
+		// rather than failing the whole declaration.
+		if window, maxInput, err := def.ResolveLimits(); err == nil {
+			m.Limits = provider.ModelLimits{ContextWindow: window, MaxInputTokens: maxInput}
+		}
+		if mc, err := def.ResolveCompactAt(); err == nil && mc.IsSet() {
+			m.Trigger = provider.ModelTrigger{Tokens: mc.Tokens(), Fraction: mc.Fraction()}
 		}
 		if i, ok := index[id]; ok {
 			out[i] = m

@@ -16,6 +16,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/prompts"
 	"github.com/roberChen/pigo/internal/mcp"
 	"github.com/roberChen/pigo/internal/runtime"
@@ -255,6 +256,9 @@ func (p skillPicker) view(width int) string {
 			mark = "[x]"
 		}
 		label := s.Frontmatter.Name
+		if builtinskills.IsVirtual(s.Path) {
+			label += "  [built-in]"
+		}
 		if desc := strings.TrimSpace(s.Frontmatter.Description); desc != "" {
 			label += "  -  " + firstLineOf(desc)
 		}

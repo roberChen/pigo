@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/compaction"
@@ -106,10 +108,17 @@ func imageSupportLine(model, providerName string) string {
 }
 
 // printContextStatus prints the current context usage and compaction section.
+//
+// The trigger figures come from the live config's resolved compaction plan
+// (cli.LiveConfig.CompactionDetail), not from window-reserve recomputed here: the
+// loop compacts on the model's input budget with the configured ladder, reserve
+// and any absolute cap, so a report that ignored them would name a threshold the
+// run never uses.
 func printContextStatus(out io.Writer, color bool, host cli.Host) {
 	msgs := host.AgentCtx().Messages
 	tokens := compaction.EstimateContextTokens(msgs).Tokens
 	contextWindow := host.Live().ContextWindow
+	trigger := host.Live().CompactionDetail()
 
 	compactions := 0
 	for _, m := range msgs {
@@ -139,32 +148,63 @@ func printContextStatus(out io.Writer, color bool, host cli.Host) {
 
 	fmt.Fprintf(out, "  %s %d\n", ui.Colorize(color, ui.Dim, "compactions:"), compactions)
 
-	// Calculate remaining tokens before auto-compaction
-	if contextWindow > 0 {
-		reserve := compaction.DefaultCompactionSettings.ReserveTokens
-		threshold := contextWindow - reserve
-		remaining := threshold - tokens
-		if remaining < 0 {
-			fmt.Fprintf(out, "  %s %s (threshold: %d, reserve: %d)\n",
-				ui.Colorize(color, ui.Dim, "before compact:"),
-				ui.Colorize(color, ui.Red, fmt.Sprintf("%d over threshold", -remaining)),
-				threshold,
-				reserve,
-			)
-		} else {
-			fmt.Fprintf(out, "  %s %s (threshold: %d, reserve: %d)\n",
-				ui.Colorize(color, ui.Dim, "before compact:"),
-				ui.Colorize(color, ui.Green, fmt.Sprintf("%d tokens remaining", remaining)),
-				threshold,
-				reserve,
-			)
-		}
-	} else {
+	// Where auto-compaction fires, and which rule put it there. The budget is
+	// named explicitly when it is the model's input ceiling rather than its
+	// combined window: the two differ for a "1M combined, 512K input" model, and
+	// only the budget matters for whether the next request is accepted.
+	switch {
+	case trigger.Point <= 0 && contextWindow <= 0:
 		fmt.Fprintf(out, "  %s %s\n",
 			ui.Colorize(color, ui.Dim, "before compact:"),
 			ui.Colorize(color, ui.Yellow, "auto-compaction disabled (unknown window)"),
 		)
+	case trigger.Point <= 0:
+		fmt.Fprintf(out, "  %s %s\n",
+			ui.Colorize(color, ui.Dim, "before compact:"),
+			ui.Colorize(color, ui.Yellow, "auto-compaction disabled (compaction.enabled is off)"),
+		)
+	default:
+		remaining := trigger.Point - tokens
+		explain := triggerExplanation(trigger)
+		if remaining < 0 {
+			fmt.Fprintf(out, "  %s %s (%s)\n",
+				ui.Colorize(color, ui.Dim, "before compact:"),
+				ui.Colorize(color, ui.Red, fmt.Sprintf("%d over threshold", -remaining)),
+				explain,
+			)
+		} else {
+			fmt.Fprintf(out, "  %s %s (%s)\n",
+				ui.Colorize(color, ui.Dim, "before compact:"),
+				ui.Colorize(color, ui.Green, fmt.Sprintf("%d tokens remaining", remaining)),
+				explain,
+			)
+		}
 	}
+}
+
+// triggerExplanation says where the trigger is and why: the input budget it was
+// measured against, the reserve kept free, and the cap that decided it. The source
+// matters because "80% ladder" and "your compact_at" look identical as a number
+// and differ entirely as an answer to "why did it compact here".
+func triggerExplanation(d compaction.TriggerDetail) string {
+	source := "the reserve"
+	switch d.Source {
+	case compaction.TriggerSourceLadder:
+		source = fmt.Sprintf("the %s%% threshold ladder", humanizePercent(d.Fraction))
+	case compaction.TriggerSourceConfigured:
+		source = "your configured cap"
+	}
+	parts := []string{fmt.Sprintf("threshold: %d", d.Point), fmt.Sprintf("reserve: %d", d.Reserve)}
+	if d.Budget > 0 && d.Budget != d.Window {
+		parts = append(parts, fmt.Sprintf("input budget: %d", d.Budget))
+	}
+	return fmt.Sprintf("%s; decided by %s", strings.Join(parts, ", "), source)
+}
+
+// humanizePercent renders a ladder fraction as the integer percentage a config
+// file would have written ("80%"), trimming a float's trailing zeros.
+func humanizePercent(f float64) string {
+	return strconv.FormatFloat(f*100, 'f', -1, 64)
 }
 
 // printEnvStatus prints the project & environment section: cwd, trust status,
@@ -193,11 +233,29 @@ func printEnvStatus(out io.Writer, color bool, host cli.Host) {
 			}
 		}
 	}
-	fmt.Fprintf(out, "  %s %d%s\n", ui.Colorize(color, ui.Dim, "skills:"), len(skills), namesSuffix(skills))
+	fmt.Fprintf(out, "  %s %d%s%s\n", ui.Colorize(color, ui.Dim, "skills:"), len(skills),
+		skillSourceNote(host.Skills()), namesSuffix(skills))
 	fmt.Fprintf(out, "  %s %d%s\n", ui.Colorize(color, ui.Dim, "plugins:"), len(plugins), namesSuffix(plugins))
 	if len(userCmds) > 0 {
 		fmt.Fprintf(out, "  %s %d%s\n", ui.Colorize(color, ui.Dim, "user commands:"), len(userCmds), namesSuffix(userCmds))
 	}
+}
+
+// skillSourceNote says how many of the loaded skills are built in, since those are
+// read-only files inside the binary (a same-named disk copy only wins when
+// [skills] override_builtin lists it). It is empty when no built-in is loaded, so
+// the common all-disk line reads exactly as before.
+func skillSourceNote(skills []*runtime.Skill) string {
+	var builtin int
+	for _, s := range skills {
+		if s != nil && builtinskills.IsVirtual(s.Path) {
+			builtin++
+		}
+	}
+	if builtin == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d built-in, %d disk)", builtin, len(skills)-builtin)
 }
 
 // trustStatus classifies the cwd's trust state for display: disabled when trust

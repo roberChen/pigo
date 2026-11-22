@@ -229,8 +229,11 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		BaseURL:       opts.BaseURL,
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
-		ContextWindow: cli.DefaultContextWindow,
 	}
+	// Resolve the compaction plan from the model registry plus config.toml, so a
+	// resumed session picks up the current window, ladder, reserve and policy.
+	live.Compaction = run.PlanCompaction(live.ProviderName, live.Model)
+	live.ContextWindow = live.Compaction.ContextWindow
 	// Bind the tools' image gate to the live model rather than a snapshot, so a
 	// /model switch to a text-only model stops read/view_image handing it a
 	// picture (which the wire would reject) without rebuilding the tool set.
@@ -418,8 +421,6 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 			ThinkingLevel: s.live.ThinkingLevel,
 			Stream:        provider.StreamFnFromProvider(s.live.Provider),
 			GetAPIKey:     s.creds.GetAPIKey,
-			ContextWindow: s.live.ContextWindow,
-			Compaction:    compaction.DefaultCompactionSettings,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{
@@ -430,6 +431,10 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 		SessionID:  s.header.ID,
 		MemoryRoot: s.memoryRoot,
 	}
+	// Every TUI turn runs with the session's resolved compaction plan, so a model
+	// switch that re-resolved it (see /model) lands on the very next turn instead
+	// of leaving the previous model's window in place.
+	run.AttachCompaction(&cfg, s.live.Compaction)
 	// Per-turn wiring of the tool-execution + Stop seams; nil dispatcher is a
 	// no-op so the hot path pays nothing when no hooks are configured (FR-18).
 	if s.dispatcher != nil {

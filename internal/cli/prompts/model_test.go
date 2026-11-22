@@ -144,6 +144,93 @@ func TestModelsFetchDegrades(t *testing.T) {
 	}
 }
 
+// TestModelsFetchUsesResolvedBaseURL verifies "/models fetch" probes the endpoint
+// chat actually uses, not the provider's registry default and not live.BaseURL
+// alone.
+//
+// The regression this pins is a credential leak: pointing a built-in provider at a
+// corporate gateway with <PROVIDER>_BASE_URL is the documented way to retarget one,
+// and chat honors it — but discovery used live.BaseURL (the flag/config value, here
+// empty) and fell back to the registry default, so it probed api.openai.com and
+// sent the gateway's key there. A gateway on the Anthropic protocol was doubly
+// broken, appending another /v1.
+func TestModelsFetchUsesResolvedBaseURL(t *testing.T) {
+	var gotPaths []string
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"corp-a"}]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OPENAI_BASE_URL", srv.URL+"/v1")
+
+	live := &cli.LiveConfig{Model: "corp-a", ProviderName: "openai"} // no flag base URL
+	creds := provider.NewCredentialStore(nil)
+	creds.SetOverride("openai", "corp-key")
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, creds)
+
+	out, err := reg.ResolveOutcome("/models fetch")
+	if err != nil {
+		t.Fatalf("ResolveOutcome /models fetch: %v", err)
+	}
+	if len(gotPaths) != 1 || gotPaths[0] != "/v1/models" {
+		t.Fatalf("paths = %v, want [/v1/models] on the gateway from OPENAI_BASE_URL", gotPaths)
+	}
+	if gotAuth != "Bearer corp-key" {
+		t.Errorf("Authorization = %q, want the gateway's key", gotAuth)
+	}
+	if len(live.FetchedModels) != 1 || live.FetchedModels[0] != "corp-a" {
+		t.Errorf("live.FetchedModels = %v, want [corp-a]", live.FetchedModels)
+	}
+	if !strings.Contains(out.Message, srv.URL) {
+		t.Errorf("message = %q, want it to name the endpoint that answered", out.Message)
+	}
+}
+
+// TestModelsFetchKeepsPreviousCatalog verifies a failed refresh leaves the catalog
+// it already had. A gateway that is briefly unreachable (or answers in a shape
+// pigo does not understand) must not turn a working /model picker into an empty
+// one: the ids were valid a minute ago and nothing has replaced them.
+func TestModelsFetchKeepsPreviousCatalog(t *testing.T) {
+	var fail bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"corp-a"},{"id":"corp-b"}]}`))
+	}))
+	defer srv.Close()
+
+	live := &cli.LiveConfig{Model: "corp-a", ProviderName: "openai", BaseURL: srv.URL + "/v1"}
+	creds := provider.NewCredentialStore(nil)
+	creds.SetOverride("openai", "k")
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, creds)
+
+	if out, err := reg.ResolveOutcome("/models fetch"); err != nil || len(live.FetchedModels) != 2 {
+		t.Fatalf("first fetch: models = %v, err = %v, msg = %q", live.FetchedModels, err, out.Message)
+	}
+	fetchedAt := live.FetchedAt
+
+	fail = true
+	out, err := reg.ResolveOutcome("/models fetch")
+	if err != nil {
+		t.Fatalf("ResolveOutcome /models fetch: %v", err)
+	}
+	if len(live.FetchedModels) != 2 || live.FetchedModels[1] != "corp-b" {
+		t.Errorf("live.FetchedModels = %v, want the previous [corp-a corp-b]", live.FetchedModels)
+	}
+	if live.FetchedAt != fetchedAt {
+		t.Error("FetchedAt moved on a failed fetch, want it untouched")
+	}
+	if !strings.Contains(out.Message, "fetch failed") {
+		t.Errorf("message = %q, want the failure reported", out.Message)
+	}
+}
+
 // TestModelCommandShowsImageSupport: /model reports the active model's image
 // capability and where it came from. Image support is declared per model, so the
 // line must distinguish a declaration from pigo's default instead of printing a

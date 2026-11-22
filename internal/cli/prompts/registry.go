@@ -199,7 +199,16 @@ func RegisterPluginCommands(reg *runtime.SlashRegistry, mgr *plugin.Manager) {
 // fetchModelCatalog implements "/models fetch" (issue #566): query the live
 // provider's endpoint for its real model catalog, cache the ids on live for
 // /model switching, and summarize the result. Errors degrade gracefully — the
-// static preset listing remains the source of truth for switching.
+// static preset listing remains the source of truth for switching, and a failed
+// fetch leaves a previously fetched catalog intact (a catalog that cannot be
+// refreshed is still better than none).
+//
+// The endpoint is resolved the same way chat requests resolve it — flag or config
+// base_url, then the provider's base-url env vars, then the registry default — via
+// provider.ResolveBaseURL. Using live.BaseURL alone was a credential leak and a
+// silent dead end: pointing a built-in provider at a corporate gateway with
+// OPENAI_BASE_URL sends chat there, while discovery would have probed
+// api.openai.com and shipped the gateway's key to it.
 func fetchModelCatalog(live *cli.LiveConfig, creds *provider.CredentialStore) string {
 	if creds == nil {
 		return "models: fetch unavailable (no credential store); /models shows the static presets"
@@ -208,10 +217,7 @@ func fetchModelCatalog(live *cli.LiveConfig, creds *provider.CredentialStore) st
 	if !ok {
 		return fmt.Sprintf("models: fetch unavailable: unknown provider %q; /models shows the static presets", live.ProviderName)
 	}
-	baseURL := live.BaseURL
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = spec.DefaultBaseURL
-	}
+	baseURL := provider.ResolveBaseURL(spec, live.BaseURL, os.Getenv)
 	protocol := live.Protocol
 	if strings.TrimSpace(protocol) == "" {
 		protocol = spec.Protocol

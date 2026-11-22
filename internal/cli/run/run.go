@@ -316,14 +316,16 @@ func setupEnv(cwd, model, baseURL, protocol, providerName, apiKey string, noTool
 	// Load skills once (shared between prompt injection and /skill). A partial
 	// parse error still yields the skills that DID load,
 	// so one malformed file is a non-fatal warning rather than a hard failure.
-	skills, err := LoadSkills(noSkills)
+	skills, ignoredSkills, err := LoadSkillsDetail(noSkills)
 	if err != nil {
 		diag.Diagf("skills: %v", err)
 	}
 	// Skills are discovered after the tool boundary is applied, so the report is
-	// completed here rather than at construction.
+	// completed here rather than at construction. The ignored copies are reported
+	// too: they are the stale copies an older pigo installed into the skills dir.
 	if report != nil {
 		report.Skills = skills
+		report.IgnoredSkills = ignoredSkills
 	}
 	// The model can only load a skill's body when the read tool is present, so
 	// advertise skills in the prompt only then (mirrors pi's selectedTools check).
@@ -631,11 +633,23 @@ func SkillsDir() string {
 //
 // Built-in skills come from the binary's embedded tree and are never installed:
 // their location is a read-only `pigo://skills/<name>/SKILL.md` address. Skills
-// found in SkillsDir() are layered on top, so a user skill of the same name
-// shadows the built-in one (and may be edited normally).
+// found in SkillsDir() are layered on top, but a disk skill only shadows a built-in
+// one of the same name when that name is listed under [skills] override_builtin
+// (config.toml, or `option skills.override-builtin <name>` in a pigorc). Any other
+// collision is a stale copy — an older pigo installed its built-ins into the skills
+// dir — so the built-in wins and the copy is reported as ignored.
 func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
+	skills, _, err := LoadSkillsDetail(noSkills)
+	return skills, err
+}
+
+// LoadSkillsDetail is LoadSkills plus the on-disk copies it rejected because they
+// collide with a built-in skill without being authorized to override it. The caller
+// surfaces them (the configuration report and, via diag, debug output) so a stale
+// copy is discoverable instead of silently inert.
+func LoadSkillsDetail(noSkills bool) (skills, ignored []*runtime.Skill, err error) {
 	if noSkills {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// Publish the pigorc skill's generated configuration reference before any
 	// skill is parsed, so it is readable at pigo://skills/pigorc/reference.md. It
@@ -644,9 +658,9 @@ func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 	// shipped skill always describes the running build.
 	refreshConfigReference()
 
-	builtin, err := runtime.LoadBuiltinSkills()
-	if err != nil {
-		diag.Diagf("built-in skills: %v", err)
+	builtin, builtinErr := runtime.LoadBuiltinSkills()
+	if builtinErr != nil {
+		diag.Diagf("built-in skills: %v", builtinErr)
 	}
 	dir := SkillsDir()
 	var disk []*runtime.Skill
@@ -658,7 +672,13 @@ func LoadSkills(noSkills bool) ([]*runtime.Skill, error) {
 			diag.Diagf("skills: %v", diskErr)
 		}
 	}
-	return runtime.MergeSkills(builtin, disk), nil
+	merged, ignored := runtime.MergeSkills(builtin, disk, config.CurrentSkillOverrides())
+	for _, s := range ignored {
+		diag.Diagf("skill %q at %s is ignored: it would shadow the built-in skill of that name; "+
+			"list %q under [skills] override_builtin (or `option skills.override-builtin %s` in a pigorc) to use your copy",
+			s.Frontmatter.Name, s.Path, s.Frontmatter.Name, s.Frontmatter.Name)
+	}
+	return merged, ignored, nil
 }
 
 // refreshConfigReference regenerates the built-in pigorc skill's configuration
@@ -810,9 +830,14 @@ func Trusted(cwd string) bool {
 }
 
 // NewConfig builds the loop configuration shared by every driver: the provider
-// stream, the dynamic API-key resolver, and the tool registry. It is the single
-// definition of "how a run is wired", so the REPL (streamRun) and the headless
-// driver cannot drift apart.
+// stream, the dynamic API-key resolver, the tool registry, and the resolved
+// auto-compaction plan. It is the single definition of "how a run is wired", so
+// the REPL (streamRun) and the headless driver cannot drift apart.
+//
+// The compaction plan is resolved here rather than by the caller: the window, the
+// input ceiling, the trigger ladder and the user's policy all come from one place
+// (PlanCompaction), so a driver that builds its RunConfig by hand cannot silently
+// run with a different (or missing) window than a driver that goes through here.
 func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, prov provider.Provider, creds *provider.CredentialStore, reg *agenttool.ToolRegistry, reminders *runtime.ReminderRegistry, sched *agenttool.Schedule, jobs *runtime.SubAgentJobs, mcpMgr *mcp.Manager) runtime.RunConfig {
 	cfg := runtime.RunConfig{
 		LoopConfig: runtime.LoopConfig{
@@ -827,6 +852,7 @@ func NewConfig(model, providerName string, thinking agentcore.ThinkingLevel, pro
 		},
 		Reminders: reminders,
 	}
+	AttachCompaction(&cfg, PlanCompaction(providerName, model))
 	// Background sub-agent reports and due session-local reminders ride the
 	// follow-up seam: when the run is about to settle, the loop delivers finished
 	// job reports (waiting for the next completion while work is outstanding) and

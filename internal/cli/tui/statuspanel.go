@@ -15,12 +15,14 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/roberChen/pigo/internal/agentcore"
+	"github.com/roberChen/pigo/internal/builtinskills"
 	"github.com/roberChen/pigo/internal/cli/prompts"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/compaction"
@@ -197,6 +199,11 @@ func (m Model) thinkingDrawerRows() []statusPanelRow {
 // next message. Selection itself stays with /skill (it also collects arguments
 // through a form), so these rows are informational: the drawer answers
 // "what is active, and what is queued".
+//
+// A built-in skill carries that word in its detail. It matters because a built-in
+// lives in the binary at a read-only pigo:// address: a disk skill of the same name
+// is only used when [skills] override_builtin lists it, so a user who edited a copy
+// of a skill needs to see which kind the row is.
 func (m Model) skillDrawerRows() []statusPanelRow {
 	skills := m.availableSkills()
 	chosen := make(map[string]bool, len(m.selectedSkills))
@@ -208,9 +215,17 @@ func (m Model) skillDrawerRows() []statusPanelRow {
 		if s == nil {
 			continue
 		}
+		detail := firstLineOf(s.Frontmatter.Description)
+		if builtinskills.IsVirtual(s.Path) {
+			if detail == "" {
+				detail = "built-in"
+			} else {
+				detail = "built-in · " + detail
+			}
+		}
 		rows = append(rows, statusPanelRow{
 			label:   s.Frontmatter.Name,
-			detail:  firstLineOf(s.Frontmatter.Description),
+			detail:  detail,
 			current: chosen[s.Frontmatter.Name],
 			action:  rowNone,
 		})
@@ -319,17 +334,17 @@ func (m Model) contextDrawerRows() []statusPanelRow {
 	// meaningless without a window (ShouldCompact returns false then, so no amount
 	// of context would ever trigger it), so they are replaced by one row saying so
 	// rather than by figures describing compaction that cannot happen.
-	if !known || window <= 0 {
-		rows = append(rows, statusPanelRow{
-			label:  "remaining",
-			detail: "auto-compaction is off · the loop has no context window for this model",
-			warn:   true,
-		})
+	trigger := m.compactionTrigger()
+	if !known || window <= 0 || trigger.Point <= 0 {
+		detail := "auto-compaction is off · the loop has no context window for this model"
+		if window > 0 {
+			detail = "auto-compaction is off · compaction.enabled is false"
+		}
+		rows = append(rows, statusPanelRow{label: "remaining", detail: detail, warn: true})
 		return m.appendContextProvenanceRows(rows)
 	}
 
-	reserve := compaction.DefaultCompactionSettings.ReserveTokens
-	threshold := window - reserve
+	threshold := trigger.Point
 	switch {
 	case !v.known:
 		rows = append(rows, statusPanelRow{
@@ -352,9 +367,64 @@ func (m Model) contextDrawerRows() []statusPanelRow {
 	}
 	rows = append(rows, statusPanelRow{
 		label:  "threshold",
-		detail: fmt.Sprintf("%s tokens · the window minus a %s reserve", humanizeInt(threshold), humanizeInt(reserve)),
+		detail: m.thresholdDetailText(trigger),
 	})
+	// The input budget is only a separate number when the provider publishes one:
+	// for a "1M combined, 512K input" model the line above is measured against the
+	// ceiling, and the window row alone would read as unexplained headroom.
+	if trigger.Budget > 0 && trigger.Budget != trigger.Window {
+		rows = append(rows, statusPanelRow{
+			label:  "input budget",
+			detail: fmt.Sprintf("%s tokens · the ceiling this model accepts, not the combined window", humanizeInt(trigger.Budget)),
+		})
+	}
 	return m.appendContextProvenanceRows(rows)
+}
+
+// thresholdDetailText explains the trigger point: the number, and the rule that
+// put it there. Without the attribution "compact at 102,400" reads as if the user
+// set it, when it is usually the 80% ladder on top of the model's input budget.
+func (m Model) thresholdDetailText(d compaction.TriggerDetail) string {
+	if d.Budget > 0 && d.Budget != d.Window {
+		return fmt.Sprintf("%s tokens · %s of the %s input budget",
+			humanizeInt(d.Point), triggerRuleText(d), humanizeInt(d.Budget))
+	}
+	return fmt.Sprintf("%s tokens · %s", humanizeInt(d.Point), triggerRuleText(d))
+}
+
+// triggerRuleText names the cap that decided the trigger point in the drawer's
+// terms, including the reserve when it is the deciding rule.
+func triggerRuleText(d compaction.TriggerDetail) string {
+	switch d.Source {
+	case compaction.TriggerSourceLadder:
+		return "the " + humanizePercent(d.Fraction) + "% threshold ladder"
+	case compaction.TriggerSourceConfigured:
+		return "your configured cap (max_context / compact_at)"
+	case compaction.TriggerSourceReserve:
+		return fmt.Sprintf("the input budget minus a %s reserve", humanizeInt(d.Reserve))
+	default:
+		return "no trigger"
+	}
+}
+
+// humanizePercent renders a ladder fraction as the whole percentage a config file
+// would have written ("80%"), so the drawer quotes the setting rather than a float.
+func humanizePercent(f float64) string {
+	return strconv.FormatFloat(f*100, 'f', -1, 64)
+}
+
+// compactionTrigger is the resolved trigger for the window this drawer displays:
+// the same settings the loop runs (the configured ladder, reserve and any absolute
+// cap, from the plan the live config resolved) applied to the window the window row
+// shows. Deriving both from one place is what keeps the drawer internally
+// consistent — a threshold computed from a different window than the one printed
+// above it is a number the user cannot check.
+func (m Model) compactionTrigger() compaction.TriggerDetail {
+	settings := compaction.DefaultCompactionSettings
+	if m.live != nil {
+		settings = m.live.CompactionSettings()
+	}
+	return compaction.ExplainTrigger(m.contextWindow(), settings)
 }
 
 // appendContextProvenanceRows adds the two rows that say where the count came from
@@ -434,17 +504,20 @@ func (m Model) contextSummary() string {
 	}
 }
 
-// contextWindow is the context-token budget the drawer explains: the meter's copy
-// once it has been seeded, otherwise the live config's value (the same one
-// buildConfig hands the loop). 0 means neither is known.
+// contextWindow is the context-token budget the drawer explains: the live config's
+// value, which is the one buildConfig hands the loop, falling back to the meter's
+// copy when the live config has none.
+//
+// The live config wins because it is authoritative: it is the number the loop
+// compares against, and a /model switch re-resolves it. The meter's copy is a
+// display cache seeded from the same value (or from telemetry), so letting it take
+// precedence would let a stale seed pin the drawer to a budget the run no longer
+// uses — the exact drift this drawer exists to rule out.
 func (m Model) contextWindow() int {
-	if w := m.ctxMeter.window; w > 0 {
-		return w
-	}
-	if m.live != nil {
+	if m.live != nil && m.live.ContextWindow > 0 {
 		return m.live.ContextWindow
 	}
-	return 0
+	return m.ctxMeter.window
 }
 
 // contextPercent is the utilization to display, computed from the same window the
@@ -617,7 +690,8 @@ func (m Model) statusPanelHeader(width int, rows []statusPanelRow) string {
 	case sectionThinking:
 		title = "thinking level · click a row to switch · Esc closes"
 	case sectionSkills:
-		title = fmt.Sprintf("skills · %d loaded · selected ones ride the next message · Esc closes", len(rows))
+		title = fmt.Sprintf("skills · %d loaded%s · selected ones ride the next message · Esc closes",
+			len(rows), m.skillSourceSummary())
 	case sectionMCP:
 		title = "mcp servers · click a row to connect or disconnect · Esc closes"
 	case sectionFiles:
@@ -634,6 +708,32 @@ func (m Model) statusPanelHeader(width int, rows []statusPanelRow) string {
 			Foreground(lipgloss.Color(drawerAccent(m.statusPanel.section))).
 			Bold(true)},
 	)
+}
+
+// skillSourceSummary is the drawer title's aside: how many of the loaded skills
+// are built in (read-only pigo:// files) versus read from the skills directory. It
+// is empty when there is nothing to say, so the title stays short for a skill set
+// that is all one kind.
+func (m Model) skillSourceSummary() string {
+	var builtin, disk int
+	for _, s := range m.availableSkills() {
+		if s == nil {
+			continue
+		}
+		if builtinskills.IsVirtual(s.Path) {
+			builtin++
+		} else {
+			disk++
+		}
+	}
+	switch {
+	case builtin > 0 && disk > 0:
+		return fmt.Sprintf(" (%d built-in, %d from disk)", builtin, disk)
+	case builtin > 0:
+		return " (all built-in)"
+	default:
+		return ""
+	}
 }
 
 // filesSummary is the drawer title's headline: the file count and line totals that

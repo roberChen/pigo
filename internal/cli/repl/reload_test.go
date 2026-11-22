@@ -25,6 +25,7 @@ func newReloadDeps(t *testing.T, settings run.ReloadSettings, watched ...string)
 	t.Setenv("PIGO_SKILLS_DIR", t.TempDir())
 	config.SetCurrentMCP(nil)
 	config.SetCurrentAgents(nil)
+	config.SetCurrentSkillOverrides(nil)
 
 	env, err := run.SetupEnv("openrouter/free", "", "", "", "", false, true, "prompt one", nil, false, run.ToolPolicy{})
 	if err != nil {

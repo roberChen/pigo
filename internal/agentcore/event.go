@@ -99,7 +99,9 @@ type ToolExecutionEndEvent struct {
 // the token/count fields describing the unchanged context, so consumers can
 // surface the failure without the session aborting (US-004).
 type CompactionEvent struct {
-	// Reason is why compaction ran: "manual", "threshold", or "overflow".
+	// Reason is why compaction ran. Built-in values are "manual", "threshold",
+	// "overflow", "checkpoint" and "rebuild"; a pluggable trigger adds
+	// "policy: <why>" or "input budget guard" (see runtime.maybeAutoCompact).
 	Reason string
 	// TokensBefore is the estimated context tokens prior to compaction.
 	TokensBefore int
@@ -139,7 +141,8 @@ type CompactionEvent struct {
 // while the summarization request is in flight. The matching CompactionEvent is
 // emitted when it completes (or fails). Reason mirrors CompactionEvent.Reason.
 type CompactionStartEvent struct {
-	// Reason is why compaction is running: "manual", "threshold", or "overflow".
+	// Reason is why compaction is running: the same label CompactionEvent.Reason
+	// carries ("manual", "threshold", "policy: <why>", "input budget guard", ...).
 	Reason string
 	// TokensBefore is the estimated context tokens that triggered compaction.
 	TokensBefore int
