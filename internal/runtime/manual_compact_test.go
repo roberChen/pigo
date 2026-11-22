@@ -177,3 +177,59 @@ func TestCompactContext_ContinuesPriorCheckpoint(t *testing.T) {
 		t.Errorf("compacted context carries %d checkpoints, want exactly 1", checkpoints)
 	}
 }
+
+// TestCompactContext_ReportsRealPostCompactionSize pins the fix for a /compact
+// whose card read "90,502 → 90,500 tokens": the retained tail's assistant message
+// still carries the usage block of the request that INCLUDED the summarized
+// prefix, so preferring that block (compaction.EstimateContextTokens) reports the
+// pre-compaction size back and a real compaction looks like a no-op. The reported
+// after must be the rebuilt list's own size.
+func TestCompactContext_ReportsRealPostCompactionSize(t *testing.T) {
+	cfg := manualCompactCfg(summaryStream("## Goal\nshort"))
+	cfg.SessionID = "sess-size"
+	cfg.MemoryRoot = t.TempDir()
+
+	// The tail keeps an assistant turn that reports a huge request size: that
+	// request carried the history this compaction drops.
+	stale := &agentcore.Usage{InputTokens: 90_000, OutputTokens: 500}
+	msgs := bigUserMessages(12, 800)
+	msgs = append(msgs, agentcore.AssistantMessage{
+		RoleField:  agentcore.RoleAssistant,
+		Content:    agentcore.ContentList{agentcore.NewTextContent("tail answer")},
+		Usage:      stale,
+		StopReason: agentcore.StopReasonEndTurn,
+	})
+	msgs = append(msgs, textUser("the ask being continued"))
+
+	res, err := CompactContext(context.Background(), msgs, &cfg, "manual")
+	if err != nil {
+		t.Fatalf("CompactContext: %v", err)
+	}
+	if res.NoOp {
+		t.Fatal("expected a real compaction")
+	}
+	// The retained tail must still hold the usage-carrying message, otherwise this
+	// test would pass for the wrong reason.
+	hasUsage := false
+	for _, m := range res.Messages {
+		if a, ok := m.(agentcore.AssistantMessage); ok && a.Usage != nil {
+			hasUsage = true
+		}
+	}
+	if !hasUsage {
+		t.Skip("cut point dropped the usage-carrying turn; the scenario is not exercised")
+	}
+
+	ev := res.Event
+	want := compaction.EstimatePostCompactionTokens(res.Messages)
+	if ev.TokensAfter != want {
+		t.Errorf("TokensAfter = %d, want the rebuilt list's own size %d", ev.TokensAfter, want)
+	}
+	// The whole point: the report must show the drop, not repeat the old size.
+	if ev.TokensAfter >= ev.TokensBefore {
+		t.Errorf("after must be smaller than before: %d → %d", ev.TokensBefore, ev.TokensAfter)
+	}
+	if ev.TokensAfter >= 90_000 {
+		t.Errorf("after re-read the stale pre-compaction usage block: %d", ev.TokensAfter)
+	}
+}

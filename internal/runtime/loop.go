@@ -433,7 +433,10 @@ func maybeAutoCompact(ctx context.Context, agentCtx *agentcore.AgentContext, cfg
 	rebuilt := res.RebuildContext(agentCtx.Messages, now)
 	summarized := len(agentCtx.Messages) - (len(rebuilt) - 1)
 	agentCtx.Messages = rebuilt
-	after := compaction.EstimateContextTokens(rebuilt).Tokens
+	// Measure the rebuilt list rather than preferring its retained usage block:
+	// that block reports the request before the cut, so it would report the
+	// pre-compaction size back (see compaction.EstimatePostCompactionTokens).
+	after := compaction.EstimatePostCompactionTokens(rebuilt)
 	_ = emit(agentcore.CompactionEvent{
 		Reason:          "threshold",
 		TokensBefore:    before,

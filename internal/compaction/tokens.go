@@ -152,10 +152,7 @@ func EstimateContextTokens(msgs []agentcore.Message) ContextUsageEstimate {
 	}
 
 	if lastIdx < 0 {
-		estimated := 0
-		for _, m := range msgs {
-			estimated += EstimateTokens(m)
-		}
+		estimated := estimateAllTokens(msgs)
 		return ContextUsageEstimate{
 			Tokens:         estimated,
 			UsageTokens:    0,
@@ -175,6 +172,37 @@ func EstimateContextTokens(msgs []agentcore.Message) ContextUsageEstimate {
 		TrailingTokens: trailing,
 		LastUsageIndex: lastIdx,
 	}
+}
+
+// estimateAllTokens sums the per-message estimates, paying no attention to any
+// provider usage block. It is the "measure this list as it stands" reading, used
+// when the usage blocks in the list cannot speak for the list's current shape.
+func estimateAllTokens(msgs []agentcore.Message) int {
+	total := 0
+	for _, m := range msgs {
+		total += EstimateTokens(m)
+	}
+	return total
+}
+
+// EstimatePostCompactionTokens measures a context that has just been rebuilt by
+// a compaction (checkpoint + retained tail).
+//
+// It deliberately ignores every provider usage block. A usage block reports the
+// size of the request that ended in that assistant message, and the retained tail
+// was produced BEFORE the cut: the request it measured still contained the prefix
+// this compaction just replaced with a summary. Preferring that block (what
+// EstimateContextTokens does) therefore reports the pre-compaction size back —
+// a 90k context that folds to 12k was announced as "90,502 → 90,500 tokens",
+// which reads as if /compact did nothing.
+//
+// The estimate is the only honest reading available at this instant: the messages
+// are exactly what the next request will carry, so summing them measures the
+// rebuild. It is also self-correcting — the next turn's response reports real
+// provider usage for a request that already contains the checkpoint, and
+// EstimateContextTokens prefers that block again from then on.
+func EstimatePostCompactionTokens(msgs []agentcore.Message) int {
+	return estimateAllTokens(msgs)
 }
 
 // ShouldCompact reports whether context usage has exceeded the usable window,

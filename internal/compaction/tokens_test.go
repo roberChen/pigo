@@ -138,6 +138,51 @@ func TestEstimateContextTokensSkipsZeroUsage(t *testing.T) {
 	}
 }
 
+// TestEstimatePostCompactionTokensIgnoresStaleUsage pins the fix for a /compact
+// that reported "90,502 → 90,500 tokens". The retained tail was produced before
+// the cut, so its usage block measures a request that still carried the summarized
+// prefix; preferring it (as EstimateContextTokens does) reports the pre-compaction
+// size back and makes a real compaction look like a no-op.
+func TestEstimatePostCompactionTokensIgnoresStaleUsage(t *testing.T) {
+	stale := &agentcore.Usage{InputTokens: 90_000, OutputTokens: 500}
+	rebuilt := []agentcore.Message{
+		agentcore.CompactionMessage{RoleField: agentcore.RoleCompaction, Summary: "## Goal\nshort checkpoint"},
+		userMsg("next ask"),
+		assistantMsg("tail answer", stale, "end_turn"),
+	}
+
+	if got := EstimateContextTokens(rebuilt).Tokens; got != 90_500 {
+		t.Fatalf("precondition: the stale block should dominate the naive reading, got %d", got)
+	}
+	got := EstimatePostCompactionTokens(rebuilt)
+	if got >= 90_500 {
+		t.Errorf("post-compaction estimate re-read the pre-compaction size: %d", got)
+	}
+	// The number must be the sum of what the rebuilt list actually holds, since
+	// that is exactly what the next request carries.
+	want := EstimateTokens(rebuilt[0]) + EstimateTokens(rebuilt[1]) + EstimateTokens(rebuilt[2])
+	if got != want {
+		t.Errorf("EstimatePostCompactionTokens = %d, want the per-message sum %d", got, want)
+	}
+}
+
+// TestEstimatePostCompactionTokensKeepsCheckpointCost verifies the measurement
+// counts the checkpoint's user-instruction section, which is re-sent on every
+// later request — the section is a permanent cost, not a one-off.
+func TestEstimatePostCompactionTokensKeepsCheckpointCost(t *testing.T) {
+	plain := agentcore.CompactionMessage{RoleField: agentcore.RoleCompaction, Summary: "text"}
+	withInstructions := plain
+	withInstructions.UserInstructions = &agentcore.UserInstructionBlock{
+		Summary:  "never touch deploy/",
+		Verbatim: []string{"do not touch deploy/"},
+	}
+	base := EstimatePostCompactionTokens([]agentcore.Message{plain})
+	rich := EstimatePostCompactionTokens([]agentcore.Message{withInstructions})
+	if rich <= base {
+		t.Errorf("instruction section must add to the estimate: %d vs %d", rich, base)
+	}
+}
+
 func TestShouldCompactThresholdBoundaries(t *testing.T) {
 	s := CompactionSettings{Enabled: true, ReserveTokens: 16384}
 	window := 200000

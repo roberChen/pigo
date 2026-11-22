@@ -90,7 +90,7 @@ func CompactContext(ctx context.Context, msgs agentcore.MessageList, cfg *RunCon
 		Event: agentcore.CompactionEvent{
 			Reason:          reason,
 			TokensBefore:    before,
-			TokensAfter:     compaction.EstimateContextTokens(rebuilt).Tokens,
+			TokensAfter:     compaction.EstimatePostCompactionTokens(rebuilt),
 			SummarizedCount: len(msgs) - kept,
 			KeptCount:       kept,
 			Summary:         res.Text(),

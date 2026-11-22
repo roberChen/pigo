@@ -145,7 +145,7 @@ func RebuildFromCheckpoint(
 		SummarizedCount: len(msgs) - kept,
 		KeptCount:       kept,
 		TokensBefore:    tokensBefore,
-		TokensAfter:     compaction.EstimateContextTokens(rebuilt).Tokens,
+		TokensAfter:     compaction.EstimatePostCompactionTokens(rebuilt),
 	}, nil
 }
 
@@ -177,6 +177,6 @@ func rebuildFromLoadedCheckpoint(msgs agentcore.MessageList, cp *Checkpoint, tok
 		SummarizedCount: w,
 		KeptCount:       kept,
 		TokensBefore:    tokensBefore,
-		TokensAfter:     compaction.EstimateContextTokens(rebuilt).Tokens,
+		TokensAfter:     compaction.EstimatePostCompactionTokens(rebuilt),
 	}
 }

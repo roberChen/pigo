@@ -66,6 +66,22 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Fixed
+- **A compaction no longer reports the size it compacted *from* as its result.**
+  The TUI's `/compact` card could read `90,502 → 90,500 tokens` for a context that
+  really did shrink to a few thousand — a report that says the command did
+  nothing. The post-compaction number came from `EstimateContextTokens`, which
+  prefers the newest provider `Usage` block in the list; but the retained tail was
+  produced *before* the cut, so the request that block measured still carried the
+  entire prefix the compaction had just replaced with a checkpoint. Reading it
+  back therefore reproduced the pre-compaction size. `TokensAfter` is now measured
+  on the rebuilt list itself (`compaction.EstimatePostCompactionTokens`, a
+  per-message sum): those messages are exactly what the next request will carry,
+  which is the only honest reading at that instant. It self-corrects — the next
+  turn's response reports usage for a request that already contains the
+  checkpoint, and the normal preference takes over again. Auto-compaction,
+  `/compact` and `/rebuild` all share the measurement (the same defect affected
+  the automatic path, so a checkpoint written mid-run also misreported its
+  result).
 - **Clicking a checkpoint's expand marker no longer jumps to a different
   checkpoint.** A card id is the identity of a transcript entry — selecting,
   toggling and revealing all resolve through the card index — and a resumed

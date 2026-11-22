@@ -621,6 +621,8 @@ fmt.Println(reply)
 
 **指令区随检查点一起落盘。** `~/.pigo/memory/sessions/<id>/checkpoint.md` 的正文就是"技术摘要 + `## User Instructions` 区"，仍是可读、可 grep、可手改的普通 Markdown（不塞进 frontmatter）；读回时按同一套渲染反向解析。因此 `/resume`、`/rebuild`、`pigo --resume` 恢复出来的上下文同样带着指令区，导出（HTML / `dream` 蒸馏）与 transcript 里的压缩点标记也会显示 `user instructions preserved (…)`。旧的、没有这一区的检查点照常加载，当作纯摘要处理。
 
+**前后数字怎么来的。** 压缩后的 `tokensAfter` 是**重建后那张消息表的实测值**（`compaction.EstimatePostCompactionTokens`：逐条估算求和），而不是沿用保留下来的那条 assistant 消息里的 provider usage。原因是 usage 记录的是"产生这条消息的那次请求"的大小，而被保留的尾部是在切点**之前**产生的，那次请求里还带着刚刚被折叠掉的整段前缀——照搬它就会把压缩前的大小再报一遍，让一次真实的压缩看起来像什么都没做（曾出现 `90,502 → 90,500 tokens`）。逐条估算则是此刻唯一诚实的读数：这些消息就是下一次请求要发出去的全部内容。它也会自我校正——下一轮回来的响应会按"已经带上检查点"的请求重新上报 usage，`EstimateContextTokens` 从此再优先使用那个数字。自动压缩、`/compact`、`/rebuild` 三条路径共用这一个度量。
+
 **压缩结果直接看得见。** `compaction` 事件除了 token 与消息计数，还带着这次写出的**检查点正文**（`Summary`），三个前端都据此把"模型现在到底拿的是什么"摊开给你看，不必再去翻 `checkpoint.md`：
 
 - TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个指向它重排出的检查点，手动 `/compact` 完成后也补一个（压缩前是 `Compacting conversation…` 的固定 spinner，结束后同一张块给出摘要正文）。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动。
