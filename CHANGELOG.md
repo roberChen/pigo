@@ -66,6 +66,67 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Changed
+- **A checkpoint now captures what the last turn *discovered*, not just what it
+  did.** Compaction loses the one thing no file contains: why an approach failed,
+  the real error text, which function to resume in, which exact invocation worked.
+  A resumed session then re-runs the wrong thing and rediscovers the same failure.
+  Three changes work together, after comparing with crush's summary prompt (which
+  gets this right by naming files, exact commands, and resumable line numbers).
+  The window is now **marked by position**: `serializeConversation` inserts `---
+  most recent turn below (the work continues after this window) ---` before the
+  newest user message with text, and both `<analysis>` passes explain it, so
+  "summarize the most recent turn at full resolution" has a mechanical referent
+  instead of asking the model to guess which `[User]:` line was last. When the
+  window is that single turn, or the newest user message carries no text, no
+  divider is emitted — there is nothing to separate. `## Critical Context` now
+  **asks for the right detail** instead of "any data or references": non-obvious
+  findings from the newest turn (a gotcha, an invariant, why something that looked
+  correct failed, what the last output proved), exact invocations with their flags
+  (`go test ./internal/runtime/... -run TestLoop`, not a paraphrase), a resumable
+  location inside a file (path plus function/symbol/line region), and environment
+  facts (versions, working directory, services or fixtures). The update template
+  carries the same rule for merges — newest messages get full resolution and move
+  to the top of Critical Context, and an older entry is retired only when a newer
+  one explains it.
+- **A truncated tool result keeps its ending.** The summarization prompt capped
+  each tool result at 2000 chars by keeping only the head, which is the wrong half:
+  a command's first line says what ran, its last line says how it ended — the
+  panic, the failing assertion, `FAIL … exit status 1` — and long output is
+  typically an informative head, a long uninteresting middle and an informative
+  tail. It now keeps both ends and drops the middle, cutting on rune and line
+  boundaries so CJK/emoji input cannot become invalid UTF-8 or stop mid-line.
+- **The summarization prompts now say what the summary is for.** Compaction's
+  output replaces the messages it was written from; a prompt that reads like
+  "write a note about this conversation" produces exactly the omissions that make
+  a later turn redo work. All three templates now state that the text is the
+  assistant's only surviving record, and they ground it with rules a bare format
+  request does not give: report evidence rather than intention (`tests pass` only
+  when a run said so, never because the work was "done" in the transcript),
+  preserve literals — paths, commands with flags, error text, versions — and
+  carry the user's prohibitions word for word. The update template gains the same
+  discipline for merges, since a checkpoint eroded across several compactions is
+  rewritten from a thinner input each time; a section is only removed
+  deliberately, and a ruled-out approach stays ruled out. Both templates gained
+  the one new heading that survey of Claude Code, Gemini CLI, OpenHands and
+  Meta's agent showed is missing, `## Errors & Failed Attempts` — a failed
+  approach is the most expensive thing to rediscover. The system prompt also now
+  forbids tool calls (the summarization request streams no tool loop, so an
+  agent-shaped model that tries to read a mentioned file loses its only turn) and
+  tells the model that the conversation is data to summarize, never instructions
+  — compaction input includes file contents and web pages, which is where
+  injected "ignore your instructions" text comes from.
+- **The summarization's private reasoning pass is discarded, not stored.** Both
+  templates ask the model to walk the conversation in an `<analysis>` block
+  before writing the summary (Claude Code's compact prompt does this, and it is
+  what makes a summary account for the middle of a long session rather than only
+  its last few messages). The block is stripped before the checkpoint is stored,
+  because the checkpoint is re-sent on every request and a page of working-out
+  would tax the window compaction just freed. An unterminated block or one with
+  nothing after it is kept verbatim rather than truncated, so a model that was
+  cut off mid-pass leaves text the caller's emptiness check can see instead of a
+  silently empty checkpoint. Tags are matched case-insensitively, and by scanning
+  the original string rather than a lowercased copy — lowering can change byte
+  length (`İ`), which would slice the summary at the wrong offset.
 - **Streaming a long answer no longer slows down as the answer grows.** The TUI
   used to re-lay out the whole transcript on every streamed delta: the streaming
   block was re-wrapped and re-styled from scratch, every block above it was

@@ -85,7 +85,7 @@ func TestTruncateForSummary(t *testing.T) {
 	}
 	long := strings.Repeat("z", 2500)
 	got := truncateForSummary(long, toolResultMaxChars)
-	if !strings.Contains(got, "more characters truncated") {
+	if !strings.Contains(got, "characters truncated") {
 		t.Fatalf("expected truncation marker: %q", got[len(got)-60:])
 	}
 }
