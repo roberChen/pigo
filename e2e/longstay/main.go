@@ -115,7 +115,7 @@ func newRunner(cfg Config) (*runner, error) {
 		return nil, err
 	}
 	mock, err := startMockLLM(cfg.LLMLatency, cfg.LLMJitter, cfg.LLMErrorRate, validateOptions{
-		Model:  "mock-chat",
+		Models: longstayModels,
 		APIKey: "longstay",
 		Tools:  cfg.toolsEnabled(),
 	}, log)
@@ -210,7 +210,7 @@ func (r *runner) startHost(ctx context.Context) error {
 	r.hostLog = logFile
 	args := []string{
 		"serve", "--dir", r.homeDir,
-		"--provider", "openai", "-m", "mock-chat",
+		"--provider", "openai", "-m", baseModel,
 		"--base-url", r.mock.URL(), "-k", "longstay",
 		"--no-skills",
 	}
@@ -363,6 +363,9 @@ func (r *runner) printSummaries(ctx context.Context) {
 // provider fault from a real defect in the host.
 func (r *runner) injectedFailure(token string) bool { return r.mock.injectedFailure(token) }
 
+// turnModel reports which model id the mock saw answer a turn.
+func (r *runner) turnModel(token string) string { return r.mock.turnModel(token) }
+
 // toolsEnabled reports whether this run advertises tools. The host flags, the
 // mock's validation and every client's plan derive from this one answer, so the
 // three can never disagree about a turn's expected shape.
@@ -392,6 +395,12 @@ func (r *runner) healthy() bool {
 		m.reconnects.Load() == 0 ||
 		m.peakClients.Load() <= 1 ||
 		r.mock.requests.Load() == 0 {
+		return false
+	}
+	// A run that is configured to switch models must prove at least one switch
+	// landed with the right budget: the seam is the reason this scenario exists,
+	// and "no switch happened" is indistinguishable from "the switch is broken".
+	if r.cfg.ModelSwitchEvery > 0 && m.modelSwitchVerified.Load() == 0 {
 		return false
 	}
 	if !r.cfg.RequireTaskCoverage {
@@ -512,6 +521,9 @@ func (r *runner) summary(ok bool) map[string]any {
 		"turnsDegraded":         m.turnsDegraded.Load(),
 		"turnsCompacted":        m.turnsCompacted.Load(),
 		"transcriptsVerified":   m.transcriptsVerified.Load(),
+		"modelSwitchesVerified": m.modelSwitchVerified.Load(),
+		"modelSwitchTurnsWrong": m.modelSwitchTurnsWrong.Load(),
+		"modelSwitchEvery":      r.cfg.ModelSwitchEvery,
 		"scenario":              r.cfg.Scenario,
 		"workspacePool":         r.cfg.WorkspacePool,
 		"mockRequests":          r.mock.requests.Load(),

@@ -24,6 +24,7 @@ const (
 	MethodSessionList      = "session.list"
 	MethodSessionResume    = "session.resume"
 	MethodSessionClose     = "session.close"
+	MethodSessionSetModel  = "session.setModel"
 	MethodPrompt           = "prompt"
 	MethodCancel           = "cancel"
 	MethodPermissionDecide = "permission.decide"

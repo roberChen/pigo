@@ -101,13 +101,15 @@ func PlanCompaction(providerName, model string) CompactionPlan {
 		diag.Diagf("compaction: cannot resolve the working directory for the policy command: %v", err)
 		cwd = ""
 	}
-	return planCompactionIn(cwd, providerName, model)
+	return PlanCompactionIn(cwd, providerName, model)
 }
 
-// planCompactionIn is PlanCompaction with an explicit directory, which is where a
+// PlanCompactionIn is PlanCompaction with an explicit directory, which is where a
 // configured policy command runs. It is the seam a reload/host caller uses when the
-// session directory is not the process's own.
-func planCompactionIn(cwd, providerName, model string) CompactionPlan {
+// session directory is not the process's own — the host serves sessions whose cwd
+// differ from its own, and an in-session model switch must resolve the plan where
+// that session's policy command belongs.
+func PlanCompactionIn(cwd, providerName, model string) CompactionPlan {
 	limits, source := provider.ModelContextLimits(providerName, model)
 	window := limits.ContextWindow
 	if window <= 0 {

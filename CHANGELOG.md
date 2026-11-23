@@ -96,6 +96,40 @@ interactive REPL/TUI.
   benchmark diffs.
 
 ### Fixed
+- **A model switch now carries its compaction budget with it.** Switching models
+  changed `Model`, `ProviderName` and the provider, but left `Compaction` and
+  `ContextWindow` at the previous model's values: the loop kept compacting
+  against a window and trigger ladder that belonged to a model it was no longer
+  talking to, so a switch to a model with a smaller input ceiling compacted too
+  late and the next request was rejected by the endpoint. `LiveConfig.RefreshCompaction`
+  is now the single place that pairs a model with its plan (window, input budget,
+  trigger point and source), and every path that changes the model calls it:
+  `/model <id>`, the `/model` picker and the fetched-catalog switch
+  (`prompts.ApplyModelSwitch`), REPL and TUI `/reload`, and the initial REPL/TUI
+  assembly. `/btw` resolves the plan for the model the **side** run actually
+  talks to rather than inheriting the main conversation's, so a `btw.json` naming
+  a smaller model cannot overflow before it compacts.
+- **`session.setModel`: a live host session can change model without ending.**
+  The host protocol gains `session.setModel`, which switches an **idle** session
+  to another model (or bare provider name) in place: tools, memory, plugins, MCP
+  connections, hooks and the conversation all survive, so no SessionStart hook
+  replays and no resource is reopened. Only the per-turn streaming config (model,
+  provider, stream, credential lookup) and a freshly resolved compaction plan are
+  replaced, and the plan is resolved in the **session's own** working directory
+  because a configured policy command belongs to that directory. The switch runs
+  under the same session lock `prompt` uses to observe "idle", so it can neither
+  land inside a running turn nor race a close, and a running turn answers
+  `CodeBusy`. The result reports the budget the host resolved (window, input
+  budget, trigger point and source), because only the host knows the layered
+  `[checkpoint]`/`[compaction]` configuration, a per-model `compact_at` and any
+  policy command — a client re-deriving it from the window alone would disagree
+  with the loop it drives. An explicit `--provider` is honored on the switch, so
+  a session started against a named gateway keeps using it instead of being
+  re-routed by the model-id heuristic, and the model header is persisted
+  immediately so a switch followed by a close does not leave the old model
+  recorded. `hostclient.Client.SetModel` is the client entry point.
+
+### Fixed
 - **Auto-compaction now triggers on the model's input ceiling, not its advertised
   window.** Many gateways publish "max input + max output = W" (DeepSeek and
   others), so 80% of W is already past the largest request the model accepts: the

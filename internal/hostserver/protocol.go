@@ -21,6 +21,7 @@ const (
 	methodSessionList      = hostapi.MethodSessionList
 	methodSessionResume    = hostapi.MethodSessionResume
 	methodSessionClose     = hostapi.MethodSessionClose
+	methodSessionSetModel  = hostapi.MethodSessionSetModel
 	methodPrompt           = hostapi.MethodPrompt
 	methodCancel           = hostapi.MethodCancel
 	methodPermissionDecide = hostapi.MethodPermissionDecide

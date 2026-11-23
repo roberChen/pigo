@@ -46,6 +46,10 @@ type Config struct {
 	CallsPerStage       int
 	ThinkingBlocks      int
 	RequireTaskCoverage bool
+	// ModelSwitchEvery makes a session switch to the next model in the rotation
+	// after that many prompts, exercising the in-session model change (and the
+	// compaction plan re-resolution it must carry). 0 disables switching.
+	ModelSwitchEvery int
 	// WorkspacePool, when greater than zero, makes clients share that many
 	// workspaces (two sessions in one directory); 0 gives each client its own.
 	WorkspacePool int
@@ -90,6 +94,7 @@ func parseConfig() Config {
 	flag.IntVar(&cfg.CallsPerStage, "calls-per-stage", 1, "tool calls per assistant stage, from 1 to 8")
 	flag.IntVar(&cfg.ThinkingBlocks, "thinking-blocks", 2, "number of stages that carry thinking blocks per turn")
 	flag.BoolVar(&cfg.RequireTaskCoverage, "require-task-coverage", false, "fail unless the selected task plans produce verified child-agent evidence")
+	flag.IntVar(&cfg.ModelSwitchEvery, "model-switch-every", 2, "switch a session to the next model in the rotation after that many prompts; 0 disables")
 	flag.IntVar(&cfg.WorkspacePool, "workspace-pool", 0, "clients per workspace: >0 shares that many directories, 0 gives each client its own")
 	flag.StringVar(&cfg.OutputDir, "output", "", "artifact directory (default e2e-results/longstay-<timestamp>)")
 	flag.StringVar(&cfg.PigoBinary, "pigo", "", "path to an existing pigo binary; default builds ./cmd/pigo into the artifact directory")
@@ -131,6 +136,9 @@ func (c Config) validate() error {
 	}
 	if c.WorkspacePool < 0 {
 		return errors.New("workspace-pool must be non-negative")
+	}
+	if c.ModelSwitchEvery < 0 {
+		return errors.New("model-switch-every must be non-negative")
 	}
 	if c.AvgToolCalls < 0 || c.AvgToolCalls > 32 {
 		return errors.New("avg-tool-calls must be between 0 and 32")

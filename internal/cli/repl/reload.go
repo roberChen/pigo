@@ -92,6 +92,11 @@ func applyReload(deps *replDeps, res *run.ReloadResult) {
 	}
 	deps.live.BaseURL = settings.BaseURL
 	deps.live.Protocol = settings.Protocol
+	// A reload may have changed the model (or the [checkpoint]/[compaction] tables
+	// that decide where it compacts), so the plan is re-resolved from the freshly
+	// published config. Skipping this is how a reloaded session kept the old
+	// model's window and threshold.
+	deps.live.RefreshCompaction()
 	if level := strings.TrimSpace(settings.Thinking); level != "" {
 		deps.live.ThinkingLevel = agentcore.ThinkingLevel(level)
 	}

@@ -61,6 +61,23 @@ type LiveConfig struct {
 // ordinary short exchanges.
 const DefaultContextWindow = 128000
 
+// RefreshCompaction re-resolves the compaction plan for the current Model and
+// ProviderName and republishes the window derived from it. It is the only place
+// that pairs the two, so they cannot drift apart.
+//
+// Every path that changes Model (a /model switch or pick, a config reload, a
+// session swap) must call this: ContextWindow and Compaction describe one model,
+// and leaving them behind means the loop keeps compacting against the previous
+// model's budget — too late for a model with a smaller input ceiling, which is
+// exactly how a switch used to end in a request the endpoint rejects.
+func (l *LiveConfig) RefreshCompaction() {
+	if l == nil {
+		return
+	}
+	l.Compaction = run.PlanCompaction(l.ProviderName, l.Model)
+	l.ContextWindow = l.Compaction.ContextWindow
+}
+
 // CompactionSettings returns the settings the loop runs for the live model: the
 // resolved plan's, when the plan was resolved for this very model, else the
 // built-in defaults (a hand-built LiveConfig, or one whose plan is stale).

@@ -109,6 +109,40 @@ type SessionCloseParams struct {
 	ID string `json:"id"`
 }
 
+// SessionSetModelParams switches the model of an existing session. The
+// conversation, tools and memory stay; only the model (and the provider that
+// serves it) changes, so the next prompt runs on the new model. A session with a
+// turn in flight is rejected with CodeBusy: switching mid-turn would make the
+// turn's already-decided budget disagree with the model answering it.
+//
+// Model accepts the same forms as `pigo --model` and `/model <id>`: a concrete
+// id, or a bare provider name for that provider's default model.
+type SessionSetModelParams struct {
+	SessionID string `json:"sessionId"`
+	Model     string `json:"model"`
+}
+
+// SessionSetModelResult reports the session as it now is plus the budget the
+// host resolved for the new model. The budget is returned rather than recomputed
+// by the client because only the host knows the layered configuration
+// ([checkpoint]/[compaction], a per-model compact_at, a policy command) that
+// decides where auto-compaction fires — a client that re-derived it could
+// disagree with the loop it is driving.
+type SessionSetModelResult struct {
+	Session SessionInfo `json:"session"`
+	// ContextWindow is the model's combined budget (input + output).
+	ContextWindow int `json:"contextWindow,omitempty"`
+	// InputBudget is what a single request may carry (the input ceiling when the
+	// provider publishes one smaller than the window, else the window).
+	InputBudget int `json:"inputBudget,omitempty"`
+	// TriggerPoint is where automatic compaction fires, in tokens, measured
+	// against InputBudget. 0 means automatic compaction is off for this model.
+	TriggerPoint int `json:"triggerPoint,omitempty"`
+	// TriggerSource names the cap that decided the trigger point (ladder,
+	// reserve, configured, off) so a client can explain the number.
+	TriggerSource string `json:"triggerSource,omitempty"`
+}
+
 // PromptParams submits one user turn. Text is the literal prompt (images are not
 // part of v1 of the protocol; a UI that needs them can attach in a later
 // revision).

@@ -31,6 +31,7 @@ jq -r '
 	    "hostErrors", "duplicates", "missingEvents", "queueOverflows",
 	    "replayTruncated", "verifications", "verificationSkips",
 	    "turnsVerified", "turnsUnverified", "turnsDegraded", "turnsCompacted",
+	    "modelSwitchesVerified", "modelSwitchTurnsWrong",
 	    "toolVerifications", "transcriptsVerified", "taskChildren",
 	    "taskFailedChildren", "mockRequests", "endGoroutines", "endHeapBytes"][]
 	   | select($o[.] != null)

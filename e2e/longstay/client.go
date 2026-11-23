@@ -25,8 +25,13 @@ type turnOutcome struct {
 	attempt int
 	token   string
 	client  *hostclient.Client
-	result  hostapi.PromptResult
-	err     error
+	// model is the model the session was believed to run on when this turn was
+	// launched. The mock reports which id actually answered, so comparing the two
+	// proves an in-session switch reached the wire instead of only changing the
+	// host's header.
+	model  string
+	result hostapi.PromptResult
+	err    error
 }
 
 // resumeOwnershipGrace is how long a rejected resume is retried before it is
@@ -80,12 +85,20 @@ type clientState struct {
 	resumePendingAt time.Time
 	observed        bool
 	running         bool
-	exitAt          time.Time
-	reconnectAt     time.Time
-	nextPrompt      time.Time
-	outcomes        chan struct{}
-	cancel          context.CancelFunc
-	turn            int
+	// model is the session's current model as this client last saw it. It is
+	// updated from every create/resume/switch response, so a turn's expected model
+	// is never a local guess.
+	model string
+	// nextSwitchTurn is the prompt count at which the next switch is due. It
+	// advances by ModelSwitchEvery after each switch; a modulo test on turn would
+	// retrigger immediately, because a switch does not itself consume a turn.
+	nextSwitchTurn int
+	exitAt         time.Time
+	reconnectAt    time.Time
+	nextPrompt     time.Time
+	outcomes       chan struct{}
+	cancel         context.CancelFunc
+	turn           int
 	// attempt numbers prompts across reconnects. A late outcome whose attempt no
 	// longer matches is discarded instead of being applied to a newer turn.
 	attempt int
@@ -197,8 +210,98 @@ func (s *clientState) step() {
 		return
 	}
 	if now.After(s.nextPrompt) {
+		// A switch is attempted between turns, never during one: the host rejects
+		// a mid-turn switch with CodeBusy precisely so a turn's budget cannot
+		// disagree with the model answering it.
+		if s.shouldSwitchModel() {
+			s.switchModel()
+			return
+		}
 		s.startPrompt()
 	}
+}
+
+// shouldSwitchModel reports whether this session is due for a model switch. It
+// counts prompts rather than wall time so a short run still exercises the seam,
+// and it keeps no RNG state, so a seeded run switches at the same points.
+func (s *clientState) shouldSwitchModel() bool {
+	if s.runner.cfg.ModelSwitchEvery <= 0 {
+		return false
+	}
+	return s.turn >= s.nextSwitchTurn
+}
+
+// scheduleNextSwitch arms the following switch. It is called after a switch
+// lands, so a rejected one is retried on the next tick instead of being pushed
+// a whole interval into the future.
+func (s *clientState) scheduleNextSwitch() {
+	if s.runner.cfg.ModelSwitchEvery <= 0 {
+		return
+	}
+	s.nextSwitchTurn = s.turn + s.runner.cfg.ModelSwitchEvery
+}
+
+// switchModel moves the session to the next model in the rotation and checks what
+// the host resolved for it.
+//
+// The budget check is the point of the scenario. Only the host knows the layered
+// configuration that decides where auto-compaction fires, so it returns the
+// resolved window/budget/trigger and this side compares them against pigo's
+// built-in limit table. A switch that changes the model id but leaves the old
+// model's plan in place (the bug this covers) is invisible in the RPC's success
+// and shows up exactly here.
+func (s *clientState) switchModel() {
+	client, session := s.client, s.sessionID
+	from := s.model
+	if from == "" {
+		from = baseModel
+	}
+	to := nextLongstayModel(from)
+	res, err := client.SetModel(session, to)
+	if err != nil {
+		// Every one of these is a legitimate race with the lifecycle, not a host
+		// defect: a turn this client is only observing is still running, or the
+		// previous connection's ownership has not been released yet.
+		switch {
+		case isCode(err, hostapi.CodeBusy):
+			s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+		case isCode(err, hostapi.CodeNotFound):
+			// Nothing persisted yet, or the session was closed under us.
+			s.sessionID = ""
+		case isCode(err, hostapi.CodeForbidden):
+			s.needsResume = true
+			s.nextPrompt = time.Now().Add(50 * time.Millisecond)
+		default:
+			s.runner.recordProtocol("session_set_model", err)
+		}
+		return
+	}
+	if res.Session.ID != session {
+		s.runner.recordProtocol("model_switch_session", fmt.Errorf("client %d switched %s, host answered for %s", s.id, session, res.Session.ID))
+		return
+	}
+	if err := verifySwitchBudget(res); err != nil {
+		s.runner.recordProtocol("model_switch_budget", fmt.Errorf("client %d %s -> %s: %w", s.id, from, to, err))
+		return
+	}
+	if res.Session.Model != to {
+		s.runner.recordProtocol("model_switch_identity", fmt.Errorf("client %d asked for %q, session reports %q", s.id, to, res.Session.Model))
+		return
+	}
+	if res.Session.Provider != providerNameOpenAI {
+		s.runner.recordProtocol("model_switch_provider", fmt.Errorf("client %d switch changed provider to %q", s.id, res.Session.Provider))
+	}
+	s.model = res.Session.Model
+	s.scheduleNextSwitch()
+	s.runner.metrics.modelSwitchVerified.Add(1)
+	// Prompt immediately: the next turn is what proves the new model is the one
+	// answering, and keeping the gap small keeps the check attributable.
+	s.nextPrompt = time.Now()
+	s.runner.log.write("model_switched", map[string]any{
+		"client": s.id, "session": session, "from": from, "to": s.model,
+		"contextWindow": res.ContextWindow, "inputBudget": res.InputBudget,
+		"triggerPoint": res.TriggerPoint, "triggerSource": res.TriggerSource,
+	})
 }
 
 // connect establishes a fresh host connection and installs event callbacks
@@ -267,6 +370,8 @@ func (s *clientState) createSession() {
 		return
 	}
 	s.sessionID = info.ID
+	s.model = info.Model
+	s.nextSwitchTurn = s.runner.cfg.ModelSwitchEvery
 	s.needsResume = false
 	s.observed = false
 	s.turn = 0
@@ -318,6 +423,11 @@ func (s *clientState) resume() {
 	s.observed = false
 	s.needsResume = false
 	s.resumePendingAt = time.Time{}
+	if rr.Session.Model != "" {
+		// The header is authoritative: a switch made by an earlier lifetime of this
+		// slot (or by anything else) must not leave a stale expectation here.
+		s.model = rr.Session.Model
+	}
 	// A resumed idle session keeps its history; the plan is keyed by the token in
 	// each user prompt, so the next turn verifies exactly like the first one did.
 	s.runner.metrics.adoptions.Add(1)
@@ -347,7 +457,7 @@ func (s *clientState) startPrompt() {
 	// would both race and let a reply be sent on the next attempt's connection.
 	client, session := s.client, s.sessionID
 	prompt := promptFor(s.rng, token)
-	outcome := turnOutcome{attempt: s.attempt, token: token, client: client}
+	outcome := turnOutcome{attempt: s.attempt, token: token, client: client, model: s.model}
 	s.trace = &turnTrace{
 		token:      token,
 		pending:    make(map[string]plannedCall),
@@ -418,6 +528,7 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		s.runner.log.write("turn_degraded", map[string]any{"client": s.id, "session": s.sessionID, "token": outcome.token})
 	} else {
 		s.runner.metrics.completed.Add(1)
+		s.verifyTurnModel(outcome)
 		// Compaction may replace the user-visible tail with a mock summary. The
 		// persisted plan stages are still checked by verifyTranscript.
 		if !strings.HasPrefix(outcome.result.Text, "SUMMARY-MARKER") {
@@ -427,6 +538,33 @@ func (s *clientState) handleOutcome(outcome turnOutcome) {
 		}
 	}
 	s.nextPrompt = time.Now().Add(s.delay(s.runner.cfg.MinPromptDelay, s.runner.cfg.MaxPromptDelay))
+}
+
+// verifyTurnModel checks that the model the mock actually saw on the wire is the
+// one this client believed the session ran on.
+//
+// A successful session.setModel only proves the host accepted the request. The
+// budget it returned could still be computed for a model that never answers, so
+// the authoritative signal is the mock's record of the request: it is the only
+// party that sees the model id pigo sends. A mismatch means the switch changed
+// the session header without reaching the loop's streaming config.
+func (s *clientState) verifyTurnModel(outcome turnOutcome) {
+	// Child-agent requests are keyed by their own tokens and never carry the
+	// parent's, so only parent turns are consulted here.
+	if outcome.model == "" {
+		return
+	}
+	answered := s.runner.turnModel(outcome.token)
+	if answered == "" {
+		// The mock saw no parent turn for this token. It may have been evicted from
+		// the bound, or the turn degraded before the request; neither is evidence
+		// about the model.
+		return
+	}
+	if answered != outcome.model {
+		s.runner.metrics.modelSwitchTurnsWrong.Add(1)
+		s.runner.recordProtocol("turn_model_mismatch", fmt.Errorf("client %d token %s answered by %q, expected %q", s.id, outcome.token, answered, outcome.model))
+	}
 }
 
 // onPermission answers a side-effect request only for this client's session.

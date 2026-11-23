@@ -225,9 +225,13 @@ func AskSide(setCancel func(context.CancelFunc), out io.Writer, host cli.Host, s
 		},
 		Reminders: host.Reminders(),
 	}
-	// The side run compacts against the same plan as the main conversation, so
-	// /btw cannot overflow a budget the main turn would have compacted.
-	run.AttachCompaction(&cfg, host.Live().Compaction)
+	// The side run compacts against the plan for the model it actually talks to.
+	// A btw.json that names a different model must not inherit the main
+	// conversation's window: a smaller one would overflow before the side run
+	// compacted. When it names the same model this resolves to the same plan the
+	// main turn uses, so /btw still cannot exceed the budget it would have
+	// compacted.
+	run.AttachCompaction(&cfg, run.PlanCompaction(settings.ProviderName, settings.Model))
 	// Wire the per-turn hook seams onto the side run's cfg; nil dispatcher is a
 	// no-op (FR-18).
 	if d := host.Dispatcher(); d != nil {

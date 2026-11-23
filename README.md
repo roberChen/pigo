@@ -485,13 +485,14 @@ pigo attach --list
 - **传输按平台选择，协议不变**：两端说的都是同一套 NDJSON，`internal/hostpath` 负责把它落到具体传输上。Windows 的管道名是状态目录的哈希（管道命名空间任何本地用户都能枚举，明文路径会泄露目录布局），因此 Windows 上状态目录里只有 `server.token` 与 `server.json` 两个文件，没有 socket 文件；崩溃也不会留下可清理的残余，下一次 `serve` 直接重新绑定。客户端连接后还会校验管道 owner 必须是当前用户，其他人抢先占用同名管道也拿不到 token。
 - **会话属于创建它的连接**：另一条连接既看不到也驱动不了你的会话（`session.list` 只返回自己的），所以两个 UI 同时 attach 不会互相打断。
 - **权限问题由客户端回答**：目录不受信任时，host 把工具确认作为事件推给会话的属主，`attach` 就地转成 `[y]es / [a]lways / [N]o` 提问。**没有答案就是拒绝**——客户端断开、超时或输入为空都不会放行副作用工具。`always` 只授权当前会话，不会扩散到其它连接或同目录的其它会话；`--permission-timeout` 可配置等待时限（默认直到回答或断开）。`pigo serve --approve` 则和 `-a` 一样，直接为启动目录授予本次运行的信任。
+- **切模型不换会话**：`session.setModel` 在两个 turn 之间把会话切到另一个模型（或裸 provider 名），工具、memory、MCP、hook 与对话全部保留，只替换每轮使用的 model/provider/stream 与**按新模型重算的压缩计划**（窗口、输入预算、触发点）。turn 运行中切换会被 `CodeBusy` 拒绝——那一轮已经按旧模型的预算决定了要不要压缩，中途换模型会让"谁在回答"和"按谁的窗口压缩"对不上。结果里带回的预算是 host 侧算好的权威值，客户端不该自己重算：`[checkpoint]`/`[compaction]`、per-model `compact_at` 和策略命令都在 host 的分层配置里。`hostclient.Client.SetModel` 是这条方法的客户端入口（`pigo attach` 目前仍只有 `/sessions` / `/exit`，尚未接上它）。
 - **host 拥有 turn**：客户端断开不会中断正在跑的轮次；运行中可通过 `session.resume` 只读重连，按 `turnId` 与递增 `seq` 回放保留的事件并继续接收后续事件（回放窗口有界，溢出会明确标记）；轮次结束后再 resume 可拿回完整历史（含压缩点之后的上下文）。
 - **取消是一轮正常的结局，不是故障**：`cancel`（`attach` 里的 Ctrl-C）让这一轮以 `aborted` 结束，已经流式输出给客户端的文字留在结果里、也写进磁盘上的历史，`error` 字段保持为空——客户端据此渲染中止提示而不是报错。还没产出任何文字就被取消时，host 同样补一条 `aborted` 的空轮次，否则 resume 会停在一句没人回答的提问上。取消后会话照常可用。
 - **host 组装真实 run**：`pigo serve` 接受与普通运行相同的 `-m/--provider/--base-url/-n/--allowed-tools/--system-prompt` 等参数，`run.SetupEnvIn` 以会话的 cwd 为根装配工具与系统提示词，因此同一个 host 可以服务不同目录下的会话。hook 也是同一套：host 会话会触发与 REPL / TUI / `-p` 完全相同的 9 个 hook 点（含 `SessionStart`、`UserPromptSubmit`、`SessionEnd`、`PreCompact`），不存在"守护进程里少了几个事件"的情况。
 
 `serve`/`attach` 目前都不取代 TUI：它们证明拆分可行，并给 Web UI 与 `-p --server` 留好了接口。
 
-一对多长稳可靠性验证使用 `go tool longstay`（不属于 `go test`）：真实 host 与 Windows 命名管道/Linux unix socket、mock LLM、客户端随时加入/退出/恢复、事件连续性校验和 JSONL 结果报告；可配置调用强度，覆盖真实 shell/后台任务、文件写入与编辑、图片、回环 webfetch、memory、todo、schedule 生命周期，以及 `task` 同步/异步子 Agent、批量结果回收、自动 follow-up、失败传播和独立 transcript。用法见 [`e2e/longstay/README.md`](e2e/longstay/README.md)。
+一对多长稳可靠性验证使用 `go tool longstay`（不属于 `go test`）：真实 host 与 Windows 命名管道/Linux unix socket、mock LLM、客户端随时加入/退出/恢复、事件连续性校验和 JSONL 结果报告；可配置调用强度，覆盖真实 shell/后台任务、文件写入与编辑、图片、回环 webfetch、memory、todo、schedule 生命周期，以及 `task` 同步/异步子 Agent、批量结果回收、自动 follow-up、失败传播和独立 transcript；`-model-switch-every` 还会在 turn 之间反复切换会话模型，并用 mock 实际收到的请求证明新模型真的在作答、压缩计划也跟着换了窗口。用法见 [`e2e/longstay/README.md`](e2e/longstay/README.md)。
 
 ### GitHub PR Review Webhook
 

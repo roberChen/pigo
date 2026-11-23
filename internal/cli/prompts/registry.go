@@ -264,6 +264,9 @@ func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
 		live.Model = id
 		live.ProviderName = name
 		live.Provider = prov
+		// The window, ladder and input ceiling belong to the model, so they are
+		// re-resolved here rather than left at the previous model's values.
+		live.RefreshCompaction()
 		return fmt.Sprintf("model switched to %s (provider: %s, from fetched catalog)\nimage input: %s",
 			id, name, imageSupportSummary(name, id))
 	}
@@ -275,6 +278,7 @@ func ApplyModelSwitch(live *cli.LiveConfig, args string) string {
 	live.Model = model
 	live.ProviderName = providerName
 	live.Provider = prov
+	live.RefreshCompaction()
 	return fmt.Sprintf("model switched to %s (provider: %s)\nimage input: %s",
 		model, providerName, imageSupportSummary(providerName, model))
 }

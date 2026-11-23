@@ -146,3 +146,34 @@ func TestAutoReloadPicksUpEdits(t *testing.T) {
 		t.Error("the automatic reload should have been applied")
 	}
 }
+
+// TestReloadRefreshesTheCompactionPlan covers the reload half of the "the plan
+// must follow the model" invariant: a config edit that changes the model (or the
+// [checkpoint]/[compaction] tables) has to re-resolve the window and threshold,
+// otherwise the reloaded session keeps running the previous model's budget.
+func TestReloadRefreshesTheCompactionPlan(t *testing.T) {
+	deps, _ := newReloadDeps(t, run.ReloadSettings{
+		Model:    "glm-4.7",
+		NoSkills: true,
+	})
+	deps.live.RefreshCompaction()
+	before := deps.live.CompactionDetail()
+
+	var out bytes.Buffer
+	if !reloadNow(&out, deps) {
+		t.Fatalf("reloadNow reported failure:\n%s", out.String())
+	}
+
+	want := run.PlanCompaction(deps.live.ProviderName, deps.live.Model)
+	if deps.live.Compaction.Model != deps.live.Model || deps.live.Compaction.ProviderName != deps.live.ProviderName {
+		t.Fatalf("plan resolved for (%q, %q), want (%q, %q)",
+			deps.live.Compaction.Model, deps.live.Compaction.ProviderName, deps.live.Model, deps.live.ProviderName)
+	}
+	if deps.live.ContextWindow != want.ContextWindow {
+		t.Errorf("context window = %d, want %d", deps.live.ContextWindow, want.ContextWindow)
+	}
+	if after := deps.live.CompactionDetail(); after.Point != want.TriggerPoint || after.Point == before.Point {
+		t.Errorf("trigger = %d (was %d), want the reloaded model's %d",
+			after.Point, before.Point, want.TriggerPoint)
+	}
+}

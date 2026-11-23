@@ -39,6 +39,8 @@
 >
 > **2026-11 长稳刷新**：`go tool longstay` 在 Windows 命名管道与 Linux unix socket 上运行同一对多 host/client 场景，除生命周期与事件连续性外，还按可配置强度执行真实 shell/后台任务、文件写改、图片、回环 webfetch、memory、todo 和 schedule 工具，逐阶段核对 thinking/正文/参数、工具结果、磁盘后置条件及最终 transcript；动态任务与提醒 ID 只取当前 turn 的真实结果。`task` 覆盖同步/异步子 Agent、真实嵌套 read、job 列表/等待/批量 fan-in/wait_all、自动 follow-up、失败传播、progress/done 和父子 session transcript，并可用 `-require-task-coverage` 强制每类证据出现。
 >
+> **2026-11 刷新**（会话内切模型）：host 协议新增 `session.setModel`，在**空闲**会话内换模型而不重建会话——工具、memory、MCP、hook 与对话保留，只替换每轮使用的 model/provider/stream，并**按新模型重新解析压缩计划**（窗口、输入预算、触发点，都在会话自己的 cwd 里解析，因为策略命令属于那个目录）。行的维度 1（上下文管理）因此多一条保证：压缩阈值不再只在新进程启动时正确，切换模型后也正确；`LiveConfig.RefreshCompaction` 是 REPL/TUI 侧同一件事的唯一配对点（`/model`、`/reload`、`/btw` 都经过它），host 侧则由 `envAgent.SetModel` 承担。进行中的 turn 以 `CodeBusy` 拒绝切换：那一轮已按旧模型预算决定过是否压缩。长稳的 `-model-switch-every` 用 mock 实际收到的请求（而不是 RPC 成功）证明新模型真的在作答。
+>
 > **2026-10 刷新**（#546）：provider 层的三种线上协议收敛到 `internal/provider/turn.go` 的共享 `assistantTurn`；新增跨协议一致性测试作为回归网。Responses driver 从 `openai-go` SDK 切换为自有 SSE 解码器 + 共享 transport，`go.mod` 随之移除该依赖及 4 个传递依赖。协议选择与 `--protocol openai/resp_api` 的用户可见行为不变。
 >
 > **2026-09 刷新**（issue #572）：US-003/004（工具结果统一预算）、US-006（工具失败分类重试）、US-005（结构化遥测）均已落地，对应行的"现状/主要缺口"已改写为闭环状态。基线之外新落地且影响对标结论的能力：公开 SDK 包（#554）、SDK 结构化事件与自定义工具（#563）、裸 Provider 名解析（#564）、会话级定时提醒（#565）、在线模型发现（#566）、GitHub review webhook（#567）、凭证引用与子进程环境清洗（#568）、遥测导出契约（#569）、会话分享导出（#570）、沙箱文档（#571）。

@@ -17,7 +17,6 @@ import (
 	"github.com/roberChen/pigo/internal/cli/memstatus"
 	"github.com/roberChen/pigo/internal/cli/perfcmd"
 	"github.com/roberChen/pigo/internal/cli/prompts"
-	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/cli/status"
 	"github.com/roberChen/pigo/internal/cli/ui"
 	"github.com/roberChen/pigo/internal/diag"
@@ -259,8 +258,7 @@ func NewModel(opts Options) Model {
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
 	}
-	live.Compaction = run.PlanCompaction(live.ProviderName, live.Model)
-	live.ContextWindow = live.Compaction.ContextWindow
+	live.RefreshCompaction()
 	m := Model{
 		opts:         opts,
 		theme:        theme,

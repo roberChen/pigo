@@ -170,3 +170,36 @@ func TestApplyReloadSwapsMCPManager(t *testing.T) {
 		t.Error("built-in tools must survive the reload")
 	}
 }
+
+// TestApplyReloadRefreshesTheCompactionPlan verifies the TUI reload path
+// re-resolves the plan for the model it just adopted. buildConfig attaches
+// s.live.Compaction on every turn, so a stale plan would keep compacting against
+// the previous model's window, and the context drawer would keep showing its
+// threshold.
+func TestApplyReloadRefreshesTheCompactionPlan(t *testing.T) {
+	s, _ := newReloadSession(t, run.ReloadSettings{Model: "glm-4.7", NoSkills: true})
+	before := s.live.CompactionDetail()
+
+	res, err := s.reloader.Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	s.applyReload(res)
+
+	want := run.PlanCompaction(s.live.ProviderName, s.live.Model)
+	if s.live.Compaction.Model != s.live.Model || s.live.Compaction.ProviderName != s.live.ProviderName {
+		t.Fatalf("plan resolved for (%q, %q), want (%q, %q)",
+			s.live.Compaction.Model, s.live.Compaction.ProviderName, s.live.Model, s.live.ProviderName)
+	}
+	if s.live.ContextWindow != want.ContextWindow {
+		t.Errorf("context window = %d, want %d", s.live.ContextWindow, want.ContextWindow)
+	}
+	if after := s.live.CompactionDetail(); after.Point != want.TriggerPoint || after.Point == before.Point {
+		t.Errorf("trigger = %d (was %d), want the reloaded model's %d",
+			after.Point, before.Point, want.TriggerPoint)
+	}
+	// The turn config the loop consumes must carry the reloaded model's window.
+	if cfg := s.buildConfig(); cfg.ContextWindow != want.ContextWindow {
+		t.Errorf("cfg.ContextWindow = %d, want %d", cfg.ContextWindow, want.ContextWindow)
+	}
+}

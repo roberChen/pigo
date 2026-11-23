@@ -9,7 +9,10 @@ package hostserver
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/roberChen/pigo/internal/agentcore"
@@ -43,6 +46,43 @@ type Agent interface {
 	// Close releases everything the agent owns (memory DB, plugins, MCP clients).
 	// It must be safe to call after a failed or cancelled run.
 	Close()
+}
+
+// ModelSwitch reports what a session's model change resolved to: the canonical
+// model id, the provider that serves it, and the compaction budget the host
+// resolved for the pair.
+//
+// The budget is reported rather than left for the client to recompute because
+// only the host knows the layered configuration ([checkpoint]/[compaction], a
+// per-model compact_at, a policy command) that decides where auto-compaction
+// fires. A client that re-derived it from the window alone would disagree with
+// the loop it is driving whenever the input ceiling, the ladder or a configured
+// cap is the tighter rule — which is the common case.
+type ModelSwitch struct {
+	Model    string
+	Provider string
+	// ContextWindow is the model's combined budget (input + output).
+	ContextWindow int
+	// InputBudget is what one request may carry.
+	InputBudget int
+	// TriggerPoint is where automatic compaction fires, in tokens, measured
+	// against InputBudget. 0 means it is off for this model.
+	TriggerPoint int
+	// TriggerSource names the rule that decided TriggerPoint (ladder, reserve,
+	// configured, off), so a UI can explain the number.
+	TriggerSource string
+}
+
+// ModelSwitcher is the optional capability a session agent implements when its
+// model can change mid-session. The server asserts it rather than making it part
+// of Agent: an agent that cannot switch is a legitimate implementation (a
+// scripted test double, an embedded runner with a fixed endpoint), and refusing
+// the request honestly beats a method every implementation must stub out.
+type ModelSwitcher interface {
+	// SetModel switches to model (a concrete id or a bare provider name) and
+	// re-resolves the compaction plan for it. It must not be called while a turn
+	// is running; the server serializes that.
+	SetModel(model string) (ModelSwitch, error)
 }
 
 // AgentSpec is everything the factory needs to build one session's agent. It
@@ -114,8 +154,12 @@ func (f *DefaultFactory) NewAgent(ctx context.Context, spec AgentSpec) (Agent, e
 	a := &envAgent{
 		env:      env,
 		apiKey:   f.APIKey,
-		model:    model,
-		provider: env.ProviderName,
+		baseURL:  f.BaseURL,
+		protocol: f.Protocol,
+
+		explicitProvider: f.Provider,
+		model:            model,
+		provider:         env.ProviderName,
 		agentCtx: &agentcore.AgentContext{
 			SystemPrompt: sysPrompt,
 			Messages:     spec.Messages,
@@ -132,8 +176,24 @@ func (f *DefaultFactory) NewAgent(ctx context.Context, spec AgentSpec) (Agent, e
 // envAgent is the production Agent: an assembled run.Env plus the loop config
 // rebuilt from it.
 type envAgent struct {
-	env      run.Env
-	apiKey   string
+	env    run.Env
+	apiKey string
+	// baseURL and protocol are the factory's endpoint settings, kept so an
+	// in-session model switch resolves the new provider exactly as assembly did
+	// instead of falling back to the environment-only heuristic chain.
+	baseURL  string
+	protocol string
+	// explicitProvider is the factory's --provider override (empty when the
+	// launch did not name one). A switch resolves through it when set, so a
+	// session started against a named or custom gateway keeps using that gateway
+	// instead of being re-routed by the model-id heuristic.
+	explicitProvider string
+
+	// mu guards the switchable pieces below (model, provider, cfg). A turn reads
+	// them, a model switch writes them, and the server serializes the two — but
+	// the lock makes that invariant local to this type rather than dependent on a
+	// caller two packages away.
+	mu       sync.Mutex
 	model    string
 	provider string
 	agentCtx *agentcore.AgentContext
@@ -155,11 +215,12 @@ func (a *envAgent) buildRunConfig(ctx context.Context, spec AgentSpec, thinking 
 	// An explicit key (config.toml or --api-key) must reach the wire, since the env
 	// var may be absent; empty means "resolve from the environment as usual".
 	creds.SetOverride(a.provider, a.apiKey)
-	// A host session has one model for its lifetime (session.create fixes it), so a
-	// snapshot of the image capability is enough. It keeps read/view_image from
-	// returning an image block a text-only model's wire would reject.
+	// The image gate follows the live model rather than a snapshot: a model switch
+	// to a text-only model must stop read/view_image handing it a picture, which
+	// the wire would reject, without rebuilding the tool set.
 	run.AttachImageCapability(a.env.Tools, func() bool {
-		return provider.ModelSupportsImages(a.provider, a.model)
+		model, providerName := a.currentModel()
+		return provider.ModelSupportsImages(providerName, model)
 	})
 	if thinking == "" {
 		level, err := run.ResolveThinkingLevel("")
@@ -213,7 +274,10 @@ func (a *envAgent) Run(ctx context.Context, prompt string, h runtime.StreamHandl
 			return nil, fmt.Errorf("prompt blocked by hook: %s", reason)
 		}
 	}
-	stream := runtime.StartRun(ctx, a.agentCtx, a.cfg)
+	a.mu.Lock()
+	cfg := a.cfg
+	a.mu.Unlock()
+	stream := runtime.StartRun(ctx, a.agentCtx, cfg)
 	return runtime.DrainStream(ctx, stream, chainEventObserver(h, a.hookEvent))
 }
 
@@ -252,8 +316,71 @@ func (a *envAgent) SystemPrompt() string {
 	return a.agentCtx.SystemPrompt
 }
 
-func (a *envAgent) Model() string    { return a.model }
-func (a *envAgent) Provider() string { return a.provider }
+func (a *envAgent) Model() string    { m, _ := a.currentModel(); return m }
+func (a *envAgent) Provider() string { _, p := a.currentModel(); return p }
+
+// currentModel reads the model/provider pair under the switch lock.
+func (a *envAgent) currentModel() (model, providerName string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.model, a.provider
+}
+
+// SetModel switches the session to another model (or, when the resolution
+// demands it, another provider) without rebuilding the assembled environment.
+//
+// That is the whole point of doing it here rather than through the factory: the
+// tool set, memory database, plugins, MCP connections, hook dispatcher and the
+// conversation all survive, so a switch is not observable as a new session to a
+// SessionStart hook and does not reopen a single resource.
+//
+// Only the per-turn streaming pieces are replaced (model, provider, stream,
+// credential lookup) plus the compaction plan, which is re-resolved for the new
+// model in the session's own working directory. Everything else on the config —
+// the hook seams, the host's permission gate, the follow-up/reminder wiring —
+// stays exactly as assembly installed it, so a switch can neither drop a hook
+// nor widen the tool boundary.
+func (a *envAgent) SetModel(model string) (ModelSwitch, error) {
+	id := strings.TrimSpace(model)
+	if id == "" {
+		return ModelSwitch{}, fmt.Errorf("model is required")
+	}
+	// Match /model exactly: a bare provider name canonicalizes to that provider's
+	// default model id, so the wire request and the header carry a real id.
+	resolved := provider.CanonicalizeModel(id)
+	prov, providerName, err := provider.ResolveProvider(resolved, a.baseURL, a.protocol, a.explicitProvider, os.Getenv)
+	if err != nil {
+		return ModelSwitch{}, err
+	}
+	plan := run.PlanCompactionIn(a.env.Cwd, providerName, resolved)
+
+	// The credential lookup is rebuilt for the new provider: an explicit key from
+	// the factory reaches the wire under whichever provider now serves the session,
+	// and an empty one keeps resolving from the environment as before.
+	creds := provider.NewCredentialStore(nil)
+	creds.SetOverride(providerName, a.apiKey)
+
+	a.mu.Lock()
+	a.model = resolved
+	a.provider = providerName
+	a.env.Provider = prov
+	a.env.ProviderName = providerName
+	a.cfg.Model = resolved
+	a.cfg.Provider = providerName
+	a.cfg.Stream = provider.StreamFnFromProvider(prov)
+	a.cfg.GetAPIKey = creds.GetAPIKey
+	run.AttachCompaction(&a.cfg, plan)
+	a.mu.Unlock()
+
+	return ModelSwitch{
+		Model:         resolved,
+		Provider:      providerName,
+		ContextWindow: plan.ContextWindow,
+		InputBudget:   plan.InputBudget,
+		TriggerPoint:  plan.TriggerPoint,
+		TriggerSource: string(plan.TriggerInfo.Source),
+	}, nil
+}
 
 // Close releases the resources setupEnv opened: plugins (processes), MCP
 // connections and the memory database. The tools hold references to the same

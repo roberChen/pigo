@@ -10,6 +10,7 @@
 - `turnId` / `seq` 连续性检查、跨会话串流检查、最终回复一致性检查；
 - 工具往返：默认覆盖 `read` / `grep` / `find`、真实 shell 与后台任务、`write` / `edit`、图片、回环 `webfetch`、`todo`、`memory_search`、无交互 `question` 错误路径和 `schedule_*` 生命周期；客户端校验工具的**真实执行结果**，写改工具还校验磁盘后置条件；
 - `task` 子 Agent：同步/异步派发、真实嵌套工具调用、job 列表/单job等待/批量等待/`wait_all`、自动 follow-up、失败传播、progress/done 事件及独立持久化 transcript；
+- 会话内切模型：turn 之间把 session 切到轮转中的下一个模型，校验新会话头、provider 不变、**压缩计划按新模型重算**（窗口 / 输入预算 / 触发点），并由 mock 证明下一 turn 的请求真的用了新模型 id；
 - host 健康检查、最终重连验证和优雅关闭。
 
 ### 校验模型：一份计划，两个进程各自推导
@@ -36,6 +37,24 @@ mock 还会对每个 Chat Completions 请求做严格校验（`validate.go`）�
 | `task_auto` | 不显式调用 `task_output`，覆盖 runtime 等待后台子 Agent并注入自动 follow-up user turn；每 turn 至多选入一次，与 `wait_all` 的先后关系也纳入计划 |
 
 mock 用独立 task system prompt 和 `[[longstay-task:...]]` 路由子请求，逐阶段检查子 Agent 的 `read` 调用及真实 `NOTES-MARKER-LINE` 结果，并拒绝子工具集里出现 `task` / `question`。客户端还检查 host 的 sub-agent progress/done 事件，读取每个 `[sub-agent session: ...]` 对应 JSONL，核对 `parentSession`、`subAgent=task`、嵌套 read、文件标记与最终报告。`summary.json` 中的 `taskChildren` / `taskFailedChildren` 按 sync、single、batch、all、auto、error 分类计数；`taskOutput*`、`taskFollowUps*` 和 `subAgent*` 分别证明结果回收、自动报告与事件路径确实执行。
+
+### 切模型覆盖
+
+`-model-switch-every N`（默认 `2`，`0` 关闭）让一个 session 每完成 `N` 个 turn 就调用 `session.setModel` 切到轮转中的下一个模型：
+
+| 轮转模型 | 内置窗口 | 触发点（默认 80% 阶梯） |
+|---|---:|---:|
+| `mock-chat`（启动模型） | 272K | 217,600 |
+| `mock-claude-chat` | 200K | 160,000 |
+| `mock-gemini-chat` | 1M | 800,000 |
+
+host 以 `--provider openai` 启动，所以切换只改 model id，provider 保持不变。每次切换都校验三件事，任何一条不满足都记为协议错误：
+
+1. `model_switch_identity`：会话头里的 model 必须等于请求的 id；
+2. `model_switch_budget`：host 返回的窗口 / 输入预算 / 触发点必须与 pigo 内置上限表一致，且触发点严格落在预算内——**旧模型窗口没有刷新**这一历史缺陷就死在这一条上；`models_test.go` 还直接拿 `run.PlanCompactionIn` 的真实结果做对照，防止断言与实现漂移；
+3. `turn_model_mismatch`：切换后的下一个 turn，mock 实际收到的 `model` 字段必须等于新模型（mock 是唯一看得到线上请求的一方，成功 RPC 本身不能证明这一点）。
+
+切换只在 turn 之间发生：进行中的 turn 会被 host 以 `CodeBusy` 拒绝，观察中的 turn 与所有权尚未释放的连接会被当作正常竞争重试，只有其他错误才计为违例。`modelSwitchEvery > 0` 且 `modelSwitchesVerified == 0` 视为失败，「一次都没切」和「切了但坏了」不能混为一谈。
 
 `-require-task-coverage` 会把上述证据变成通过条件：所选每一种 task 子类型及对应 output 必须至少成功验证一次，不能只凭“其他工具没报错”通过。普通随机 `-llm-error-rate` 仍注入父 Agent 请求，`task_error` 专门覆盖子 Agent 失败，避免把预期子错误误判为 host 缺陷。
 
@@ -118,6 +137,7 @@ GORACE=halt_on_error=1 go tool longstay -duration 10m -pigo ./pigo-soak -output 
 | `-calls-per-stage` | `1` | 每个 assistant 阶段最多包含的普通工具调用数（1～8）；依赖步骤始终独立成阶段 |
 | `-thinking-blocks` | `2` | 每 turn 携带 thinking 的阶段数（0～32） |
 | `-require-task-coverage` | `false` | 强制所选每种 task 子类型、对应 output、真实 read、事件和 transcript 证据均出现，否则退出码为 1 |
+| `-model-switch-every` | `2` | 每完成多少个 turn 把 session 切到轮转中的下一个模型；`0` 关闭切模型。窗口与触发点按内置上限表校验 |
 | `-workspace-pool` | `0` | 大于 0 时让多个客户端共享该数量的工作目录（同一目录里的两个 session）；`0` 表示每个客户端独立目录 |
 | `-summary-interval` | `30s` | 控制台摘要间隔 |
 | `-pigo` | 空 | 使用指定 pigo 二进制；为空则自动构建 |
@@ -136,7 +156,7 @@ GORACE=halt_on_error=1 go tool longstay -duration 10m -pigo ./pigo-soak -output 
 | `home/` | host 的临时状态目录、父/子 session 持久化文件；子 Agent 文件带 `parentSession` 和 `subAgent=task` |
 | `work/client-*` | 各客户端工作目录；预置文本标记与 1×1 PNG，`created-*` / `editable-*` 用于校验真实写入和编辑 |
 
-摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。计划校验另有独立计数：`toolVerifications`（通过标记校验的工具结果）、`turnsVerified` / `turnsUnverified`（按计划完整跑完 / 无法解释的提前结束）、`turnsDegraded` 与 `degradedResults`（由注入 500 引起的预期降级）、`turnsCompacted`（压缩后以摘要或压缩前尾部正常收尾）、`transcriptsVerified`（最终 transcript 校验次数）。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。非 prompt 的客户端 RPC（`create` / `resume` / `cancel`）由 `-call-timeout` 约束，默认 30s，与 hostclient 自己的预算一致：`resume` 要做真实的工作（读 JSONL、重放事件），2 核 CI 上开着 `-race` 跑十几个客户端时几秒钟很正常，把它算成协议违例只会制造假警报；真正卡死的 host 仍会被健康检查与墙钟兜底抓住。
+摘要包含客户端启动/重连/接管次数、并发峰值、prompt 完成/取消数、mock 请求/5xx、协议/传输/host 错误、重复事件、未修复事件缺口、队列溢出、回放截断以及 goroutine/heap 的起止采样。计划校验另有独立计数：`toolVerifications`（通过标记校验的工具结果）、`turnsVerified` / `turnsUnverified`（按计划完整跑完 / 无法解释的提前结束）、`turnsDegraded` 与 `degradedResults`（由注入 500 引起的预期降级）、`turnsCompacted`（压缩后以摘要或压缩前尾部正常收尾）、`transcriptsVerified`（最终 transcript 校验次数），以及切模型证据：`modelSwitchesVerified`（通过会话头与预算校验的切换次数）、`modelSwitchTurnsWrong`（切后 turn 的线上模型 id 不符次数）、`modelSwitchEvery`。`verifications` 是实际执行的最终重连次数，`verificationSkips` 则记录没有持久化历史、无需重连的客户端及原因。连接失败会先进行有界重试，健康检查只有连续失败才计为 host 故障；健康 RPC 和关闭 RPC 都有超时，测试框架自身不会因 host 卡住而无限等待。非 prompt 的客户端 RPC（`create` / `resume` / `cancel`）由 `-call-timeout` 约束，默认 30s，与 hostclient 自己的预算一致：`resume` 要做真实的工作（读 JSONL、重放事件），2 核 CI 上开着 `-race` 跑十几个客户端时几秒钟很正常，把它算成协议违例只会制造假警报；真正卡死的 host 仍会被健康检查与墙钟兜底抓住。
 
 **安全提示：** 产物目录中的 `home/server.token` 可用于连接本次 host，session 文件还可能包含用户提示词。长稳结束后只应把脱敏后的 `summary.json` 和必要的错误片段用于 CI/问题报告，不要直接公开整个产物目录。
 
@@ -149,10 +169,11 @@ GORACE=halt_on_error=1 go tool longstay -duration 10m -pigo ./pigo-soak -output 
 3. 并发客户端数大于 1；
 4. mock LLM 确实收到请求；
 5. 最终重连验证与优雅关闭完成；
-6. 指定 `-require-task-coverage` 时，所选每类 task 子 Agent、对应 output、真实 read、progress/done 和适用的 transcript/follow-up 证据均大于 0。
+6. 未关闭 `-model-switch-every` 时，`modelSwitchesVerified > 0`（每次切换的窗口/预算/触发点与内置上限表一致，且切后 turn 由新模型作答）；
+7. 指定 `-require-task-coverage` 时，所选每类 task 子 Agent、对应 output、真实 read、progress/done 和适用的 transcript/follow-up 证据均大于 0。
 
 进程退出码：`0` 通过，`1` 可靠性失败或启动失败，`2` 参数错误。`providerErrors`、`mockFailures`、`turnsDegraded` 和 `degradedResults` 是 `-llm-error-rate` 注入的预期上游错误，不直接导致失败；`queueOverflows` 会被记录为背压指标，客户端仍应以最终结果和恢复事件为准。
 
-`normal` 场景建议先用短跑确认工具计划生效（`toolVerifications` 与 `turnsVerified` 均大于 0），再检查 `turnsUnverified=0`；`stress` 场景 `mockRequests` 应约等于 `prompts`，因为每个 turn 只有一次 LLM 请求。
+切模型场景可以单独短跑验证：`go tool longstay -duration 30s -model-switch-every 1 -initial-clients 2`。`normal` 场景建议先用短跑确认工具计划生效（`toolVerifications` 与 `turnsVerified` 均大于 0），再检查 `turnsUnverified=0`；`stress` 场景 `mockRequests` 应约等于 `prompts`，因为每个 turn 只有一次 LLM 请求。
 
 CI 在 harness 的退出码之外另加一条判定：实际运行时长不足请求时长（差 120s 以上）即失败。harness 为交互使用设计，收到 SIGINT 会优雅关闭并返回 0，这在定时长稳里恰恰是「卡死后被安全网打断」的信号，不能当作通过。

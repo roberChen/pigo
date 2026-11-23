@@ -630,6 +630,26 @@ func (c *Client) CreateSession(cwd, model, title string) (hostapi.SessionInfo, e
 	return out.Session, err
 }
 
+// SetModel switches a live session to another model without ending it. The
+// conversation, tools and memory stay; only the model (and the provider that
+// serves it) changes, so the next Prompt runs on the new one.
+//
+// The returned result carries the budget the host resolved for the new model
+// (window, input budget, compaction trigger point and the rule that decided it).
+// Use it instead of re-deriving the numbers from the window: only the host knows
+// the layered configuration — a per-model compact_at, a configured ladder or
+// reserve, a policy command — that decides where auto-compaction actually fires.
+//
+// Switching while a turn is in flight is refused with hostapi.CodeBusy, and
+// switching a session this connection does not own with hostapi.CodeForbidden.
+// A rejected switch leaves the session on the model it had.
+func (c *Client) SetModel(sessionID, model string) (hostapi.SessionSetModelResult, error) {
+	var out hostapi.SessionSetModelResult
+	err := c.request(hostapi.MethodSessionSetModel,
+		hostapi.SessionSetModelParams{SessionID: sessionID, Model: model}, &out)
+	return out, err
+}
+
 // ListSessions lists the sessions owned by this connection.
 func (c *Client) ListSessions() ([]hostapi.SessionInfo, error) {
 	var out hostapi.SessionListResult

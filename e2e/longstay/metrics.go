@@ -42,6 +42,8 @@ type metrics struct {
 	turnsDegraded         atomic.Int64
 	turnsCompacted        atomic.Int64
 	transcriptsVerified   atomic.Int64
+	modelSwitchVerified   atomic.Int64
+	modelSwitchTurnsWrong atomic.Int64
 	peakClients           atomic.Int64
 	startGoroutines       int
 	endGoroutines         int

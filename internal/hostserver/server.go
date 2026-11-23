@@ -959,6 +959,91 @@ func (c *conn) handleSessionClose(env envelope) {
 	}{OK: true})
 }
 
+// handleSessionSetModel switches a live session's model without ending it.
+//
+// The whole switch runs under st.mu, which is what makes it atomic with respect
+// to a turn: handlePrompt takes the same lock to observe "idle" and mark the
+// session running, so a switch can neither land inside a running turn nor start
+// one halfway through replacing the loop's streaming config. Holding the lock
+// across agent.SetModel also serializes a close against it, so a session cannot
+// be released while its configuration is being swapped.
+//
+// The conversation, tools, memory and hooks survive: this is the same session
+// continuing on another model, not a new one. Only the per-turn streaming config
+// and the compaction plan change (see envAgent.SetModel).
+func (c *conn) handleSessionSetModel(env envelope) {
+	var p hostapi.SessionSetModelParams
+	if err := env.DecodeParams(&p); err != nil {
+		c.replyError(env.ID, codeInvalidParams, err.Error())
+		return
+	}
+	st, ok := c.owns(p.SessionID)
+	if !ok {
+		c.replyNotOwned(env.ID, p.SessionID)
+		return
+	}
+	// The switch runs inside a helper so the reply happens *after* st.mu is
+	// released. Writing to the socket is bounded by connWriteGrace but can still
+	// block for that long, and the shutdown path holds s.mu while taking st.mu:
+	// replying under the session lock would stall a shutdown behind a wedged peer.
+	result, errCode, err := c.switchModel(st, p.Model)
+	if err != nil {
+		c.replyError(env.ID, errCode, err.Error())
+		return
+	}
+	c.reply(env.ID, result)
+}
+
+// switchModel performs the in-session model change and returns the result to
+// reply with. Every early exit reports the code the client should see; a
+// successful switch returns err == nil.
+func (c *conn) switchModel(st *sessionState, model string) (hostapi.SessionSetModelResult, int, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.agent == nil || st.closed {
+		return hostapi.SessionSetModelResult{}, codeNotFound, fmt.Errorf("session is closed")
+	}
+	if st.running {
+		return hostapi.SessionSetModelResult{}, codeBusy, fmt.Errorf("a turn is already running for this session")
+	}
+	sw, ok := st.agent.(ModelSwitcher)
+	if !ok {
+		return hostapi.SessionSetModelResult{}, codeUnavailable, fmt.Errorf("this host cannot switch models for this session")
+	}
+	result, err := sw.SetModel(model)
+	if err != nil {
+		// The agent resolves the target and fails before mutating anything (an
+		// unknown id or a missing credential), so the session keeps running on the
+		// model it had.
+		return hostapi.SessionSetModelResult{}, codeInvalidParams, err
+	}
+	st.header.Model = result.Model
+	st.header.Provider = result.Provider
+	st.header.UpdatedAt = time.Now().UTC()
+	// Persist the new metadata now rather than waiting for the next turn: a UI that
+	// switches models and closes the session must not leave a header claiming the
+	// old model. A session with no turn yet has no file, and its first persist
+	// writes this header anyway.
+	if c.srv.store != nil && c.srv.store.Exists(st.id) {
+		leaf, perr := c.srv.store.AppendBranch(st.header, st.curLeaf, nil)
+		if perr != nil {
+			// The switch already took effect in memory and the next turn rewrites
+			// the header, so a failure here is a metadata lag rather than a lost
+			// turn: report it through diag instead of failing the request.
+			diag.Diagf("host: persist model switch for session %s: %v", st.id, perr)
+		} else {
+			st.curLeaf = leaf
+		}
+	}
+	return hostapi.SessionSetModelResult{
+		Session:       st.info(),
+		ContextWindow: result.ContextWindow,
+		InputBudget:   result.InputBudget,
+		TriggerPoint:  result.TriggerPoint,
+		TriggerSource: result.TriggerSource,
+	}, 0, nil
+}
+
 func (c *conn) handleCancel(env envelope) {
 	var p hostapi.CancelParams
 	if err := env.DecodeParams(&p); err != nil {

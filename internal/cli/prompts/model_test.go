@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/roberChen/pigo/internal/cli"
+	"github.com/roberChen/pigo/internal/cli/run"
 	"github.com/roberChen/pigo/internal/provider"
 	"github.com/roberChen/pigo/internal/runtime"
 )
@@ -300,5 +301,96 @@ func TestImageSupportSummaryCustomEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(got, "--supports-images") {
 		t.Errorf("summary = %q, want the way to declare vision ids", got)
+	}
+}
+
+// TestModelSwitchRefreshesTheCompactionPlan verifies that a /model switch
+// re-resolves the compaction plan instead of leaving the previous model's
+// window and threshold in place. This is the regression guard for "switching
+// models mid-session does not update the context info or the compaction
+// threshold": live.ContextWindow and live.Compaction are one model's numbers,
+// and the loop attaches live.Compaction on every turn, so a stale plan made the
+// next turn compact against a budget the new model may not accept.
+func TestModelSwitchRefreshesTheCompactionPlan(t *testing.T) {
+	live := &cli.LiveConfig{Model: "openrouter/free", ProviderName: "openrouter"}
+	live.RefreshCompaction()
+	before := live.CompactionDetail()
+
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, provider.NewCredentialStore(nil))
+	if _, err := reg.ResolveOutcome("/model zai"); err != nil {
+		t.Fatalf("ResolveOutcome /model zai: %v", err)
+	}
+
+	want := run.PlanCompaction(live.ProviderName, live.Model)
+	// Guard the fixture itself: if the two models ever share a budget the rest of
+	// this test would pass without exercising anything.
+	if want.ContextWindow == before.Point {
+		t.Fatalf("preset windows did not differ (%d); the test proves nothing", want.ContextWindow)
+	}
+
+	if live.ContextWindow != want.ContextWindow {
+		t.Errorf("context window = %d, want %d (the model switched to)", live.ContextWindow, want.ContextWindow)
+	}
+	if live.Compaction.Model != live.Model || live.Compaction.ProviderName != live.ProviderName {
+		t.Errorf("plan resolved for (%q, %q), want (%q, %q)",
+			live.Compaction.Model, live.Compaction.ProviderName, live.Model, live.ProviderName)
+	}
+	if got := live.CompactionDetail(); got.Point != want.TriggerPoint || got.Source != want.TriggerInfo.Source {
+		t.Errorf("trigger = (%d, %q), want (%d, %q)",
+			got.Point, got.Source, want.TriggerPoint, want.TriggerInfo.Source)
+	}
+	if live.CompactionSettings() != want.Settings {
+		t.Error("CompactionSettings returned the plan of another model")
+	}
+	// The readout the user sees must actually move; otherwise the refresh is moot.
+	if after := live.CompactionDetail(); after.Point == before.Point {
+		t.Errorf("trigger point did not change after the switch (still %d)", after.Point)
+	}
+}
+
+// TestModelSwitchFromFetchedCatalogRefreshesThePlan covers the second switch
+// branch (an id from /models fetch): it rewrites the provider too, so it must
+// re-resolve the plan for the gateway that ends up serving the model.
+func TestModelSwitchFromFetchedCatalogRefreshesThePlan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"gw-model"}]}`))
+	}))
+	defer srv.Close()
+
+	live := &cli.LiveConfig{Model: "openrouter/free", ProviderName: "openai", BaseURL: srv.URL + "/v1"}
+	live.RefreshCompaction()
+	creds := provider.NewCredentialStore(nil)
+	creds.SetOverride("openai", "test-key")
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, creds)
+	if _, err := reg.ResolveOutcome("/models fetch"); err != nil {
+		t.Fatalf("ResolveOutcome /models fetch: %v", err)
+	}
+
+	if _, err := reg.ResolveOutcome("/model gw-model"); err != nil {
+		t.Fatalf("ResolveOutcome /model gw-model: %v", err)
+	}
+	want := run.PlanCompaction(live.ProviderName, live.Model)
+	if live.Compaction.Model != "gw-model" || live.Compaction.ProviderName != live.ProviderName {
+		t.Errorf("plan resolved for (%q, %q), want (gw-model, %q)",
+			live.Compaction.Model, live.Compaction.ProviderName, live.ProviderName)
+	}
+	if live.ContextWindow != want.ContextWindow {
+		t.Errorf("context window = %d, want %d", live.ContextWindow, want.ContextWindow)
+	}
+}
+
+// TestModelViewDoesNotResolveAPlan pins the reporting form: "/model" with no
+// argument only describes the current model, so it must not touch the plan.
+func TestModelViewDoesNotResolveAPlan(t *testing.T) {
+	live := &cli.LiveConfig{Model: "openrouter/free", ProviderName: "openrouter"}
+	reg := runtime.NewSlashRegistry()
+	RegisterLiveCommands(reg, live, provider.NewCredentialStore(nil))
+	if _, err := reg.ResolveOutcome("/model"); err != nil {
+		t.Fatalf("ResolveOutcome /model: %v", err)
+	}
+	if live.Compaction.Model != "" || live.ContextWindow != 0 {
+		t.Errorf("viewing the model resolved a plan (%+v, window %d)", live.Compaction, live.ContextWindow)
 	}
 }

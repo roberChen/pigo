@@ -47,20 +47,28 @@ type mockLLM struct {
 	// It is bounded: a multi-hour run at a high error rate would otherwise grow
 	// this map without limit, and the harness measures heap growth. failedOrder
 	// holds the insertion order used to evict the oldest entry.
-	failedTokens         map[string]bool
-	failedOrder          []string
-	requests             atomic.Int64
-	failures             atomic.Int64
-	invalid              atomic.Int64
-	active               atomic.Int64
-	peak                 atomic.Int64
-	log                  *eventLog
-	summary              atomic.Int64
-	taskChildRequests    atomic.Int64
-	taskChildCompleted   atomic.Int64
-	taskChildReadChecks  atomic.Int64
-	taskChildFailures    atomic.Int64
-	taskFollowUps        atomic.Int64
+	failedTokens        map[string]bool
+	failedOrder         []string
+	requests            atomic.Int64
+	failures            atomic.Int64
+	invalid             atomic.Int64
+	active              atomic.Int64
+	peak                atomic.Int64
+	log                 *eventLog
+	summary             atomic.Int64
+	taskChildRequests   atomic.Int64
+	taskChildCompleted  atomic.Int64
+	taskChildReadChecks atomic.Int64
+	taskChildFailures   atomic.Int64
+	taskFollowUps       atomic.Int64
+	// modelByToken records which model id answered a parent turn, keyed by the
+	// turn's marker token. A model switch is only real if the very next request
+	// for that session names the new id, and the client cannot see the request —
+	// only the mock can. Bounded like failedTokens: only recently settled turns
+	// are ever asked about.
+	modelMu              sync.Mutex
+	modelByToken         map[string]string
+	modelOrder           []string
 	taskChildMu          sync.Mutex
 	taskChildByKey       map[string]int64
 	taskChildFailedByKey map[string]int64
@@ -68,6 +76,7 @@ type mockLLM struct {
 
 // chatRequest is the subset of the OpenAI request the harness needs.
 type chatRequest struct {
+	Model    string        `json:"model"`
 	Messages []wireMessage `json:"messages"`
 }
 
@@ -138,6 +147,7 @@ func startMockLLM(latency, jitter time.Duration, errorRate float64, opts validat
 		opts:         opts,
 		rng:          rand.New(rand.NewSource(1)),
 		failedTokens: make(map[string]bool),
+		modelByToken: make(map[string]string),
 		log:          log,
 	}
 	mux := http.NewServeMux()
@@ -228,7 +238,8 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	token, stage := planTokenAndStage(req)
 	summaryRequest := isSummarizationRequest(req)
 	if token != "" && !summaryRequest && !childRequest {
-		m.log.write("llm_turn", map[string]any{"token": token, "stage": stage})
+		m.recordTurnModel(token, req.Model)
+		m.log.write("llm_turn", map[string]any{"token": token, "stage": stage, "model": req.Model})
 	}
 
 	delay := m.latency
@@ -321,7 +332,7 @@ func (m *mockLLM) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	streamed := m.streamReply(w, flusher, plan)
+	streamed := m.streamReply(w, flusher, req.Model, plan)
 	if !streamed && token != "" && !summaryRequest && !childRequest {
 		m.log.write("llm_stream_aborted", map[string]any{"token": token, "stage": stage})
 	}
@@ -348,6 +359,40 @@ func (m *mockLLM) injectedFailure(token string) bool {
 	return m.failedTokens[token]
 }
 
+// maxTurnModels bounds the per-token model record. A client asks about a turn
+// right after it settles, so only the most recent tokens are ever consulted.
+const maxTurnModels = 4096
+
+// recordTurnModel remembers the model id that answered a turn. A switch is
+// verified against this, not against the client's own intention: the client
+// asked for the switch, but only the host's request proves it landed.
+func (m *mockLLM) recordTurnModel(token, model string) {
+	if token == "" {
+		return
+	}
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	if m.modelByToken == nil {
+		m.modelByToken = make(map[string]string)
+	}
+	if _, seen := m.modelByToken[token]; !seen {
+		m.modelOrder = append(m.modelOrder, token)
+		if len(m.modelOrder) > maxTurnModels {
+			delete(m.modelByToken, m.modelOrder[0])
+			m.modelOrder = m.modelOrder[1:]
+		}
+	}
+	m.modelByToken[token] = model
+}
+
+// turnModel returns the model id that answered a turn, or "" when the mock has
+// no record (a turn it never saw, or one evicted from the bound).
+func (m *mockLLM) turnModel(token string) string {
+	m.modelMu.Lock()
+	defer m.modelMu.Unlock()
+	return m.modelByToken[token]
+}
+
 // reject answers a request the mock cannot even decode.
 func (m *mockLLM) reject(w http.ResponseWriter, reason string) {
 	m.invalid.Add(1)
@@ -359,31 +404,34 @@ func (m *mockLLM) reject(w http.ResponseWriter, reason string) {
 // text deltas in uneven chunks, tool-call arguments split across chunks, the
 // finish reason, a usage chunk and [DONE]. It reports whether the client was still
 // reading.
-func (m *mockLLM) streamReply(w io.Writer, flusher http.Flusher, plan replyPlan) bool {
-	if !writeSSE(w, flusher, chunk(map[string]any{"role": "assistant"}, "")) {
+func (m *mockLLM) streamReply(w io.Writer, flusher http.Flusher, model string, plan replyPlan) bool {
+	if model == "" {
+		model = baseModel
+	}
+	if !writeSSE(w, flusher, chunk(model, map[string]any{"role": "assistant"}, "")) {
 		return false
 	}
 	for _, part := range unevenChunks(plan.Thinking, hashToken(plan.Text, plan.Stage)>>5) {
-		if !writeSSE(w, flusher, chunk(map[string]any{"reasoning_content": part}, "")) {
+		if !writeSSE(w, flusher, chunk(model, map[string]any{"reasoning_content": part}, "")) {
 			return false
 		}
 	}
 	for _, part := range unevenChunks(plan.Text, hashToken(plan.Text, plan.Stage)) {
-		if !writeSSE(w, flusher, chunk(map[string]any{"content": part}, "")) {
+		if !writeSSE(w, flusher, chunk(model, map[string]any{"content": part}, "")) {
 			return false
 		}
 	}
 	for i, call := range plan.Calls {
 		// The header and the first argument fragment normally share a chunk; the
 		// rest arrive with an index only, which is what the decoder must merge.
-		if !writeSSE(w, flusher, toolChunk(i, map[string]any{
+		if !writeSSE(w, flusher, toolChunk(model, i, map[string]any{
 			"index": i, "id": toolCallID(plan, i), "type": "function",
 			"function": map[string]any{"name": call.Name, "arguments": ""},
 		})) {
 			return false
 		}
 		for _, part := range unevenChunks(call.Arguments, hashToken(call.Arguments, i)) {
-			if !writeSSE(w, flusher, toolChunk(i, map[string]any{
+			if !writeSSE(w, flusher, toolChunk(model, i, map[string]any{
 				"index":    i,
 				"function": map[string]any{"arguments": part},
 			})) {
@@ -396,7 +444,7 @@ func (m *mockLLM) streamReply(w io.Writer, flusher http.Flusher, plan replyPlan)
 		finish = "tool_calls"
 	}
 	if !writeSSE(w, flusher, map[string]any{
-		"id": "longstay", "model": m.opts.Model,
+		"id": "longstay", "model": model,
 		"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": finish}},
 	}) {
 		return false
@@ -404,7 +452,7 @@ func (m *mockLLM) streamReply(w io.Writer, flusher http.Flusher, plan replyPlan)
 	// Usage rides its own final chunk with an empty choices array, exactly as
 	// OpenAI does when stream_options.include_usage is set.
 	if !writeSSE(w, flusher, map[string]any{
-		"id": "longstay", "model": m.opts.Model, "choices": []any{},
+		"id": "longstay", "model": model, "choices": []any{},
 		"usage": map[string]any{"prompt_tokens": 16, "completion_tokens": 8},
 	}) {
 		return false
@@ -482,21 +530,23 @@ func currentTurnDynamicIDs(body []byte) (map[string]string, error) {
 	return ids, nil
 }
 
-// chunk builds a chat.completion.chunk carrying one delta.
-func chunk(delta map[string]any, finish string) map[string]any {
+// chunk builds a chat.completion.chunk carrying one delta. model is the id the
+// request asked for, echoed back the way a real provider does — a session that
+// switched models must see the new id on the wire, not the one it booted with.
+func chunk(model string, delta map[string]any, finish string) map[string]any {
 	choice := map[string]any{"delta": delta}
 	if finish != "" {
 		choice["finish_reason"] = finish
 	}
 	return map[string]any{
-		"id": "longstay", "model": "mock-chat",
+		"id": "longstay", "model": model,
 		"choices": []any{choice},
 	}
 }
 
 // toolChunk builds a chunk carrying a tool-call fragment for call index i.
-func toolChunk(i int, call map[string]any) map[string]any {
-	return chunk(map[string]any{"tool_calls": []any{call}}, "")
+func toolChunk(model string, i int, call map[string]any) map[string]any {
+	return chunk(model, map[string]any{"tool_calls": []any{call}}, "")
 }
 
 // toolCallID derives a replayable, unique-per-conversation id for a planned call.

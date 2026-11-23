@@ -139,6 +139,8 @@ func (c *conn) handle(env envelope) {
 		c.handleSessionResume(env)
 	case methodSessionClose:
 		c.handleSessionClose(env)
+	case methodSessionSetModel:
+		c.handleSessionSetModel(env)
 	case methodPrompt:
 		c.handlePrompt(env)
 	case methodCancel:

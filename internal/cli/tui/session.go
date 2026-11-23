@@ -232,8 +232,7 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 	}
 	// Resolve the compaction plan from the model registry plus config.toml, so a
 	// resumed session picks up the current window, ladder, reserve and policy.
-	live.Compaction = run.PlanCompaction(live.ProviderName, live.Model)
-	live.ContextWindow = live.Compaction.ContextWindow
+	live.RefreshCompaction()
 	// Bind the tools' image gate to the live model rather than a snapshot, so a
 	// /model switch to a text-only model stops read/view_image handing it a
 	// picture (which the wire would reject) without rebuilding the tool set.

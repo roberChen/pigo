@@ -147,6 +147,7 @@ token 文件    server.token (0600)  token 文件  server.token (owner-only DACL
 | `session.create` | 在当前 cwd 新建会话，返回 id |
 | `session.list` | 只列出**本连接**拥有的会话 |
 | `session.resume` | attach 到已持久化会话，返回历史消息 |
+| `session.setModel` | 在**空闲**会话内切模型/供应商；重解析压缩计划并把预算返回给客户端 |
 | `session.close` | 结束会话并释放 runner |
 | `prompt` | 提交一轮，流式事件随连接返回，结果给最终文本 |
 | `cancel` | 取消当前 turn |
@@ -167,7 +168,8 @@ hostserver.Server
 ```
 
 - 每个请求在自己的 goroutine 里处理，读循环永不被长 turn 阻塞（否则 `cancel` / `permission.decide` 会死锁）。`Server.wg` 让 `Shutdown` 等这些 handler 收口。
-- 会话的 `prompt` 串行化：busy 时返回 `CodeBusy` 而不是排队。
+- 会话的 `prompt` 串行化：busy 时返回 `CodeBusy` 而不是排队。`session.setModel` 共用同一把 `sessionState.mu`：切模型要么落在两个 turn 之间，要么被 `CodeBusy` 拒绝——一个 turn 已经按旧模型的预算决定了要不要压缩，中途换模型会让"是谁在回答"和"按谁的窗口压缩"两件事对不上。
+- **切模型只换每轮的东西**：`session.setModel` 不重建会话，只替换 model / provider / stream / 凭据查找，并**按新模型重新解析压缩计划**（在会话自己的 cwd 里，因为策略命令属于那个目录）；工具、memory、插件、MCP、hook、对话全部保留，因此 SessionStart 不会重放，也没有任何资源被重开。预算（窗口 / 输入预算 / 触发点 / 触发来源）随结果一起返回：只有 host 知道分层配置（`[checkpoint]`、`[compaction]`、per-model `compact_at`、策略命令），客户端自己重算必然会和驱动它的 loop 分歧。
 - `turnId` + 递增 `seq` 标识事件。属主断开后，新连接可对**仍在运行的无属主会话**发起 `session.resume`：服务端以只读观察者身份注册，先返回上下文快照与有限事件回放，再按序发送新事件；观察者不能 prompt/cancel/decide/close。turn 结束后保留该会话供观察者再次 resume 升级为属主；`attach` 自动完成这一步后才接受下一条 prompt。最后一个观察者离开时才回收空闲会话。回放窗口溢出时 `eventsTruncated=true`，最终历史仍以落盘为准。
 - create/resume 在调用 Factory 前预留会话 ID，阻止并发 writer；运行中 close 保留 tombstone，等持久化完成再释放 agent。shutdown 则立即取消并释放资源，保证退出不被不合作 agent 卡住；写盘失败会回滚 reservation 而不是永久占用 ID。
 - 落盘复用 `internal/session` 的分支追加模型；每个 turn 结束把新产生的消息作为当前叶子的分支追加，压缩后改走 `PersistCompactedContext`。宿主重启后 `session.resume` 可以继续。

@@ -99,6 +99,10 @@ func (s *runSession) applyReload(res *run.ReloadResult) {
 	}
 	s.live.BaseURL = settings.BaseURL
 	s.live.Protocol = settings.Protocol
+	// The plan follows the model: a reload can change either the model or the
+	// [checkpoint]/[compaction] tables, and the readouts must not keep the old
+	// numbers.
+	s.live.RefreshCompaction()
 	if level := settings.Thinking; level != "" {
 		s.live.ThinkingLevel = agentcore.ThinkingLevel(level)
 	}

@@ -44,8 +44,11 @@ var allowedMessageFields = map[string]map[string]bool{
 
 // validateOptions describes what a healthy request for this harness looks like.
 type validateOptions struct {
-	// Model is the model id the host was started with.
-	Model string
+	// Models is the set of model ids a request may name: the boot model plus
+	// every model the rotation can switch a session onto. Accepting the whole
+	// rotation is the point — a session that switches models must actually put
+	// the new id on the wire, and an id outside the set is a defect.
+	Models []string
 	// APIKey is the key the host was started with; empty skips the auth check.
 	APIKey string
 	// Tools records whether the host advertised a tool set. When false, no
@@ -123,8 +126,8 @@ func validateBody(body []byte, opts validateOptions) error {
 	if err := json.Unmarshal(top["model"], &model); err != nil || model == "" {
 		return errors.New("model is missing or not a string")
 	}
-	if opts.Model != "" && model != opts.Model {
-		return fmt.Errorf("model %q, want %q", model, opts.Model)
+	if len(opts.Models) > 0 && !slices.Contains(opts.Models, model) {
+		return fmt.Errorf("model %q is not part of the long-stay rotation (%s)", model, strings.Join(opts.Models, ", "))
 	}
 	var stream bool
 	if err := json.Unmarshal(top["stream"], &stream); err != nil || !stream {
