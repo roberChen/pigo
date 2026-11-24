@@ -215,7 +215,7 @@ pigo -a -p "运行 go test ./... 并修复失败的用例"
 模型 id 通过启发式规则映射到具体 Provider（`--protocol` 显式指定时优先级最高）：
 
 1. **`--protocol`** 显式选择 → `openai`（Chat Completions，需配合 `--base-url`）、`openai/resp_api`（Responses API，需配合 `--base-url`）或 `anthropic`（默认公有 Anthropic API）。`openai` 与 `openai/chat` 等价；Responses 变体用于只实现 `POST {base_url}/responses` 的端点。
-2. **裸 Provider 名** → 视为该 Provider 的默认模型（取预置目录中该 Provider 的第一个预置 id，如 `zai` → `glm-4.7`、`deepseek` → `deepseek-v4-flash`）。`/model zai`、`pigo --model zai`、config.toml 的 `model = "zai"` 三种写法等价。
+2. **裸 Provider 名** → 视为该 Provider 的默认模型（取预置目录中该 Provider 的第一个预置 id，如 `zai` → `glm-5.4`、`deepseek` → `deepseek-flash`）。`/model zai`、`pigo --model zai`、config.toml 的 `model = "zai"` 三种写法等价。
 3. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
 4. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
 5. **`nvidia/` 前缀** → NVIDIA NIM。
@@ -232,7 +232,7 @@ deepseek-main: sk-xxx
 
 解析优先级：`--api-key` > config `api_key` > config `credential` 引用 > 环境变量。子进程（进程隔离子 Agent）默认继承**已清洗**的环境：凭证形态的变量（`*_API_KEY`/`*_TOKEN`/`*_SECRET` 等）与 `PIGO_*` 内部变量不会传给子进程。
 
-**默认模型**：在 `~/.config/pigo/config.toml` 写 `model = "zai"`（裸 Provider 名，取其默认模型）或具体 id 如 `model = "glm-4.7"`，启动即生效；命令行 `--model` 仍可临时覆盖。对应 Provider 的 API Key 环境变量需提前设好（如智谱 `ZAI_API_KEY`、DeepSeek `DEEPSEEK_API_KEY`）。缺 Key 的报错会指明应设置的环境变量名。
+**默认模型**：在 `~/.config/pigo/config.toml` 写 `model = "zai"`（裸 Provider 名，取其默认模型）或具体 id 如 `model = "glm-5.4"`，启动即生效；命令行 `--model` 仍可临时覆盖。对应 Provider 的 API Key 环境变量需提前设好（如智谱 `ZAI_API_KEY`、DeepSeek `DEEPSEEK_API_KEY`）。缺 Key 的报错会指明应设置的环境变量名。
 
 **按模型名推断的前缀对照**（仅推断能唯一确定 Provider 的前缀；`llama-*`、`qwq-*`、`gemma-*`、`mixtral-*` 等被多家网关服务的家族，以及形如 `provider/model` 的 routed id，不推断，回落到 OpenRouter 默认）：
 
@@ -646,6 +646,22 @@ fmt.Println(reply)
 - 默认档位是 80%，所以 TUI 抽屉写成 `the 80% threshold ladder`；只有预留那条线更早时才会写 `窗口减去 N 的预留`。
 - 阶梯之外还能挂一条**用户策略**（`[compaction] trigger` 或 `option compaction.trigger`）：一个 shell 命令，stdin 收到一份 JSON（上下文 token 数、输入预算、触发点、最近一次 usage，以及上游响应的状态码/头/原始负载尾部），stdout 回 `{"compact":true|false,"reason":"..."}`。它用来看懂网关自有口径（非标准 usage 字段、剩余配额头、响应体里的单请求预算）——只有用户知道怎么解释的东西。策略说"没意见"（`{"decide":false}`）、失败或超时，都由固定阈值继续决定：坏策略永远不会让一个已经超预算的上下文放弃压缩，从而把请求送去被拒。
 
+- **摘要请求本身也不会撑爆预算。** 压缩要发出去的正是"即将被摘要的那段历史"，上下文一旦已经越过输入上限（恢复了一个换了小窗口模型的会话、粘贴了超大文件、某个工具结果比窗口还大），原样发出的摘要请求会同样被拒，重试也一模一样地失败——会话从此永远超预算。因此摘要请求按 `输入预算 − 回复预留 − 固定提示词开销` 换算成字符预算，超出时**从最老的消息开始丢弃**并在正文里写明"更早的消息已因预算省略"，最新一轮完整保留（提示词本来就把权重压在这一轮）。留下一个残缺但能落地的检查点，好过永远压不下去。
+
+**pigo 内置的窗口与输入上限**（`internal/provider/limits.go`，2026-11 按各家官方文档核对；未列出的 id 回落到 Provider 默认值或保守的 128K）：
+
+| Provider | 模型 | 窗口 | 输入上限 | 依据 |
+|---|---|---|---|---|
+| `deepseek` | `deepseek-flash`、`deepseek-v4-pro` | 1M | **616K** | 1M 总量 − 384K 最大输出 |
+| `zai` | `glm-5.4`、`glm-5.3`、`glm-5.3-flash`、`glm-5.2` | 1M | 1M（输出另限 128K） | 官方模型页 |
+| `zai` | `glm-5.1`、`glm-4.7` | 200K | 200K | 同上 |
+| `kimi-coding` | `k3`、`k3.1-pro`、`kimi-for-coding` | 1,048,576 | 同窗口 | 计划 `/v1/models` 的 `context_length` |
+| `kimi-coding` | `k3-256k`、`kimi-for-coding-highspeed` | 262,144 | 同窗口 | 同上 |
+| `moonshotai` | `kimi-k3`、`kimi-k3.1-pro` | 1,048,576 | 同窗口 | 官方参数参考 |
+| `moonshotai` | `kimi-k2.6`、`kimi-k2.7-code` | 262,144 | 同窗口 | 同上 |
+
+DeepSeek 的 616K 不是猜的：官方只公布"输入 + 输出受上下文长度限制"和 `max_tokens` 最大 384K，所以输入上限取两者之差，保证"要一个满长度回答"的请求也不会越过 1M。GLM 的 1M 规则按 Provider 限定，聚合网关上的旧 GLM 仍按 200K 处理——高估窗口的代价是请求被硬拒，低估只是早一点压缩。
+
 **压缩结果直接看得见。** `compaction` 事件除了 token 与消息计数，还带着这次写出的**检查点正文**（`Summary`），三个前端都据此把"模型现在到底拿的是什么"摊开给你看，不必再去翻 `checkpoint.md`：
 
 - TUI：压缩点渲染成**无边框的上下文块**（与用户提问、思考块同一种排版），而不是一张工具卡片——检查点不是某次工具调用的输出，它本身就是此刻的对话内容，加框会让它读起来像旁边的日志条目。表头一行 `context compacted  40,000 → 6,000 tokens · summarized 9 · kept 2`，正文缩进在表头之下并**按 Markdown 渲染**（摘要是模型写的固定 Markdown 结构，`## Goal`、列表、命令块都以排版后的样子出现，与助手回复同一套渲染）；仍有行数预算，`Ctrl+O` 或点击展开；`/resume` 重放历史时也显示同一个块，`/rebuild` 成功后同样补一个指向它重排出的检查点，手动 `/compact` 完成后也补一个（压缩前是 `Compacting conversation…` 的固定 spinner，结束后同一张块给出摘要正文）。压缩失败时同样是无边框块，但正文是失败原因，并注明上下文未改动；自动压缩的重试中失败（`retrying`）不逐次插卡——它们只是中间报告，前端保持"正在压缩"指示并显示尝试次数，只有最终失败才落一张卡，免得一串相同失败把对话埋掉。
@@ -691,7 +707,7 @@ pigorc 里 `export` 的变量会写回进程环境，因此等价于在 shell �
 
 ```bash
 # 1) option：任意 config.toml 配置项（标量键后写覆盖，列表键追加）
-option model glm-4.7               # 预置 id，Provider 由 id 推断
+option model glm-5.4               # 预置 id，Provider 由 id 推断
 option model zai                   # 或裸 Provider 名 = 该 Provider 的默认模型
 option thinking-level high
 option allowed-tools read          # 列表键：重复调用即追加
@@ -811,7 +827,7 @@ option model mycorp               # 裸 Provider 名 = 它第一个注册的 id
 
 | 配置项 | config.toml | pigorc |
 |--------|-------------|--------|
-| 模型 | `model` | `option model glm-4.7`（或裸名 `option model zai`） |
+| 模型 | `model` | `option model glm-5.4`（或裸名 `option model zai`） |
 | Provider | `provider` | `option provider zai` |
 | 端点 | `base_url` | `option base-url "https://api.z.ai/api"` |
 | 协议 | `protocol` | `option protocol anthropic` |

@@ -142,10 +142,16 @@ var PresetCatalog = []PresetModel{
 	{Provider: "nvidia", ID: "google/gemma-2-9b-it", DisplayName: "Gemma 2 9B (NVIDIA)"},
 	{Provider: "nvidia", ID: "microsoft/phi-3.5-mini-instruct", DisplayName: "Phi-3.5 Mini (NVIDIA)"},
 
-	// --- DeepSeek (direct, OpenAI-compatible; ids from pi deepseek.models.ts) ---
-	{Provider: "deepseek", ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash"},
-	{Provider: "deepseek", ID: "deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro"},
+	// --- DeepSeek (direct, OpenAI-compatible) ---
+	// Per https://api-docs.deepseek.com/quick_start/pricing (2026-11): the
+	// catalog is exactly two ids. deepseek-flash is the V4.1-Flash build (vision
+	// capable) and deepseek-v4-pro the V4-Pro build (text only). The legacy
+	// `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` names are still
+	// accepted by the endpoint but are served by the retired-model mapping, so
+	// they are not offered here; a config that names one still resolves through
+	// the "deepseek" limit rule.
 	{Provider: "deepseek", ID: "deepseek-flash", DisplayName: "DeepSeek Flash"},
+	{Provider: "deepseek", ID: "deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro"},
 
 	// --- Groq (fast inference; ids from pi groq.models.ts) ---
 	{Provider: "groq", ID: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B (Groq)"},
@@ -168,23 +174,35 @@ var PresetCatalog = []PresetModel{
 	{Provider: "mistral", ID: "codestral-latest", DisplayName: "Codestral (latest)"},
 	{Provider: "mistral", ID: "devstral-medium-latest", DisplayName: "Devstral Medium (latest)"},
 
-	// --- Moonshot AI Kimi (ids from pi moonshotai.models.ts) ---
-	{Provider: "moonshotai", ID: "kimi-k2-thinking", DisplayName: "Kimi K2 Thinking"},
-	{Provider: "moonshotai", ID: "kimi-k2.6", DisplayName: "Kimi K2.6"},
+	// --- Moonshot AI Kimi (platform models; ids and windows from
+	// https://platform.kimi.ai/docs/models and the parameter reference) ---
+	// The K3 generation is 1M; the K2-derived ids are 262,144 tokens. K2 series
+	// deprecations are announced for late 2026, so the current generation leads.
+	{Provider: "moonshotai", ID: "kimi-k3.1-pro", DisplayName: "Kimi K3.1 Pro"},
 	{Provider: "moonshotai", ID: "kimi-k3", DisplayName: "Kimi K3"},
+	{Provider: "moonshotai", ID: "kimi-k2.7-code", DisplayName: "Kimi K2.7 Code"},
+	{Provider: "moonshotai", ID: "kimi-k2.6", DisplayName: "Kimi K2.6"},
 
 	// --- Kimi Coding (the coding-plan models; the plan also speaks the Anthropic
 	// wire format, but pigo drives it with the OpenAI-compatible endpoint) ---
+	// Verified against GET https://api.kimi.com/coding/v1/models, which reports
+	// each id's context_length: k3 / k3.1-pro / kimi-for-coding are 1,048,576,
+	// while k3-256k and kimi-for-coding-highspeed are 262,144.
+	{Provider: "kimi-coding", ID: "k3.1-pro", DisplayName: "Kimi K3.1 Pro (Coding)"},
 	{Provider: "kimi-coding", ID: "k3", DisplayName: "Kimi K3 (Coding)"},
-	{Provider: "kimi-coding", ID: "k3-256k", DisplayName: "Kimi K3 256K (Coding)"},
 	{Provider: "kimi-coding", ID: "kimi-for-coding", DisplayName: "Kimi for Coding"},
+	{Provider: "kimi-coding", ID: "k3-256k", DisplayName: "Kimi K3 256K (Coding)"},
+	{Provider: "kimi-coding", ID: "kimi-for-coding-highspeed", DisplayName: "Kimi for Coding Highspeed"},
 
-	// --- Z.AI GLM (ids from pi zai.models.ts; glm-5.3-flash is the vision-capable tier) ---
-	{Provider: "zai", ID: "glm-4.7", DisplayName: "GLM-4.7"},
-	{Provider: "zai", ID: "glm-5.1", DisplayName: "GLM-5.1"},
-	{Provider: "zai", ID: "glm-5.2", DisplayName: "GLM-5.2"},
+	// --- Z.AI GLM (https://docs.z.ai/guides/overview/pricing) ---
+	// GLM-5.4 / 5.3 / 5.2 are 1M-token windows with a 128K max output;
+	// GLM-5.1 and GLM-4.7 are 200K. glm-5.3-flash is the native-multimodal tier.
+	{Provider: "zai", ID: "glm-5.4", DisplayName: "GLM-5.4"},
 	{Provider: "zai", ID: "glm-5.3", DisplayName: "GLM-5.3"},
 	{Provider: "zai", ID: "glm-5.3-flash", DisplayName: "GLM-5.3 Flash"},
+	{Provider: "zai", ID: "glm-5.2", DisplayName: "GLM-5.2"},
+	{Provider: "zai", ID: "glm-5.1", DisplayName: "GLM-5.1"},
+	{Provider: "zai", ID: "glm-4.7", DisplayName: "GLM-4.7"},
 
 	// --- Fireworks (ids from pi fireworks.models.ts) ---
 	{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro (Fireworks)"},

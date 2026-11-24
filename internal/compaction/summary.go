@@ -435,6 +435,11 @@ const lastTurnDivider = "--- most recent turn below (the work continues after th
 // whole window is that turn, so a divider above it would separate nothing and is
 // omitted.
 func serializeConversation(msgs []agentcore.Message) string {
+	return strings.Join(conversationParts(msgs), "\n\n")
+}
+
+// conversationParts renders each message as one "[Role]: …" line.
+func conversationParts(msgs []agentcore.Message) []string {
 	lastUser := -1
 	for i, m := range msgs {
 		if u, ok := m.(agentcore.UserMessage); ok && textOf(u.Content) != "" {
@@ -479,7 +484,65 @@ func serializeConversation(msgs []agentcore.Message) string {
 			}
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return parts
+}
+
+// summaryPromptOverheadTokens is the token allowance for everything in the
+// summarization request that is not the transcript: the system prompt, the
+// template, the <conversation> tags and the previous-summary/instructions blocks.
+// It is deliberately generous (the templates total roughly 2–3K tokens) because
+// underestimating it would let the request itself overrun the model's ceiling.
+const summaryPromptOverheadTokens = 4096
+
+// truncatedWindowMarker is inserted where the oldest part of a transcript was
+// dropped to fit the summarization request. It is explicit — not an ellipsis —
+// because the model must know it is looking at the tail of a longer history:
+// otherwise the summary silently claims the session began mid-task.
+const truncatedWindowMarker = "[… older messages in this compaction window were omitted to fit the model's input budget; summarize what follows and state that earlier history was already folded away …]"
+
+// boundConversation fits a serialized transcript into the input budget of the
+// summarization request.
+//
+// This is the guard against compaction itself exhausting the context. The
+// transcript is what the request carries, so when the context has already
+// overrun the model's input ceiling — a resumed session whose model shrank, a
+// single oversized paste, a tool result larger than the window — a faithful
+// summarization request would be rejected by the provider and every retry would
+// fail the same way, leaving the session permanently over budget. Dropping the
+// OLDEST messages keeps the newest turn (which the prompt weights most) and lets
+// the rest be summarized; a partial checkpoint is strictly better than none.
+//
+// budgetChars <= 0 means "no bound" (the model's limits are unknown), which is
+// the previous behavior.
+func boundConversation(msgs []agentcore.Message, budgetChars int) string {
+	parts := conversationParts(msgs)
+	joined := strings.Join(parts, "\n\n")
+	if budgetChars <= 0 || len(joined) <= budgetChars {
+		return joined
+	}
+	marker := "\n\n" + truncatedWindowMarker + "\n\n"
+	// Keep as much of the tail as the budget allows, at message boundaries, so a
+	// single line is never cut in half.
+	kept, used := 0, len(marker)
+	if used > budgetChars {
+		// Not even the marker fits: report truncation with a bare sentence.
+		return strings.TrimSpace(truncatedWindowMarker)
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		cost := len(parts[i])
+		if i != len(parts)-1 {
+			cost += 2 // the "\n\n" separator
+		}
+		if used+cost > budgetChars {
+			break
+		}
+		used += cost
+		kept++
+	}
+	if kept == len(parts) {
+		return joined
+	}
+	return strings.TrimSpace(marker) + "\n\n" + strings.Join(parts[len(parts)-kept:], "\n\n")
 }
 
 // formatToolCall renders a tool call as name(key=value, ...) with each value
@@ -530,6 +593,10 @@ type SummaryOutput struct {
 // the assistant response's text blocks. A terminal error/aborted response is
 // surfaced as an error.
 //
+// inputBudgetTokens is the model's input ceiling (see InputBudget): the request
+// is trimmed to fit it, so a context that has already overrun the ceiling is
+// still summarizable. 0 means "unknown, do not trim".
+//
 // It is the summary-only entry point: the user-instruction digest, when the
 // model emits one, is stripped from the returned text and dropped. Callers that
 // keep a checkpoint use GenerateSummaryOutput instead.
@@ -539,10 +606,11 @@ func GenerateSummary(
 	model provider.Model,
 	msgs []agentcore.Message,
 	reserveTokens int,
+	inputBudgetTokens int,
 	previousSummary string,
 	cfg provider.StreamConfig,
 ) (string, error) {
-	out, err := GenerateSummaryOutput(ctx, stream, model, msgs, reserveTokens, previousSummary, nil, cfg)
+	out, err := GenerateSummaryOutput(ctx, stream, model, msgs, reserveTokens, inputBudgetTokens, previousSummary, nil, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -562,6 +630,7 @@ func GenerateSummaryOutput(
 	model provider.Model,
 	msgs []agentcore.Message,
 	reserveTokens int,
+	inputBudgetTokens int,
 	previousSummary string,
 	prevInstructions *agentcore.UserInstructionBlock,
 	cfg provider.StreamConfig,
@@ -572,7 +641,26 @@ func GenerateSummaryOutput(
 	}
 	base += PromptInstructionsAddendum
 
-	conversation := serializeConversation(msgs)
+	// Bound the summary output to min(0.8*reserveTokens, model max output).
+	maxTokens := (reserveTokens * 8) / 10
+	if model.MaxOutputTokens > 0 && model.MaxOutputTokens < maxTokens {
+		maxTokens = model.MaxOutputTokens
+	}
+
+	// The transcript is the request's payload, so it has to fit what is left of
+	// the input budget after the reply allowance and the fixed prompt. A negative
+	// value means "unbounded" (unknown limits); zero means "only the truncation
+	// marker fits", which boundConversation handles.
+	budgetChars := -1
+	if inputBudgetTokens > 0 {
+		promptBudget := inputBudgetTokens - maxTokens - summaryPromptOverheadTokens
+		if promptBudget < 0 {
+			promptBudget = 0
+		}
+		budgetChars = promptBudget * charsPerToken
+	}
+	conversation := boundConversation(msgs, budgetChars)
+
 	var b strings.Builder
 	b.WriteString("<conversation>\n")
 	b.WriteString(conversation)
@@ -594,11 +682,6 @@ func GenerateSummaryOutput(
 		Content:   agentcore.ContentList{agentcore.NewTextContent(b.String())},
 	}
 
-	// Bound the summary output to min(0.8*reserveTokens, model max output).
-	maxTokens := (reserveTokens * 8) / 10
-	if model.MaxOutputTokens > 0 && model.MaxOutputTokens < maxTokens {
-		maxTokens = model.MaxOutputTokens
-	}
 	extra := map[string]any{}
 	for k, v := range cfg.Extra {
 		extra[k] = v

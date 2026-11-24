@@ -121,7 +121,7 @@ func TestGenerateSummaryFirstTime(t *testing.T) {
 	model := provider.Model{ID: "m", MaxOutputTokens: 8000}
 	msgs := []agentcore.Message{userMsg("please do X")}
 
-	got, err := GenerateSummary(context.Background(), stream, model, msgs, 16384, "", provider.StreamConfig{})
+	got, err := GenerateSummary(context.Background(), stream, model, msgs, 16384, 0, "", provider.StreamConfig{})
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestGenerateSummaryUpdateUsesPrevious(t *testing.T) {
 	model := provider.Model{ID: "m"}
 	msgs := []agentcore.Message{userMsg("more work")}
 
-	_, err := GenerateSummary(context.Background(), stream, model, msgs, 16384, "PRIOR SUMMARY", provider.StreamConfig{})
+	_, err := GenerateSummary(context.Background(), stream, model, msgs, 16384, 0, "PRIOR SUMMARY", provider.StreamConfig{})
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestGenerateSummaryMaxTokensCap(t *testing.T) {
 	}
 	// 0.8 * 16384 = 13107, but model max output is 5000 -> cap at 5000.
 	model := provider.Model{ID: "m", MaxOutputTokens: 5000}
-	_, err := GenerateSummary(context.Background(), stream, model, []agentcore.Message{userMsg("x")}, 16384, "", provider.StreamConfig{})
+	_, err := GenerateSummary(context.Background(), stream, model, []agentcore.Message{userMsg("x")}, 16384, 0, "", provider.StreamConfig{})
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestGenerateSummaryMaxTokensCap(t *testing.T) {
 func TestGenerateSummaryErrorStopReason(t *testing.T) {
 	errMsg := agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, StopReason: agentcore.StopReasonError, ErrorMessage: "boom"}
 	stream := fakeStreamFn(errMsg, nil)
-	_, err := GenerateSummary(context.Background(), stream, provider.Model{ID: "m"}, []agentcore.Message{userMsg("x")}, 16384, "", provider.StreamConfig{})
+	_, err := GenerateSummary(context.Background(), stream, provider.Model{ID: "m"}, []agentcore.Message{userMsg("x")}, 16384, 0, "", provider.StreamConfig{})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected error containing 'boom', got %v", err)
 	}

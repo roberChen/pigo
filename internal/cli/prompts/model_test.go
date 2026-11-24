@@ -25,14 +25,14 @@ func TestModelCommandSwitchesToBareProviderName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveOutcome /model zai: %v", err)
 	}
-	if live.Model != "glm-4.7" {
-		t.Errorf("live.Model = %q, want glm-4.7", live.Model)
+	if live.Model != "glm-5.4" {
+		t.Errorf("live.Model = %q, want glm-5.4", live.Model)
 	}
 	if live.ProviderName != "zai" {
 		t.Errorf("live.ProviderName = %q, want zai", live.ProviderName)
 	}
-	if !strings.Contains(out.Message, "glm-4.7") || !strings.Contains(out.Message, "zai") {
-		t.Errorf("message = %q, want it to mention glm-4.7 (zai)", out.Message)
+	if !strings.Contains(out.Message, "glm-5.4") || !strings.Contains(out.Message, "zai") {
+		t.Errorf("message = %q, want it to mention glm-5.4 (zai)", out.Message)
 	}
 }
 

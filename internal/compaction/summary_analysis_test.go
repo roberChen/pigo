@@ -113,7 +113,7 @@ func TestGenerateSummaryStripsAnalysis(t *testing.T) {
 
 	got, err := GenerateSummary(context.Background(), stream,
 		provider.Model{ID: "m", MaxOutputTokens: 8000},
-		[]agentcore.Message{userMsg("do X")}, 16384, "", provider.StreamConfig{})
+		[]agentcore.Message{userMsg("do X")}, 16384, 0, "", provider.StreamConfig{})
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
 	}

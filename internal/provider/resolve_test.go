@@ -303,10 +303,10 @@ func TestCanonicalizeModelBareProviderName(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"zai", "glm-4.7"},
-		{"ZAI", "glm-4.7"},
-		{"  deepseek  ", "deepseek-v4-flash"},
-		{"glm-4.7", "glm-4.7"},
+		{"zai", "glm-5.4"},
+		{"ZAI", "glm-5.4"},
+		{"  deepseek  ", "deepseek-flash"},
+		{"glm-5.4", "glm-5.4"},
 		{"openai/gpt-4o", "openai/gpt-4o"},
 		{"not-a-provider", "not-a-provider"},
 		{"", ""},
@@ -330,8 +330,8 @@ func TestResolveProviderBareProviderNameUsesDefaultModel(t *testing.T) {
 		t.Errorf("provider name = %q, want %q", name, "zai")
 	}
 	models := prov.Models()
-	if len(models) != 1 || models[0].ID != "glm-4.7" || models[0].Provider != "zai" {
-		t.Errorf("models = %+v, want one zai/glm-4.7 entry", models)
+	if len(models) != 1 || models[0].ID != "glm-5.4" || models[0].Provider != "zai" {
+		t.Errorf("models = %+v, want one zai/glm-5.4 entry", models)
 	}
 }
 

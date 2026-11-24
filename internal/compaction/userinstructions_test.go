@@ -360,7 +360,7 @@ func TestPromptInstructionsAddendumPresent(t *testing.T) {
 	var captured provider.LlmContext
 	stream := fakeStreamFn(assistantText("## Goal\nx"), &captured)
 	_, err := GenerateSummaryOutput(context.Background(), stream, provider.Model{ID: "m"},
-		[]agentcore.Message{userMsg("x")}, 16384, "", nil, provider.StreamConfig{})
+		[]agentcore.Message{userMsg("x")}, 16384, 0, "", nil, provider.StreamConfig{})
 	if err != nil {
 		t.Fatalf("GenerateSummaryOutput: %v", err)
 	}

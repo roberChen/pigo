@@ -86,23 +86,52 @@ const (
 // is deliberately modest: overestimating causes rejected requests.
 const DefaultContextWindow = 128_000
 
+// deepseekMaxOutput is the largest completion DeepSeek accepts in one request
+// (max_tokens must be 1..393216). The vendor publishes no separate input cap —
+// it only says "input + generated is limited by the context length" — so the
+// input ceiling is derived from the two published numbers rather than guessed.
+const deepseekMaxOutput = 384_000
+
+// deepseekMaxInput is the input a DeepSeek request may carry while still leaving
+// room for the model's largest legal completion: 1M combined − 384K output.
+// Compacting later than this would let a request that asks for a full-length
+// answer overrun the combined window and be rejected.
+const deepseekMaxInput = 1_000_000 - deepseekMaxOutput // 616_000
+
+// kimiK2Window is the 262,144-token window of the K2-derived Kimi models
+// (kimi-k2.6, kimi-k2.7-code, k3-256k, kimi-for-coding-highspeed). The K3 / K3.1
+// generation raised it to 1M; both numbers come from the vendor's model list and
+// its parameter reference.
+const kimiK2Window = 262_144
+
+// kimiK3Window is the 1,048,576-token window the K3 / K3.1 series (and the
+// `kimi-for-coding` alias, currently served by a K3-generation model) publish.
+const kimiK3Window = 1_048_576
+
 // providerLimits is the default a built-in provider's models are assumed to
 // carry. Values are the conservative reading of each vendor's published limit.
 var providerLimits = map[string]ModelLimits{
 	"anthropic": {ContextWindow: 200_000},
 	"openai":    {ContextWindow: 272_000}, // 400K combined; 272K is the input cap
 	"google":    {ContextWindow: 1_000_000},
-	// DeepSeek advertises 1M combined (input + output) but accepts far less
-	// input; the split is the reason this field exists at all.
-	"deepseek": {ContextWindow: 1_000_000, MaxInputTokens: 512_000},
+	// DeepSeek advertises 1M combined (input + output) and a 384K maximum
+	// output; the split is the reason this field exists at all. A request that
+	// asks for the largest legal completion must leave 384K free, so the input
+	// it may carry is 616K (see deepseekMaxInput).
+	"deepseek": {ContextWindow: 1_000_000, MaxInputTokens: deepseekMaxInput},
 	"xai":      {ContextWindow: 256_000},
 	"groq":     {ContextWindow: 128_000},
 	"cerebras": {ContextWindow: 128_000},
 	"mistral":  {ContextWindow: 128_000},
-	"zai":      {ContextWindow: 200_000},
-	// Kimi's coding plans publish a 256K window.
-	"kimi-coding": {ContextWindow: 256_000},
-	"moonshotai":  {ContextWindow: 256_000},
+	// GLM spans generations with different windows (5.4/5.3/5.2 are 1M,
+	// 5.1/5/4.7 are 200K), so the provider default is the smaller of the two and
+	// the 1M families are named by a limit rule below.
+	"zai": {ContextWindow: 200_000},
+	// The Kimi coding plan mixes 1M K3/K3.1 models with 262,144-token K2-derived
+	// ones (k3-256k, kimi-for-coding-highspeed); the default stays at the smaller
+	// figure and the 1M ids are named by a rule.
+	"kimi-coding": {ContextWindow: kimiK2Window},
+	"moonshotai":  {ContextWindow: kimiK2Window},
 	"minimax":     {ContextWindow: 200_000},
 	"xiaomi":      {ContextWindow: 128_000},
 	"nvidia":      {ContextWindow: 128_000},
@@ -139,9 +168,33 @@ var builtinLimitRules = []limitRule{
 	// Gemini's rolling aliases and 1.5/2.x/3.x families are all 1M.
 	{provider: "", contains: "gemini", limits: ModelLimits{ContextWindow: 1_000_000}},
 	{provider: "", contains: "gpt-", limits: ModelLimits{ContextWindow: 272_000, MaxInputTokens: 272_000}},
-	{provider: "", contains: "deepseek", limits: ModelLimits{ContextWindow: 1_000_000, MaxInputTokens: 512_000}},
-	{provider: "", contains: "kimi", limits: ModelLimits{ContextWindow: 256_000}},
+	// DeepSeek: 1M combined, 384K max output, so 616K of input.
+	{provider: "", contains: "deepseek", limits: ModelLimits{ContextWindow: 1_000_000, MaxInputTokens: deepseekMaxInput}},
+
+	// Kimi. The K3 / K3.1 generation carries a 1,048,576-token window; the
+	// K2-derived ids (kimi-k2.6, kimi-k2.7-code, k3-256k,
+	// kimi-for-coding-highspeed) stay at 262,144. "k3-256k" has to be named
+	// before the generic "k3" rule, and the bare "k3" id only exists on the
+	// coding plan, so those rules are provider-scoped.
+	{provider: "kimi-coding", contains: "k3-256k", limits: ModelLimits{ContextWindow: kimiK2Window}},
+	// "kimi-for-coding-highspeed" contains "kimi-for-coding", so the narrower id
+	// is listed first: it is still the 262K K2-derived model, while the plain
+	// alias now serves a 1M K3-generation model (verified against the plan's
+	// /v1/models response on 2026-11).
+	{provider: "kimi-coding", contains: "kimi-for-coding-highspeed", limits: ModelLimits{ContextWindow: kimiK2Window}},
+	{provider: "kimi-coding", contains: "kimi-for-coding", limits: ModelLimits{ContextWindow: kimiK3Window}},
+	{provider: "kimi-coding", contains: "k3", limits: ModelLimits{ContextWindow: kimiK3Window}},
+	{provider: "", contains: "kimi-k3", limits: ModelLimits{ContextWindow: kimiK3Window}},
+	{provider: "", contains: "kimi", limits: ModelLimits{ContextWindow: kimiK2Window}},
+
+	// GLM. The 5.2/5.3/5.4 generation is 1M; GLM-5.1 and older are 200K (the zai
+	// provider default). Named per provider so an aggregator's copy of an older
+	// GLM keeps the conservative 200K instead of inheriting 1M by id substring.
+	{provider: "zai", contains: "glm-5.4", limits: ModelLimits{ContextWindow: 1_000_000}},
+	{provider: "zai", contains: "glm-5.3", limits: ModelLimits{ContextWindow: 1_000_000}},
+	{provider: "zai", contains: "glm-5.2", limits: ModelLimits{ContextWindow: 1_000_000}},
 	{provider: "", contains: "glm", limits: ModelLimits{ContextWindow: 200_000}},
+
 	{provider: "", contains: "qwen", limits: ModelLimits{ContextWindow: 128_000}},
 	{provider: "", contains: "llama", limits: ModelLimits{ContextWindow: 128_000}},
 	{provider: "", contains: "grok", limits: ModelLimits{ContextWindow: 256_000}},

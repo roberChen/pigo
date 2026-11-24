@@ -101,7 +101,8 @@ func Compact(
 	}
 	readFiles, modifiedFiles := computeFileLists(ops)
 
-	out, err := GenerateSummaryOutput(ctx, stream, model, toSummarize, settings.ReserveTokens, previousSummary, prevInstructions, cfg)
+	out, err := GenerateSummaryOutput(ctx, stream, model, toSummarize, settings.ReserveTokens,
+		InputBudget(model.ContextWindow, settings), previousSummary, prevInstructions, cfg)
 	if err != nil {
 		return nil, err
 	}

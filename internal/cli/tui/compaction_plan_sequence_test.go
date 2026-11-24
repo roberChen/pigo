@@ -21,16 +21,17 @@ import (
 )
 
 // planModelRotation is the order the test switches through. The budgets must
-// genuinely differ for the assertions to mean anything: deepseek-v4-flash
-// advertises a 1M window but only a 512K input ceiling (so the ladder has to be
-// computed off the ceiling), glm-4.7 is 200K with no ceiling, and
-// openrouter/free falls back to the conservative 128K. The guard below fails the
-// test rather than letting a collapsed rotation pass silently.
+// genuinely differ for the assertions to mean anything: deepseek-flash
+// advertises a 1M window but only a 616K input ceiling (so the ladder has to be
+// computed off the ceiling), glm-5.1 is 200K with no ceiling, glm-5.3 is 1M with
+// no ceiling, and openrouter/free falls back to the conservative 128K. The guard
+// below fails the test rather than letting a collapsed rotation pass silently.
 var planModelRotation = []struct{ provider, model string }{
-	{"zai", "glm-4.7"},
-	{"deepseek", "deepseek-v4-flash"},
+	{"zai", "glm-5.1"},
+	{"deepseek", "deepseek-flash"},
+	{"zai", "glm-5.3"},
 	{"openrouter", "openrouter/free"},
-	{"zai", "glm-4.7"},
+	{"zai", "glm-5.1"},
 }
 
 // TestCompactionPlanFollowsModelAcrossManySwitches switches models repeatedly
@@ -124,12 +125,12 @@ func TestCompactionPlanCarriesThePolicyAcrossSwitches(t *testing.T) {
 		t.Errorf("PolicyCommand = %q, want the configured command", first.PolicyCommand)
 	}
 
-	live.Model = "glm-4.7"
+	live.Model = "glm-5.1"
 	live.ProviderName = "zai"
 	live.RefreshCompaction()
 	next := live.Compaction
-	if next.Model != "glm-4.7" || next.ProviderName != "zai" {
-		t.Fatalf("plan resolved for (%q, %q), want (glm-4.7, zai)", next.Model, next.ProviderName)
+	if next.Model != "glm-5.1" || next.ProviderName != "zai" {
+		t.Fatalf("plan resolved for (%q, %q), want (glm-5.1, zai)", next.Model, next.ProviderName)
 	}
 	if next.Trigger == nil || next.ResponseMeta == nil {
 		t.Fatal("the policy was dropped by a refresh")

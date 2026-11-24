@@ -50,13 +50,13 @@ func TestInputBudgetPrefersTheInputCeiling(t *testing.T) {
 func TestExplainTriggerNamesTheDecidingCap(t *testing.T) {
 	// window=1M but the model only accepts 512K of input: the ladder must be a
 	// share of the input budget, never of the combined window.
-	deepseek := CompactionSettings{
+	ceiling := CompactionSettings{
 		Enabled:         true,
 		ReserveTokens:   16384,
 		MaxInputTokens:  512_000,
 		TriggerFraction: 0.80,
 	}
-	d := ExplainTrigger(1_000_000, deepseek)
+	d := ExplainTrigger(1_000_000, ceiling)
 	if d.Budget != 512_000 {
 		t.Errorf("budget = %d, want the 512000 input ceiling", d.Budget)
 	}
